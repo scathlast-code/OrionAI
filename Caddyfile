@@ -1,0 +1,16 @@
+# DOMAIN задається в .env, наприклад DOMAIN=mybots.duckdns.org
+{$DOMAIN} {
+	# /ai — ШІ-бот, /hub — 🧭 головний бот
+	handle_path /ai/* {
+		reverse_proxy ai:8000
+	}
+	handle_path /hub/* {
+		reverse_proxy hub:8080
+	}
+	# Сторінка політики конфіденційності — Meta вимагає її посилання, щоб увімкнути режим Live
+	handle /privacy {
+		header Content-Type "text/html; charset=utf-8"
+		respond `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width"><title>Конфіденційність</title><body style="font-family:sans-serif;max-width:640px;margin:2em auto;line-height:1.5"><h1>Політика конфіденційності</h1><p>Це особисті боти власника. Вони відповідають лише власнику та людям, яких він сам запросив.</p><p>Повідомлення зберігаються на сервері власника, щоб боти пам'ятали розмову, і не передаються третім особам, крім сервісів штучного інтелекту, які генерують відповіді.</p><p>Щоб видалити свої дані, зверніться до власника бота.</p></body>` 200
+	}
+	respond "Боти працюють." 200
+}

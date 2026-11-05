@@ -1,0 +1,37 @@
+# Запуск обох ботів (ШІ-бот і 🧭 головний бот) у Telegram на одному сервері.
+#   docker compose up -d --build        — запустити або оновити після зміни коду
+#   docker compose logs -f ai           — журнал ШІ-бота (hub — головного)
+services:
+  ai:
+    build: .
+    command: python bot.py
+    env_file: .env
+    environment:
+      PORT: "8000"
+    volumes:
+      - ai-data:/data
+    restart: always
+
+  hub:
+    build: .
+    command: python manager.py
+    env_file: .env
+    environment:
+      PORT: "8080"
+    volumes:
+      - hub-data:/data
+    restart: always
+
+  caddy:  # HTTPS-адреса для обох ботів (сертифікат Let's Encrypt — сам і безкоштовно)
+    image: caddy:2
+    env_file: .env
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    restart: always
+
+volumes:
+  ai-data:
+  hub-data:
+  caddy-data:

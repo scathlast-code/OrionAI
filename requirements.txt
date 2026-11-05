@@ -1,0 +1,7 @@
+httpx==0.28.1
+mcp==2.3.0
+python-telegram-bot==22.8
+uvicorn==0.54.0
+pillow==12.3.0
+edge-tts==7.3.1
+cryptography>=44
