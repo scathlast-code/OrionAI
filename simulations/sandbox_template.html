@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<title>OrionAI — 🧪 Пісочниця</title>
+<style>
+:root{--bg:#0b1219;--panel:#111c26;--chat:#0e1621;--bot:#182533;--me:#2b5278;--btn:#1f3346;--btnh:#2a4560;--txt:#e9f1f7;--mut:#8aa0b2;--acc:#6ec1ff;--ok:#7fdca4}
+*{box-sizing:border-box}html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--txt);font:15px/1.42 -apple-system,system-ui,"Segoe UI",Roboto,sans-serif;display:flex;justify-content:center}
+.wrap{display:flex;gap:22px;width:100%;max-width:1180px;padding:22px;align-items:flex-start}
+aside{flex:0 0 330px;position:sticky;top:22px}
+aside h1{font-size:21px;margin:0 0 4px;letter-spacing:-.3px}aside h1 em{font-style:normal;color:var(--acc)}
+aside p{color:var(--mut);margin:6px 0 14px;font-size:13.5px}
+.grp{background:var(--panel);border:1px solid #1d2d3b;border-radius:14px;padding:12px;margin-bottom:12px}
+.grp h2{font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--mut);margin:2px 4px 8px;font-weight:600}
+.sc{display:block;width:100%;text-align:left;background:#16283a;border:1px solid #23394e;color:var(--txt);border-radius:10px;padding:9px 11px;margin:6px 0;cursor:pointer;font:inherit;font-size:14px}
+.sc:hover{background:#1d3550}.sc small{display:block;color:var(--mut);font-size:12px;margin-top:2px}
+.old a{display:block;color:var(--acc);text-decoration:none;padding:6px 4px;font-size:14px}.old a:hover{text-decoration:underline}
+.phone{flex:1;max-width:560px;min-width:0;background:var(--chat);border:1px solid #1d2d3b;border-radius:22px;overflow:hidden;display:flex;flex-direction:column;height:calc(100vh - 44px);min-height:560px}
+.top{display:flex;align-items:center;gap:11px;padding:11px 15px;background:#17212b;border-bottom:1px solid #0a1016}
+.ava{width:38px;height:38px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#8fe3ff,#3a6df0 60%,#24206b);display:grid;place-items:center;font-weight:700;color:#fff;font-size:14px}
+.top b{display:block}.top span{color:var(--mut);font-size:12.5px}
+.feed{flex:1;overflow-y:auto;padding:14px 12px 6px;background:var(--chat) radial-gradient(#13202c 1px,transparent 1px) 0 0/22px 22px}
+.msg{max-width:88%;margin:6px 0;display:flex;flex-direction:column}
+.msg.me{margin-left:auto;align-items:flex-end}
+.bub{background:var(--bot);padding:8px 11px 7px;border-radius:13px 13px 13px 4px;white-space:pre-wrap;word-wrap:break-word;overflow-wrap:anywhere}
+.me .bub{background:var(--me);border-radius:13px 13px 4px 13px}
+.bub code{background:#0f1a24;padding:0 4px;border-radius:4px;font-size:13px}.bub a{color:var(--acc)}
+.kb{display:flex;flex-direction:column;gap:4px;margin-top:4px}
+.kr{display:flex;gap:4px}.kr button{flex:1;min-width:0;background:var(--btn);color:var(--txt);border:0;border-radius:8px;padding:8px 6px;font:inherit;font-size:13.5px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kr button:hover{background:var(--btnh)}.kr button.url::after{content:" ↗";color:var(--mut)}
+.kr button.dim{opacity:.85}
+.compose{display:flex;gap:8px;padding:9px 10px;background:#17212b;border-top:1px solid #0a1016}
+.compose input{flex:1;background:#0e1621;border:1px solid #243444;color:var(--txt);border-radius:20px;padding:10px 14px;font:inherit;min-width:0}
+.compose button{background:var(--acc);color:#052033;border:0;border-radius:20px;padding:0 16px;font-weight:700;cursor:pointer}
+.toast{position:fixed;left:50%;bottom:34px;transform:translateX(-50%) translateY(20px);background:#22313f;border:1px solid #35506a;color:var(--txt);padding:10px 16px;border-radius:12px;max-width:min(520px,92vw);opacity:0;transition:.25s;pointer-events:none;font-size:14px;z-index:9}
+.toast.on{opacity:1;transform:translateX(-50%)}
+.impbtn{margin-left:auto;background:#22313f;border:1px solid #35506a;color:var(--txt);border-radius:16px;padding:6px 11px;cursor:pointer;font:inherit;font-size:13px}
+.impbtn.on{background:#f5c451;color:#2b2105;border-color:#f5c451}
+body.marking .kr button,body.marking .bub{outline:1px dashed #f5c451;outline-offset:1px;cursor:crosshair}
+.dlg{position:fixed;inset:0;background:#0009;display:none;align-items:center;justify-content:center;z-index:20;padding:16px}
+.dlg.on{display:flex}.dlg>div{background:#17212b;border:1px solid #2c4054;border-radius:16px;padding:16px;width:min(460px,100%)}
+.dlg h3{margin:0 0 8px;font-size:16px}.dlg p{color:var(--mut);font-size:13px;margin:0 0 10px;white-space:pre-wrap}
+.dlg textarea{width:100%;min-height:80px;background:#0e1621;color:var(--txt);border:1px solid #2c4054;border-radius:10px;padding:9px;font:inherit}
+.dlg .acts{display:flex;gap:8px;justify-content:flex-end;margin-top:10px;flex-wrap:wrap}.dlg .acts button{border:0;border-radius:10px;padding:9px 13px;font:inherit;cursor:pointer;background:#22313f;color:var(--txt)}
+.dlg .acts .pri{background:var(--acc);color:#052033;font-weight:700}
+.marks{font-size:13px;color:var(--mut)}.marks li{margin:4px 0}
+.sys{text-align:center;color:var(--mut);font-size:12.5px;margin:10px 0}
+@media(max-width:860px){.wrap{flex-direction:column;padding:10px;gap:10px}aside{position:static;flex:none;width:100%}aside p{display:none}
+.grp{padding:8px;margin-bottom:8px}.grp h2{margin:0 2px 4px}.grp .sc{display:inline-block;width:auto;margin:3px 2px;padding:7px 10px;font-size:13px}.sc small{display:none}
+.old a{display:inline-block;padding:4px 6px;font-size:13px}.phone{max-width:none;width:100%;height:82vh;border-radius:16px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<aside>
+  <h1>✦ <em>OrionAI</em> · 🧪 пісочниця</h1>
+  <p>Навчання й перевірка функцій без ризику. Екрани й кнопки зняті зі <b>справжнього коду</b> бота на демо-даних. Нічого не зберігається: після виходу все як було. Рахуються лише анонімні цифри використання.</p>
+  <div class="grp"><h2>Відкрити</h2>
+    <button class="sc" data-open="m:home">🏠 Головне меню<small>категорія «📰 Медіа» — друга згори</small></button>
+    <button class="sc" data-open="m:pl:news">📰 Ньюзрум<small>чернетки, зведення, параметри</small></button>
+    <button class="sc" data-open="m:pl:news:D">🔎 Знайти й написати<small>🔥 гарячі, ♾ вічні, 🌶 провокації, блоги, теми</small></button>
+    <button class="sc" data-open="m:pl:news:L">📋 Списки каналів і чатів<small>завантаження, сортування, редагування</small></button>
+    <button class="sc" data-open="m:pl:stk">🧷 Стікери<small>архіви, історія, стеження</small></button>
+    <button class="sc" data-open="m:utm">🔗 UTM-мітки<small>реєстр за 3 дні, статистика, резервні формати</small></button>
+    <button class="sc" data-open="m:rm">⚡ Режим роботи<small>сон, будильник, нагадування про Oracle</small></button>
+    <button class="sc" data-open="m:cl">🛰 Сервери<small>основний і резервний</small></button>
+    <button class="sc" data-open="m:lnk">🔗 Посилання<small>Railway, GitHub, Oracle</small></button>
+    <button class="sc" data-open="m:ol">🦙 Моя Ollama<small>своя модель на сервері</small></button>
+    <button class="sc" data-open="m:pl:hub">🧭 Мої боти<small>вбудований головний бот</small></button>
+    <button class="sc" data-open="help:main">❓ Довідка<small>усі розділи</small></button>
+  </div>
+  <div class="grp"><h2>Застосунок</h2>
+    <a class="sc" href="miniapp_preview.html" style="display:block;text-decoration:none">🧩 Як це виглядає в Mini App<small>ті самі екрани й функції, інший вигляд</small></a>
+  </div>
+  <div class="grp"><h2>Сценарії</h2>
+    <button class="sc" data-scene="utm">🔗 /utm з посиланням<small>бот пропонує теги на вибір</small></button>
+    <button class="sc" data-scene="utm9">✅ Обрати тег → 9 міток<small>кожна в окремому блоці коду</small></button>
+    <button class="sc" data-scene="forward">↪️ Переслати новину<small>режим прийому → чернетка з кнопками</small></button>
+    <button class="sc" data-scene="update">🔁 Знайшлось оновлення нашої новини<small>усі наші згадки й оновлення історії</small></button>
+    <button class="sc" data-scene="tag">🏷 Прийшов дайджест тегу<small>заголовки, опис, посилання, дії ⋯</small></button>
+    <button class="sc" data-scene="file">📎 Надіслати Excel зі списком каналів<small>імпорт у списки</small></button>
+    <button class="sc" data-scene="channel">📡 Бота додали в групу<small>він сам пропонує моніторинг</small></button>
+    <button class="sc" data-scene="sticker">🐱 Надіслати стікер<small>бот пропонує завантажити пакет</small></button>
+    <button class="sc" data-clear="1">🧹 Очистити чат</button>
+  </div>
+</aside>
+<section class="phone">
+  <div class="top"><div class="ava">AI</div><div><b>OrionAI</b><span>бот · 🧪 пісочниця</span></div><button class="impbtn" id="impbtn" title="Позначити для «Покращити»">💡 <span id="impn" style="text-decoration:underline"></span></button></div>
+  <div class="feed" id="feed"></div>
+  <form class="compose" id="form"><input id="inp" placeholder="Напишіть повідомлення…" autocomplete="off"><button>➤</button></form>
+</section>
+</div>
+<div class="toast" id="toast"></div>
+<div class="dlg" id="dlg"><div><h3>💡 Додати в «Покращити»</h3><p id="dlgwhat"></p>
+<textarea id="dlgnote" placeholder="Що не так і що запропонувати (необовʼязково)"></textarea>
+<div class="acts"><button onclick="closeDlg()">Скасувати</button><button class="pri" onclick="saveMark()">Додати</button></div></div></div>
+<div class="dlg" id="dlglist"><div><h3>💡 Позначки цієї сесії</h3><ol class="marks" id="marklist"></ol>
+<p id="sendinfo"></p><div class="acts"><button onclick="document.getElementById('dlglist').classList.remove('on')">Закрити</button>
+<button onclick="copyMarks()">📋 Скопіювати</button><button class="pri" id="sendbtn" onclick="sendMarks()">📤 Надіслати в «Покращити»</button></div></div></div>
+<script>
+const DATA = __DATA__;
+const S = DATA.screens, SC = DATA.scenes;
+const feed = document.getElementById('feed'), toastEl = document.getElementById('toast');
+let hist = [], pos = -1, menuMsg = null, waiting = null, folded = {};
+
+const ACT = DATA.actions || {
+  ok:'✅ Схвалено. Якщо ввімкнено «Одразу» — бот одразу опублікує в канал.', no:'❌ Чернетку відхилено.', re:'↩️ Повернуто в чернетки.',
+  rw:'🔁 Бот перепише новину й надішле нову версію окремим повідомленням; стара — у «🕘 Версії».',
+  chk:'🔎 Бот шукає в інтернеті й додає до чернетки звіт: ✅ підтверджено / ⚠️ не знайдено / ❌ суперечить.',
+  pub:'📤 Опубліковано в канал GreenPost 🌿 (лише схвалене).', txt:'📋 Бот надсилає чистий текст окремим повідомленням — утримуйте, щоб скопіювати.',
+  lenset:'📏 Бот підганяє текст до точної кількості символів (до 5 спроб) і перевіряє сам.', dgo:'🧾 Бот складає зведення за добу — прийде чернеткою.',
+  intake:'🟢 Режим прийому ввімкнено: усе, що пересилаєте, йде в ньюзрум.', Lnow:'🔄 Бот перевіряє джерела зараз і повідомляє, скільки нових дописів узято.',
+  Enow:'🔄 Перевіряю це джерело зараз…', Lexp:'📥 Бот надсилає два файли: CSV для Excel і TXT — їх можна відредагувати й завантажити назад.',
+  Lsync:'🔄 Підписки акаунта синхронізовано.', Lmtre:'🔌 Підключаюсь до службового акаунта…', Etog:'🟢/⚪️ Джерело увімкнено / вимкнено.',
+  Ltog:'Список увімкнено / вимкнено.', Emv:'↕️ Джерело переміщено (⏫ на верх · ⬆️ вище · ⬇️ нижче · ⏬ униз).',
+  Lsortv:'🔃 Список відсортовано — порядок збережено.', Lall:'Усі джерела списку увімкнено / вимкнено.', Lclean:'🧹 Прибрано.',
+  Ldel:'🗑 Список видалено.', Edel:'🗑 Джерело видалено, номери перераховано.', Lmerget:'🔗 Списки об’єднано.', Elstt:'📁 Джерело перенесено.',
+  Liv:'⏱ Інтервал перевірки змінено.', Lmove:'↕️ Список переміщено.', Emeth:'🔁 Спосіб читання: авто → вебпревʼю → акаунт → бот.',
+  Lnewon:'Нові підписки акаунта: увімкнені / вимкнені.', tog:'Плагін увімкнено / вимкнено.', sox:'Джерело увімкнено.',
+  go:'📦 Завантажую пакет: прогрес-бар в одному повідомленні, потім ZIP-архів(и) і звіт.', inf:'🔎 Назва, тип і кількість стікерів у пакеті.',
+  trk1:'👁 Стежу за пакетом: напишу, коли автор додасть чи прибере стікери.', mode:'📦 Один архів ↔ 🗂 окремий архів на кожен пакет.',
+  png:'🖼 PNG-копії статичних стікерів: так / ні.', again:'🔁 Повторюю завантаження.', one:'📦 Завантажую пакет.', untrk:'Більше не стежу.',
+  chkst:'Перевіряю пакети.', tg:'Перемикач змінено.', setlenv:'Збережено.', autorss:'Автоперевірка RSS: так / ні.', poll:'🔄 Перевіряю RSS…',
+  retry:'🔁 Повторюю обробку.', force:'📝 Беру в роботу.', vback:'↩️ Повернуто стару версію.', pubchx:'Канал відключено.', rulesx:'Прибрано.', sodel:'Видалено.'
+};
+const PROMPT_FALLBACK = {Lnew:'m:pl:news:Lnew', Lup:'m:pl:news:Lup', in:'m:pl:news:in', Ladd:'m:pl:news:Ladd:1', Lbdel:'m:pl:news:Lbdel:1', ed:'m:pl:news:ed:1'};
+
+const VERSION = DATA.version || '';
+function stat(e){try{if(/^https?:/.test(location.protocol)&&!/claude/.test(location.hostname)){navigator.sendBeacon(new URL('sandbox/stat',location.href.replace(/sandbox\/?$/,'')).href, e)}}catch(_){}}
+function toast(t){toastEl.textContent=t;toastEl.classList.add('on');clearTimeout(toast.t);toast.t=setTimeout(()=>toastEl.classList.remove('on'),2600)}
+function scroll(){feed.scrollTop=feed.scrollHeight}
+function navish(row){return row.some(([t,d])=>/назад|додому|меню|скасувати/i.test(t)||d==='m:home'||d==='m:cancel')}
+
+function buildRows(rows, key){
+  rows = rows.filter(r=>!r.some(([t,d])=>d&&d.startsWith('m:nav')));
+  const tail=[]; while(rows.length&&tail.length<2&&navish(rows[rows.length-1])) tail.unshift(rows.pop());
+  const buttons = rows.reduce((n,r)=>n+r.length,0);
+  let out = rows;
+  const accordion = rows.some(r=>r.some(([t,d])=>d&&d.startsWith('m:grp')));
+  if(!accordion && (rows.length>6 || buttons>12)){
+    if(!folded[key]) out = rows.slice(0,5).concat([[['Показати ще ('+(rows.length-5)+') ▼','sim:unfold']]]);
+    else out = rows.concat([[['▲ Згорнути','sim:fold']]]);
+  }
+  out = out.concat(tail);
+  const nav=[]; if(pos>0) nav.push(['◀️ Назад','sim:back']); if(hist[pos]!=='m:home') nav.push(['🏠 Додому','sim:home']); if(pos<hist.length-1) nav.push(['Вперед ▶️','sim:fwd']);
+  if(key && nav.length) out = out.concat([nav]);
+  return out;
+}
+function html(t){return (t||'').replace(/\n/g,'<br>')}
+function render(el, text, rows, key){
+  el.querySelector('.bub').innerHTML = html(text);
+  const kb = el.querySelector('.kb'); kb.innerHTML='';
+  for(const row of buildRows(rows||[], key)){
+    const r=document.createElement('div'); r.className='kr';
+    for(const [t,d] of row){
+      const b=document.createElement('button'); b.textContent=t; b.title=t; b.dataset.d=d||'';
+      if(d&&d.startsWith('url:')){b.className='url';b.onclick=()=>toast('Відкриється в Telegram: '+d.slice(4))}
+      else b.onclick=()=>press(d, el, key);
+      r.appendChild(b);
+    }
+    kb.appendChild(r);
+  }
+}
+function botMsg(text, rows, key){
+  const el=document.createElement('div'); el.className='msg'; el.innerHTML='<div class="bub"></div><div class="kb"></div>';
+  feed.appendChild(el); render(el,text,rows,key); scroll(); return el;
+}
+function meMsg(text){const el=document.createElement('div');el.className='msg me';el.innerHTML='<div class="bub"></div>';el.querySelector('.bub').textContent=text;feed.appendChild(el);scroll()}
+function sys(t){const el=document.createElement('div');el.className='sys';el.textContent=t;feed.appendChild(el);scroll()}
+
+function show(data, record=true, el=menuMsg){
+  const s=S[data]; if(!s) return false;
+  if(record){hist=hist.slice(0,pos+1);if(hist[pos]!==data){hist.push(data);pos=hist.length-1}}
+  waiting = /:(in|Lup|Lnew|Ladd|Lbdel|ed|pubch)(:|$)/.test(data) ? data : null;
+  if(el && document.body.contains(el)) render(el,s.text,s.rows,data); else menuMsg=botMsg(s.text,s.rows,data);
+  return true;
+}
+function action(d){const p=d.split(':'); if(p[1]!=='pl') return null; return p.length>3?p[3]:p[2]}
+let marking=false, marks=[], pendingMark=null;
+const tg = (window.Telegram && Telegram.WebApp && Telegram.WebApp.initData) ? Telegram.WebApp : null;
+function setMarking(on){marking=on;document.body.classList.toggle('marking',on);document.getElementById('impbtn').classList.toggle('on',on);if(on)toast('💡 Торкніться кнопки або тексту, які треба покращити')}
+function askMark(target, action, excerpt, screen){pendingMark={target,action,excerpt:(excerpt||'').slice(0,300),screen:screen||'',where:tg?'app':'sandbox'};
+  document.getElementById('dlgwhat').textContent=target+(action?' ('+action+')':'')+(screen?'\nекран: '+screen:'');document.getElementById('dlgnote').value='';document.getElementById('dlg').classList.add('on');setMarking(false)}
+function closeDlg(){document.getElementById('dlg').classList.remove('on');pendingMark=null}
+function saveMark(){if(!pendingMark)return;pendingMark.note=document.getElementById('dlgnote').value.trim();marks.push(pendingMark);closeDlg();
+  document.getElementById('impn').textContent=marks.length;toast('💡 Додано. Число біля 💡 — список позначок');stat('click:improve')}
+function listMarks(){const ol=document.getElementById('marklist');ol.innerHTML='';for(const m of marks){const li=document.createElement('li');li.textContent=m.target+(m.screen?' · '+m.screen:'')+(m.note?' — '+m.note:'');ol.appendChild(li)}
+  if(!marks.length)ol.innerHTML='<li>Поки порожньо</li>';document.getElementById('sendinfo').textContent=tg?'Надішлеться у ваш «💡 Покращити» в боті.':'Відкрито не з Telegram — скопіюйте список і надішліть боту командою /improve.';
+  document.getElementById('sendbtn').style.display=tg?'':'none';document.getElementById('dlglist').classList.add('on')}
+function copyMarks(){const t=marks.map((m,i)=>(i+1)+'. '+m.target+(m.screen?' · '+m.screen:'')+(m.note?' — '+m.note:'')).join('\n');try{navigator.clipboard.writeText(t);toast('Скопійовано')}catch(_){toast('Не вдалося скопіювати')}}
+async function sendMarks(){try{const r=await fetch(new URL('improve',location.href.replace(/sandbox\/?$/,'')).href,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({initData:tg.initData,marks})});
+  if(r.ok){toast('📤 Надіслано: '+marks.length);marks=[];document.getElementById('impn').textContent='';document.getElementById('dlglist').classList.remove('on')}else toast('Не прийнято ('+r.status+')')}catch(e){toast('Немає звʼязку з ботом')}}
+(function(){document.getElementById('impbtn').onclick=e=>{if(e.target.id==='impn'&&marks.length){listMarks();return}setMarking(!marking)}})();
+document.addEventListener('click',e=>{if(!marking)return;const btn=e.target.closest('.kr button');const bub=e.target.closest('.bub');if(!btn&&!bub)return;
+  e.preventDefault();e.stopPropagation();const msg=(btn||bub).closest('.msg');const text=msg?msg.querySelector('.bub').textContent:'';
+  if(btn)askMark('кнопка «'+btn.textContent+'»',btn.dataset.d||'',text,hist[pos]||'');else askMark('текст повідомлення','',text,hist[pos]||'')},true);
+function press(d, el, key){
+  if(!d) return;
+  if(d==='imp:s'){setMarking(!marking);return}
+  stat('click:'+((d.split(':')[2])||'menu'));
+  if(d==='sim:unfold'||d==='sim:fold'){folded[key]=d==='sim:unfold';const s=S[key];render(el,s.text,s.rows,key);return}
+  if(d==='sim:back'){if(pos>0){pos--;show(hist[pos],false,el)}return}
+  if(d==='sim:fwd'){if(pos<hist.length-1){pos++;show(hist[pos],false,el)}return}
+  if(d==='sim:home'||d==='m:home'||d==='m:cancel'){menuMsg=el;show('m:home',true,el);return}
+  if(d.startsWith('m:grpx:')&&S['m:home']){menuMsg=el;show('m:home',true,el);return}
+  if(S[d]){menuMsg=el;show(d,true,el);return}
+  const a=action(d)||'';
+  if(ACT[a]){toast(ACT[a]);return}
+  for(const k in PROMPT_FALLBACK){ if(a===k){menuMsg=el;show(PROMPT_FALLBACK[k],true,el);return} }
+  if(d.startsWith('m:grp:')) {toast('Цей розділ у симуляцію не потрапив.');return}
+  if(d.startsWith('m:')) {toast('У справжньому боті тут виконується дія (у симуляції вона вимкнена: видалення, файли, мережа).');return}
+  toast('У справжньому боті тут виконується дія.');
+}
+function focusPhone(){if(window.innerWidth<=860)document.querySelector('.phone').scrollIntoView({behavior:'smooth',block:'start'})}
+function scene(name){
+  focusPhone(); stat('scene:'+name);
+  const s=SC[name]; if(!s) return;
+  if(name==='channel') sys('Бота додали в групу «Чат громади»');
+  if(s.user) meMsg(s.user);
+  setTimeout(()=>{ for(const t of s.bot) botMsg(t,[],null);
+    if(s.card) setTimeout(()=>{botMsg(s.card.text,s.card.rows,null)}, s.bot.length?650:250); }, 350);
+}
+document.querySelectorAll('[data-open]').forEach(b=>b.onclick=()=>{menuMsg=null;hist=[];pos=-1;if(b.dataset.open!=='m:home'){hist=['m:home'];pos=0}show(b.dataset.open);focusPhone()});
+document.querySelectorAll('[data-scene]').forEach(b=>b.onclick=()=>scene(b.dataset.scene));
+document.querySelector('[data-clear]').onclick=()=>{feed.innerHTML='';menuMsg=null;hist=[];pos=-1;waiting=null};
+document.getElementById('form').onsubmit=e=>{
+  e.preventDefault(); const inp=document.getElementById('inp'); const t=inp.value.trim(); if(!t) return; inp.value=''; meMsg(t);
+  setTimeout(()=>{
+    if(/^\/(menu|start)/.test(t)){menuMsg=null;hist=[];pos=-1;show('m:home');return}
+    if(/^\/news\b/.test(t)||(waiting&&/:in$/.test(waiting))){waiting=null;botMsg('📥 Прийнято #4. Готую чернетку — прийде окремим повідомленням.',[],null);setTimeout(()=>botMsg(SC.forward.card.text,SC.forward.card.rows,null),700);return}
+    if(waiting&&/:(Lup|Ladd)/.test(waiting)){waiting=null;botMsg(SC.file.card.text,SC.file.card.rows,null);return}
+    if(waiting){waiting=null;botMsg('✅ Збережено',[],null);return}
+    if(/t\.me\/add(stickers|emoji)\//i.test(t)){const n=(t.match(/add(?:stickers|emoji)\/(\w+)/i)||[])[1]||'Pack';botMsg('🧷 Бачу 1 пакет(и): '+n,[[['📦 Завантажити · 1','m:pl:stk:go:x'],['🔎 Про пакет','m:pl:stk:inf:x']],[['👁 Стежити','m:pl:stk:trk1:x']]],null);return}
+    botMsg('🤖 Тут відповідає ШІ (Gemini / Groq / … з «🔁 Авто»). У симуляції — без моделі. Спробуйте /menu, /news текст або посилання t.me/addstickers/…',[],null);
+  },300);
+};
+sys('🧪 Пісочниця · демо-дані · нічого не зберігається' + (VERSION?' · '+VERSION:'')); menuMsg=null; show('m:home'); stat('open');
+</script>
+</body>
+</html>

@@ -67,8 +67,13 @@ class BackupError(Exception):
 
 
 class Backups:
-    def __init__(self, db_path, kv_get, kv_set, public_url, name="bot", route_prefix="/backup", project_root=None):
+    def __init__(self, db_path, kv_get, kv_set, public_url, name="bot", route_prefix="/backup", project_root=None,
+                 secret_kv=(), secret_cols=()):
         self.db_path = db_path
+        # Що НЕ потрапляє в копію (ключі, токени входу): kv-ключ цілком (поле None) або поле JSON у ньому; колонки таблиць.
+        # Під час відновлення ці значення беруться з поточної бази, тож підключення не губляться.
+        self.secret_kv = [("backup_cfg", "tokens")] + list(secret_kv)
+        self.secret_cols = list(secret_cols)
         self.kv_get = kv_get
         self.kv_set = kv_set
         self.public_url = (public_url or "").rstrip("/")
@@ -76,14 +81,104 @@ class Backups:
         self.route_prefix = route_prefix
         self.project_root = os.path.abspath(project_root or os.path.dirname(__file__))
         self.on_connected = None  # async fn(cloud, ok, detail) — повідомити власника після входу
+        self.last_extras = []
+        self.extra_dbs = None  # fn() -> [(відносна назва, шлях)] додаткових SQLite-баз (плагіни)
 
     # ------------------------------------------------------------ створення й перевірка копії
 
+    # ------------------------------------------------------------ секрети: прибрати з копії, повернути при відновленні
+    def _secrets(self, con):
+        """Поточні секретні значення бази: {('kv', key, field): value, ('col', table, col, rowid): value}."""
+        out = {}
+        for key, field in self.secret_kv:
+            try:
+                row = con.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+            except sqlite3.OperationalError:
+                continue
+            if not row or row[0] is None:
+                continue
+            if field is None:
+                out[("kv", key, None)] = row[0]
+            else:
+                try:
+                    v = json.loads(row[0]).get(field)
+                except (ValueError, AttributeError):
+                    continue
+                if v:
+                    out[("kv", key, field)] = v
+        for table, col in self.secret_cols:
+            try:
+                for rid, v in con.execute(f"SELECT rowid, {col} FROM {table}"):
+                    if v:
+                        out[("col", table, col, rid)] = v
+            except sqlite3.OperationalError:
+                continue
+        return out
+
+    def _scrub(self, con):
+        """Прибирає секрети з копії бази (порожні значення замість ключів і токенів)."""
+        for key, field in self.secret_kv:
+            try:
+                row = con.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+                if not row:
+                    continue
+                if field is None:
+                    con.execute("DELETE FROM kv WHERE key=?", (key,))
+                else:
+                    d = json.loads(row[0])
+                    if isinstance(d, dict) and field in d:
+                        d[field] = {} if isinstance(d[field], dict) else None
+                        con.execute("UPDATE kv SET value=? WHERE key=?", (json.dumps(d, ensure_ascii=False), key))
+            except (sqlite3.OperationalError, ValueError):
+                continue
+        for table, col in self.secret_cols:
+            try:
+                con.execute(f"UPDATE {table} SET {col}=''")
+            except sqlite3.OperationalError:
+                continue
+        con.commit()
+        con.execute("VACUUM")  # щоб видалені значення не лишились у вільних сторінках файлу
+
+    def _put_back(self, con, saved):
+        """Після відновлення: повертаю ключі й токени, яких у копії немає (беру з бази до відновлення)."""
+        for k, v in saved.items():
+            try:
+                if k[0] == "kv":
+                    _, key, field = k
+                    row = con.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+                    if field is None:
+                        if not row:
+                            con.execute("INSERT INTO kv(key, value) VALUES (?,?)", (key, v))
+                    else:
+                        d = json.loads(row[0]) if row else {}
+                        if not d.get(field):
+                            d[field] = v
+                            con.execute("INSERT INTO kv(key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                                        (key, json.dumps(d, ensure_ascii=False)))
+                else:
+                    _, table, col, rid = k
+                    con.execute(f"UPDATE {table} SET {col}=? WHERE rowid=? AND ({col} IS NULL OR {col}='')", (v, rid))
+            except (sqlite3.OperationalError, ValueError):
+                continue
+        con.commit()
+
     def _snapshot_db(self):
-        """Консистентний знімок SQLite у байтах без зупинки бота."""
+        """Консистентний знімок SQLite у байтах без зупинки бота — без ключів і токенів."""
         tmp = tempfile.mktemp(suffix=".db")
         try:
             with closing(sqlite3.connect(self.db_path)) as src, closing(sqlite3.connect(tmp)) as dst:
+                src.backup(dst)
+                self._scrub(dst)
+            with open(tmp, "rb") as f:
+                return f.read()
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+
+    def _snapshot_file(self, path):
+        tmp = tempfile.mktemp(suffix=".db")
+        try:
+            with closing(sqlite3.connect(path)) as src, closing(sqlite3.connect(tmp)) as dst:
                 src.backup(dst)
             with open(tmp, "rb") as f:
                 return f.read()
@@ -136,8 +231,12 @@ class Backups:
         allowed_names = {"Dockerfile", "Caddyfile", "requirements.txt", ".env.example"}
         out = []
         root = self.project_root
+        data_dir = os.path.dirname(os.path.abspath(self.db_path))  # там node.json з ключами зв'язку — не беремо
         for base, dirs, files in os.walk(root):
-            dirs[:] = [d for d in dirs if d not in {".git", "__pycache__", ".venv", "venv", "node_modules"}]
+            dirs[:] = [d for d in dirs if d not in {".git", "__pycache__", ".venv", "venv", "node_modules", "tests", "simulation", "data"}
+                       and os.path.abspath(os.path.join(base, d)) != data_dir]
+            if os.path.abspath(base) == data_dir:
+                continue
             for fn in files:
                 full = os.path.join(base, fn)
                 rel = os.path.relpath(full, root).replace(os.sep, "/")
@@ -163,10 +262,17 @@ class Backups:
             "created": datetime.now().astimezone().isoformat(timespec="seconds"),
             "bot": self.name,
             "scope": scope,
-            "contains_secrets": False,
+            "contains_secrets": False,  # ключі й токени входу прибрано; при відновленні бот бере їх із поточної бази
+            "secrets_removed": [k for k, _ in self.secret_kv] + [f"{t}.{c}" for t, c in self.secret_cols],
             "restore_note": "Автоматичне відновлення ботом відновлює базу даних. Файли project/ у повній копії призначені для ручного відновлення коду.",
         }
         entries = [(f"data/{self.name}.db", db_raw), ("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2).encode())]
+        # Бази плагінів (🔌 ньюзрум, стікери…) — консистентні знімки поруч з основною базою; відновлюються вручну.
+        for rel, path in (self.extra_dbs() if self.extra_dbs else []):
+            try:
+                entries.append((f"data/{rel}", self._snapshot_file(path)))
+            except (OSError, sqlite3.Error):
+                continue
         if scope == "full":
             entries.extend(self._safe_project_files())
         return entries
@@ -245,6 +351,71 @@ class Backups:
                 return raw
         raise BackupError("невідомий формат копії. Підтримуються ZIP, TAR.GZ, DB.GZ та їх .enc")
 
+    SQLITE_EXT = (".db", ".sqlite", ".sqlite3")
+
+    def _extras_from_container(self, blob):
+        """Додаткові бази з копії (плагіни, статистика, UTM…): {відносний шлях: байти}. Лише ZIP і TAR.GZ."""
+        if blob[: len(MAGIC_ENC)] == MAGIC_ENC:
+            pw = env("BACKUP_PASSWORD")
+            if not pw:
+                return {}
+            blob = decrypt(blob, pw)
+        out, main = {}, f"data/{self.name}.db"
+
+        def take(name, read):
+            if not name.startswith("data/") or name == main or not name.lower().endswith(self.SQLITE_EXT):
+                return
+            rel = name[5:]
+            if not rel or rel.startswith(("/", "\\")) or ".." in rel.replace("\\", "/").split("/"):
+                return  # жодних шляхів за межі теки з даними
+            raw = read()
+            if raw and raw[:16] == b"SQLite format 3\x00":
+                out[rel] = raw
+
+        bio = io.BytesIO(blob)
+        try:
+            if zipfile.is_zipfile(bio):
+                bio.seek(0)
+                with zipfile.ZipFile(bio) as zf:
+                    for n in zf.namelist():
+                        take(n, lambda n=n: zf.read(n))
+                return out
+            bio.seek(0)
+            with tarfile.open(fileobj=bio, mode="r:*") as tf:
+                for m in tf.getmembers():
+                    if m.isfile():
+                        take(m.name, lambda m=m: tf.extractfile(m).read())
+        except (tarfile.ReadError, zipfile.BadZipFile, OSError):
+            pass
+        return out
+
+    def restore_extras(self, blob):
+        """Відновлює додаткові бази поруч з основною. Повертає список відновлених. Стару версію кожної лишає як .pre-restore."""
+        base = os.path.dirname(os.path.abspath(self.db_path))
+        done = []
+        for rel, raw in self._extras_from_container(blob).items():
+            dest = os.path.join(base, rel)
+            tmp = tempfile.mktemp(suffix=".db")
+            try:
+                with open(tmp, "wb") as f:
+                    f.write(raw)
+                with closing(sqlite3.connect(tmp)) as src:
+                    if src.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                        continue
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    if os.path.exists(dest):
+                        with closing(sqlite3.connect(dest)) as live, closing(sqlite3.connect(dest + ".pre-restore")) as keep:
+                            live.backup(keep)
+                    with closing(sqlite3.connect(dest)) as live:
+                        src.backup(live)
+                done.append(rel)
+            except (OSError, sqlite3.Error):
+                continue
+            finally:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+        return done
+
     def unpack(self, blob):
         """Байти копії -> тимчасова SQLite БД; підтримує ZIP/TAR.GZ/DB.GZ і шифровані .enc."""
         if blob[: len(MAGIC_ENC)] == MAGIC_ENC:
@@ -277,10 +448,29 @@ class Backups:
         safe = f"{self.db_path}.pre-restore-{time.strftime('%Y%m%d-%H%M%S')}"
         with closing(sqlite3.connect(self.db_path)) as live, closing(sqlite3.connect(safe)) as keep:
             live.backup(keep)
+            saved = self._secrets(live)
         with closing(sqlite3.connect(tmp)) as src, closing(sqlite3.connect(self.db_path)) as live:
             src.backup(live)
+            self._put_back(live, saved)
         os.remove(tmp)
+        self.last_extras = self.restore_extras(blob)  # бази плагінів, статистики, UTM тощо — якщо вони є в копії
         return safe, tables
+
+    def scan_extras(self, only=None):
+        """Усі додаткові SQLite-бази в теці з даними (і підтеках): [(відносна назва, шлях)]. only — фільтр за назвою файлу."""
+        base = os.path.dirname(os.path.abspath(self.db_path))
+        main = os.path.abspath(self.db_path)
+        out = []
+        for root, dirs, files in os.walk(base):
+            dirs[:] = [d for d in dirs if d not in ("__pycache__", "sticker_drafts", "tmp")]
+            for f in sorted(files):
+                p = os.path.join(root, f)
+                if not f.lower().endswith(self.SQLITE_EXT) or os.path.abspath(p) == main or "pre-restore" in f or "-backup-" in f:
+                    continue
+                if only and not only(f):
+                    continue
+                out.append((os.path.relpath(p, base), p))
+        return out
 
     # ------------------------------------------------------------ налаштування
 
@@ -720,7 +910,9 @@ def scr_backup_scope(BK):
     lines = ["<b>🗂 Що включати в копію</b>", "",
              "<b>Дані бота</b> — розмови, теки, завдання, нотатки, медіа-метадані та налаштування з SQLite.", "",
              "<b>Повна копія OrionAI</b> — база + доступні на сервері файли коду та документації. <b>Секрети, .env, токени й ключі не додаються.</b>", "",
-             "Під час автоматичного відновлення бот відновлює базу даних. Файли коду з повної копії призначені для ручного відновлення через GitHub."]
+             "Під час автоматичного відновлення бот відновлює базу даних. Файли коду з повної копії призначені для ручного відновлення через GitHub.", "",
+             "🔐 У жодну копію не потрапляють ключі ваших моделей і входи в хмари та сервіси. Відновлюєте на цьому ж сервері — бот "
+             "бере їх із поточної бази. На новому сервері підключіть їх ще раз (ключі зі змінних сервера працюють одразу)."]
     rows = [[(("✅ " if cur == "data" else "▫️ ") + "Лише дані", "m:bkscopev:data")],
             [(("✅ " if cur == "full" else "▫️ ") + "Повна копія OrionAI", "m:bkscopev:full")],
             [("« Копії", "m:bk")]]
@@ -856,5 +1048,4 @@ def handle_bk_sched(BK, parts, ask):
         BK.set_sched(t, None)
         tip = "↺ Типовий розклад"
     return scr_bk_sched(BK, t), tip
-
 

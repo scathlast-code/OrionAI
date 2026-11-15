@@ -1,3 +1,4 @@
+import lifetime_stats
 """🧭 Головний бот: керує всіма вашими ботами (Telegram, WhatsApp, Instagram та будь-якими іншими через HTTP).
 
 Що вміє:
@@ -36,7 +37,7 @@ from starlette.routing import Route
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, ReplyKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, TypeHandler, filters
 
 import backups as bkui
 import platforms as P
@@ -45,7 +46,7 @@ from backups import CLOUDS, TARGET_TITLES, BackupError, Backups, human_size
 from uilayout import Layout, handle_editor, handle_editor_text
 from community import Community
 from priority import Ranks
-from cluster import MODES as RUN_MODES, WEEK as RUN_WEEK, Node, cluster_route, cluster_screen
+from cluster import MODES as RUN_MODES, WEEK as RUN_WEEK, Node, cluster_route, cluster_screen, oracle_due, oracle_line, oracle_message, oracle_route, oracle_rows, GITHUB_PROMPT, github_set, links_screen, oracle_merge, oracle_state
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -60,7 +61,8 @@ TOKEN = env("MANAGER_TOKEN")
 SECRET = env("MANAGER_SECRET")
 ALLOWED = [int(x) for x in env("ALLOWED_USERS").replace(" ", "").split(",") if x]
 DB_PATH = env("MANAGER_DB_PATH", "data/manager.db")
-PUBLIC_URL = env("MANAGER_PUBLIC_URL", env("PUBLIC_URL")).rstrip("/")
+PUBLIC_URL = (env("MANAGER_PUBLIC_URL", env("PUBLIC_URL"))
+              or (f"https://{env('RAILWAY_PUBLIC_DOMAIN')}" if env("RAILWAY_PUBLIC_DOMAIN") else "")).rstrip("/")  # на Railway — адреса сервісу
 PORT = int(env("PORT", "8080"))
 TZ = ZoneInfo(env("BOT_TZ", "Europe/Kyiv"))
 CHECK_EVERY = int(env("MONITOR_EVERY", "300"))      # як часто перевіряти ботів, с
@@ -516,6 +518,7 @@ async def ping_bot(b):
         p = (r.json() or {}).get("plan")
         if isinstance(p, dict):
             bot_update(b["id"], plan=json.dumps(p, ensure_ascii=False))
+            take_child_oracle(p)
         bot_update(b["id"], last_seen=time.time())
         return True
     except (httpx.HTTPError, ValueError):
@@ -768,10 +771,15 @@ async def monitor_loop():
         if not NODE.active:  # у резерві: нічого не перевіряю й не надсилаю — лише копіюю базу
             await asyncio.sleep(60)
             continue
+        if oracle_due(NODE, need=oracle_needed()) and app:  # 🔔 зайти в Oracle — нагадую за всіх ботів
+            NODE.set("oracle_next", time.time() + 86400)
+            NODE.set("oracle_ts", time.time())  # щоб і дочірні показували ту саму дату
+            t_, r_ = oracle_message(NODE)
+            await notify_text(t_, r_)
         try:
             await monitor_tick()
             await CM.tick(app.bot if app else None)
-            purge_trash()
+            # Автоматичне видалення вимкнено: дані зберігаються до явної дії користувача.
             due = BK.due_targets()
             if due:
                 await bk_run(app.bot, owner_id(), auto=True, only=due)
@@ -781,11 +789,8 @@ async def monitor_loop():
 
 
 def purge_trash():
-    lim = time.time() - TRASH_DAYS * 86400
-    with closing(db()) as con, con:
-        con.execute("DELETE FROM bots WHERE state='trash' AND trashed_at<?", (lim,))
-        con.execute("DELETE FROM events WHERE state='trash' AND trashed_at<?", (lim,))
-        con.execute("DELETE FROM events WHERE state='active' AND pinned_at IS NULL AND created<?", (time.time() - 90 * 86400,))
+    """Автоочищення навмисно вимкнено. Видалення — лише явною командою."""
+    return
 
 
 # ---------------------------------------------------------------- оформлення
@@ -862,6 +867,7 @@ ITEMS = {
     "btns": ("🎛 Кнопки", "m:btn"),
     "diag": ("🩺 Діагностика", "m:diag"),
     "runmode": ("⚡ Режим роботи", "m:rm"),
+    "links": ("🔗 Посилання", "m:lnk"),
     "comm": ("🏘 Спільноти", "m:cm"),
     "reset": ("🏭 Скидання", "m:fr"),
     "help": ("📖 Довідка", "help:main"),
@@ -869,7 +875,7 @@ ITEMS = {
 DEFAULT_GROUPS = {"tools": "🧰 Інструменти"}
 DEFAULT_LAYOUT = [["bots", "kb"], ["inbox", "kb"], ["send", "kb"], ["menu", "kb"],
                   ["mon", "home"], ["rules", "home"], ["btable", "home"], ["comm", "home"], ["pins", "home"], ["g:tools", "home"], ["help", "home"],
-                  ["api", "g:tools"], ["trash", "g:tools"], ["backup", "g:tools"], ["btns", "g:tools"], ["runmode", "g:tools"], ["diag", "g:tools"], ["reset", "g:tools"]]
+                  ["api", "g:tools"], ["trash", "g:tools"], ["backup", "g:tools"], ["btns", "g:tools"], ["runmode", "g:tools"], ["links", "g:tools"], ["diag", "g:tools"], ["reset", "g:tools"]]
 L = Layout(ITEMS, DEFAULT_LAYOUT, DEFAULT_GROUPS, prefs, set_pref, locked={"bots"})
 AWAIT = {}
 CANCEL_ROW = [("✖️ Скасувати", "m:cancel")]
@@ -934,7 +940,7 @@ def scr_home(chat):
     return "\n".join(lines), L.place_rows(chat, "home", badges)
 
 
-BOT_SORTS = [("status", "🚦 Стан"), ("az", "🔤 А–Я"), ("kind", "🗂 Тип"), ("new", "🆕 Нові")]
+BOT_SORTS = [("status", "🚦 Стан"), ("az", "🔤 А–Я"), ("kind", "🗂 Тип"), ("new", "🆕 Нові спершу")]
 
 
 def scr_bots(chat):
@@ -1049,7 +1055,7 @@ async def scr_commands(chat, bid):
 
 
 EV_FILTERS = [("all", "Усі"), ("unread", "🆕"), ("alert", "🚨"), ("pin", "📌")]
-EV_SORTS = [("new", "🆕 Нові"), ("old", "📜 Старі"), ("bot", "🤖 Бот"), ("type", "🗂 Тип")]
+EV_SORTS = [("new", "🆕 Нові спершу"), ("old", "📜 Старі"), ("bot", "🤖 Бот"), ("type", "🗂 Тип")]
 PER_PAGE = 8
 
 
@@ -1147,8 +1153,8 @@ def scr_api(chat):
 def scr_trash(chat):
     bots = bots_list("trash")
     evs = events_list(state="trash")
-    lines = [f"<b>🗑 Кошик</b> · видаляється через {TRASH_DAYS} днів", ""]
-    lines += [f"🤖 {esc(b['name'])} · ще {max(0, TRASH_DAYS - int((time.time() - b['trashed_at']) // 86400))} дн" for b in bots]
+    lines = ["<b>🗑 Кошик</b> · автоматичне видалення вимкнено", ""]
+    lines += [f"🤖 {esc(b['name'])}" for b in bots]
     lines += [f"📥 {esc(short(e['text'], 60))}" for e in evs[:10]]
     if not bots and not evs:
         lines.append("<i>Порожньо.</i>")
@@ -1187,6 +1193,7 @@ def help_screen(data):
 # ---------------------------------------------------------------- 💾 копії
 
 BK = Backups(DB_PATH, kv_get, kv_set, PUBLIC_URL, name="manager", project_root=os.path.dirname(os.path.abspath(__file__)))
+BK.extra_dbs = lambda: BK.scan_extras(only=lambda f: f.startswith("manager_"))
 PENDING_RESTORE = {}
 
 
@@ -1671,7 +1678,7 @@ async def route(update, ctx, data, edit=True, record=True):
                   [[("🗑 Так", f"m:bdely:{b['id']}"), ("✖️ Ні", f"m:b:{b['id']}")]])
     elif a == "bdely":
         bot_update(int(arg), state="trash", trashed_at=time.time())
-        toast, screen = f"🗑 У кошику: видалиться через {TRASH_DAYS} днів", scr_bots(chat)
+        toast, screen = "🗑 У кошику: зберігатиметься до ручного очищення", scr_bots(chat)
     elif a == "brs":
         bot_update(int(arg), state="active", trashed_at=None)
         toast, screen = "↩️ Відновлено", scr_trash(chat)
@@ -1840,7 +1847,7 @@ async def route(update, ctx, data, edit=True, record=True):
         tip = ("🗓 О котрій перевіряти? Наприклад: <code>09:00, 13:00, 21:00</code> або <code>08:00 пн,ср,пт</code>" if a == "mst"
                else "⏱ У які години перевіряти? Наприклад: <code>08:00-23:00</code> (можна через північ: <code>22:00-06:00</code>)")
         return await update.effective_chat.send_message(tip, parse_mode=ParseMode.HTML, reply_markup=kb([CANCEL_ROW]))
-    elif a in ("rm", "rmset", "rw", "rwadd", "rwdel", "rwt", "rwsync", "cl", "clrun", "clpref", "clsel", "clpool"):
+    elif a in ("rm", "rmset", "rw", "rwadd", "rwdel", "rwt", "rwsync", "cl", "clrun", "clpref", "clsel", "clpool", "orok", "orlater", "orset", "lnk", "lnkgh"):
         toast, screen = await route_runmode(update, chat, a, arg)
     elif a == "monrun":
         if q:
@@ -1933,6 +1940,9 @@ async def route(update, ctx, data, edit=True, record=True):
     elif a == "bkno":
         PENDING_RESTORE.pop(chat, None)
         screen = bkui.scr_backups(BK, TZ)
+    else:  # кнопка без обробника (наприклад, зі старого повідомлення) — у журнал, а людині головне меню
+        log.warning("невідома кнопка: %s", data)
+        toast, screen = "Цієї кнопки вже немає — відкрив головне меню", scr_home(chat)
 
     if q:
         try:
@@ -2013,6 +2023,11 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     if user.id not in ALLOWED:
         return await msg.reply_text(f"Це приватний бот. Ваш ID: {user.id}")
+    try:
+        lifetime_stats.record(__import__("datadir").path("lifetime_stats.db", "LIFETIME_STATS_DB"),
+            bot="manager", user_id=user.id, mode="normal", requests=1)
+    except Exception:
+        logging.exception("Lifetime stats write failed; check persistent storage")
     chat = update.effective_chat.id
     # 2) пересилання від власника
     origin = getattr(msg, "forward_origin", None)
@@ -2057,6 +2072,13 @@ async def on_awaited(update, ctx, text):
     if act.startswith("add_"):
         return await add_bot_from_text(update, ctx, act[4:], text)
     AWAIT.pop(chat, None)
+    if act == "lnkgh":
+        ok_, msg_ = github_set(NODE, text)
+        if not ok_:
+            ask(chat, "lnkgh")
+            return await update.message.reply_text(msg_, parse_mode=ParseMode.HTML, reply_markup=kb([CANCEL_ROW]))
+        await update.message.reply_text("✅ " + esc(msg_))
+        return await show(update, *links_screen(NODE, esc), edit=False)
     if act in ("mst", "msw", "rwadd"):
         try:
             if act == "msw":
@@ -2252,6 +2274,7 @@ async def http_in(request: Request):
         NODE.touch()
         bot_update(b["id"], plan=json.dumps(body["plan"], ensure_ascii=False), last_seen=time.time(),
                    **({"cmd_url": body["plan"]["cmd_url"]} if str(body["plan"].get("cmd_url", "")).startswith("http") else {}))
+        take_child_oracle(body["plan"])
         event_add(b["id"], "sleep", "📅 Новий план: " + plan_text(body["plan"]), "api", 0)
         return JSONResponse({"ok": True, "plan": manager_plan()})
     eid, why = await ingest(b, body.get("type", "info"), body.get("text", ""), "api", int(body.get("hop") or 0), until=body.get("until"))
@@ -2296,6 +2319,7 @@ routes = [
 ]
 # ---------------------------------------------------------------- ⚡ режим роботи головного бота (як у ШІ-бота)
 NODE = Node(os.path.dirname(os.path.abspath(DB_PATH)) or ".", DB_PATH, TZ, fname="node-manager.json", prefix="MANAGER_")
+NODE.extras = lambda: BK.extra_dbs()  # резервні сервери копіюють не лише основну базу, а й бази плагінів, UTM, статистики
 WEBHOOK_BASE = (env("MANAGER_PUBLIC_URL") or PUBLIC_URL or (f"https://{env('RAILWAY_PUBLIC_DOMAIN')}" if env("RAILWAY_PUBLIC_DOMAIN") else "")).rstrip("/")
 HOOK_SECRET = hashlib.sha256(("tgm:" + SECRET).encode()).hexdigest()[:40]
 HOOK_PATH = f"/tg/{HOOK_SECRET[:16]}"
@@ -2358,8 +2382,23 @@ def manager_plan():
     p = {"name": "🧭 Головний бот", "mode": mode, "window": 15, "tz": "Europe/Kyiv",
          "wake": manager_wake_times() if mode == "timer" and NODE.cron_key() else [], "wake_url": wake_url(),
          "inbox": f"{WEBHOOK_BASE}/{SECRET}" if WEBHOOK_BASE else ""}  # куди писати головному (міняється, якщо він переїхав на інший сервер)
+    p["oracle"] = oracle_state(NODE)  # нагадування про Oracle: надсилаю лише я, стан спільний з усіма ботами
     p["v"] = hashlib.sha256(json.dumps(p, sort_keys=True).encode()).hexdigest()[:12]
     return p
+
+
+def take_child_oracle(bp):
+    """Дочірній бот змінив налаштування нагадування чи натиснув «✅ Зайшов» — переймаю й розсилаю решті."""
+    if isinstance(bp, dict) and oracle_merge(NODE, bp.get("oracle")):
+        try:
+            asyncio.get_running_loop().create_task(push_all_plans())
+        except RuntimeError:
+            pass
+
+
+def oracle_needed():
+    """Нагадувати, якщо хоч один зі зв'язаних ботів працює на Oracle (навіть коли я сам на Railway)."""
+    return any(((bplan(b) or {}).get("oracle") or {}).get("need") for b in bots_list())
 
 
 async def push_all_plans(force=False):
@@ -2376,6 +2415,7 @@ async def push_all_plans(force=False):
                 bp = (r.json() or {}).get("plan") if r.status_code == 200 else None
                 if isinstance(bp, dict):
                     bot_update(b["id"], plan=json.dumps(bp, ensure_ascii=False), last_seen=time.time())
+                    take_child_oracle(bp)
                 n += 1
             except (httpx.HTTPError, ValueError):
                 pass
@@ -2471,7 +2511,11 @@ def scr_runmode(chat):
     rows = [[(("● " if k == raw else "") + RUN_MODES[k][0], f"m:rmset:{k}")] for k in RUN_MODES]
     if mode == "timer" or raw == "auto":
         rows.append([("⏰ Будильник", "m:rw")])
+    lines.append("\n" + oracle_line(NODE, TZ, oracle_needed()))
+    lines.append("Нагадування надсилаю лише я — за всі підключені боти; «✅ Зайшов» чи зміна частоти в будь-якому боті діє всюди.")
+    rows += oracle_rows(NODE, oracle_needed())
     rows.append([("📡 Схема моніторингу", "m:mon"), ("🛰 Сервери", "m:cl")])
+    rows.append([("🔗 Посилання", "m:lnk")])
     return "\n".join(lines), rows
 
 
@@ -2508,10 +2552,25 @@ async def route_runmode(update, chat, a, arg):
     if a == "clrun":
         await cluster_tick(force=True)
         return "Перевірено", scr_cluster(chat)
+    if a in ("orok", "orlater", "orset"):
+        toast = oracle_route(NODE, a, arg)
+        await push_all_plans()  # позначка спільна для всіх ботів
+        if a != "orset" and update.callback_query:
+            try:
+                await update.callback_query.edit_message_reply_markup(reply_markup=None)
+            except Exception:  # noqa: BLE001
+                pass
+            return toast, None
+        return toast, scr_runmode(chat)
     if a in ("clpref", "clsel", "clpool"):
         toast = await cluster_route(NODE, a, arg)
         await cluster_tick(force=True)
         return toast, scr_cluster(chat)
+    if a == "lnk":
+        return None, links_screen(NODE, esc)
+    if a == "lnkgh":
+        ask(chat, "lnkgh")
+        return None, (GITHUB_PROMPT, [CANCEL_ROW])
     if a == "rm":
         return None, scr_runmode(chat)
     if a == "rmset" and arg in RUN_MODES:
@@ -2579,10 +2638,41 @@ routes += [Route(HOOK_PATH, http_tg, methods=["POST"]), Route(WAKE_PATH, http_wa
 routes += NODE.routes(lambda: on_deactivate())
 web = Starlette(routes=routes)
 
+async def cmd_manager_scenarios(update, context):
+    """Persistent manager-bot scenario preferences, independent from OrionAI."""
+    if update.effective_user.id not in ALLOWED:
+        return
+    import scenarios as scenario_store
+    import os
+    db = os.getenv('MANAGER_SCENARIO_DB') or os.path.join(os.path.dirname(os.path.abspath(DB_PATH)) or '.', 'manager_scenarios.sqlite3')  # поруч із базою, на диску /data
+    args = context.args or []
+    if len(args) == 2 and args[1] in ('on','off'):
+        try:
+            scenario_store.update_profile(db,'manager',update.effective_user.id,args[0],args[1]=='on')
+        except ValueError:
+            await update.message.reply_text('Невідомий сценарій'); return
+    rows = scenario_store.list_profiles(db,'manager',update.effective_user.id)
+    await update.message.reply_text('Сценарії головного бота:\n'+'\n'.join(f"{r['title']}: {'увімкнено' if r['enabled'] else 'вимкнено'} (/scenarios {r['id']} on|off)" for r in rows))
+
+
 app = None
 if TOKEN:
     app = Application.builder().token(TOKEN).build()
+    from security_policy import telegram_guard
+    from functools import partial
+    app.add_handler(TypeHandler(Update, partial(telegram_guard, scope="manager")), group=-100)
+    from reliability_telegram import install as install_reliability
+    install_reliability(app, "manager")
+    from notification_telegram import install as install_notifications
+    install_notifications(app, "manager", set(ALLOWED))
     CM.install_tg(app, pass_bots=True)  # 🏘 групи й канали; повідомлення інших ботів ідуть далі — у «📥 Вхідні»
+    from access_telegram import install as install_access_commands
+    install_access_commands(app, 'manager', ALLOWED)
+    from lifetime_stats_telegram import install as install_lifetime_stats
+    install_lifetime_stats(app, "manager")
+    from provider_policy_telegram import install as install_policy_monitor
+    install_policy_monitor(app, "manager")
+    app.add_handler(CommandHandler("scenarios", cmd_manager_scenarios))
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("menu", cmd_menu))
     app.add_handler(CommandHandler("check", cmd_check))

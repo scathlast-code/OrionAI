@@ -1,0 +1,4 @@
+# OPTIONAL example only: deploy on another host AFTER implementing authenticated worker API.
+# Do not run as a remote worker yet; no distributed queue/worker API is implemented.
+# Current services are not independently deployable just by assigning roles in nodes.json.
+services: {}

@@ -1,18 +1,19 @@
 FROM python:3.13-slim
-
-# ffmpeg — аудіо/відео; DejaVu — кирилиця у зображеннях; tzdata — час завдань
+# ffmpeg — слайдшоу й голос, шрифти DejaVu — підписи кирилицею, tzdata — час завдань
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core tzdata \
     && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# Браузер для /browse (~400 МБ). Щоб зібрати без нього: --build-arg WITH_BROWSER=0
+ARG WITH_BROWSER=1
+RUN if [ "$WITH_BROWSER" = "1" ]; then python -m playwright install --with-deps chromium; fi
 
 # Копіюємо весь безпечний вміст репозиторію, щоб «Повна копія OrionAI»
 # могла включати код, README та docs. Секрети відсікає .dockerignore.
 COPY . .
 
-# База — у /data. На Railway ОБОВ'ЯЗКОВО підключіть Volume з Mount path /data (docs/09-railway.md),
+# База — у /data. На Railway ОБОВ'ЯЗКОВО підключіть Volume з Mount path /data (docs/20-railway.md),
 # інакше дані зникатимуть при кожному оновленні. Рядок VOLUME тут навмисно відсутній: Railway його не приймає.
 ENV DB_PATH=/data/bot.db MANAGER_DB_PATH=/data/manager.db BOT_TZ=Europe/Kyiv TZ=Europe/Kyiv PYTHONUNBUFFERED=1
 RUN mkdir -p /data

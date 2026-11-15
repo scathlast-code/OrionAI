@@ -1,0 +1,10 @@
+test_many_files (test_filework.FileTests.test_many_files) ... ok
+test_scenario (test_filework.FileTests.test_scenario) ... ok
+test_split (test_filework.FileTests.test_split) ... ok
+test_zip_roundtrip (test_filework.FileTests.test_zip_roundtrip) ... ok
+test_zip_slip (test_filework.FileTests.test_zip_slip) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.048s
+
+OK

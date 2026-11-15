@@ -1,11 +1,12 @@
 # DOMAIN задається в .env, наприклад DOMAIN=mybots.duckdns.org
 {$DOMAIN} {
-	# /ai — ШІ-бот, /hub — 🧭 головний бот
+	# /ai — Оріон; /hub — 🧭 головний бот, тепер усередині Оріона (адреси для дочірніх ботів не змінились).
+	# Якщо ви все ще запускаєте окремий manager.py — поверніть reverse_proxy hub:8080 у блоці /hub.
 	handle_path /ai/* {
 		reverse_proxy ai:8000
 	}
-	handle_path /hub/* {
-		reverse_proxy hub:8080
+	handle /hub/* {
+		reverse_proxy ai:8000
 	}
 	# Сторінка політики конфіденційності — Meta вимагає її посилання, щоб увімкнути режим Live
 	handle /privacy {
