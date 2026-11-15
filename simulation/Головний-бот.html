@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Симулятор головного бота</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+
+/* Ідея макета: ліворуч (або на весь екран телефона) — чат як у Telegram; праворуч (або знизу шторкою) — панель тестування. */
+:root {
+  --bg: #e9eef2;
+  --chat-bg: #d9e4ea;
+  --panel: #ffffff;
+  --ink: #17212b;
+  --muted: #5d6b78;
+  --line: #d2dbe2;
+  --accent: #2b7fc2;
+  --accent-ink: #ffffff;
+  --bubble-bot: #ffffff;
+  --bubble-me: #dcf3d4;
+  --btn: #eef4f9;
+  --btn-ink: #1d5f95;
+  --warn: #b26a00;
+  --bad: #c03a2b;
+  --good: #2e8b57;
+  --font: "Golos Text", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1720; --chat-bg: #0e1621; --panel: #17212b; --ink: #e6edf3; --muted: #8b9aa8; --line: #26323f;
+    --accent: #5aa7e6; --accent-ink: #0b1520; --bubble-bot: #182533; --bubble-me: #2b5278; --btn: #22313f; --btn-ink: #9ccbf0;
+    --warn: #e0a24a; --bad: #ef7b6c; --good: #6fcf97; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1720; --chat-bg: #0e1621; --panel: #17212b; --ink: #e6edf3; --muted: #8b9aa8; --line: #26323f;
+  --accent: #5aa7e6; --accent-ink: #0b1520; --bubble-bot: #182533; --bubble-me: #2b5278; --btn: #22313f; --btn-ink: #9ccbf0;
+  --warn: #e0a24a; --bad: #ef7b6c; --good: #6fcf97; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--ink); font: 15px/1.45 var(--font); }
+button { font: inherit; color: inherit; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.app { height: 100%; display: grid; grid-template-columns: minmax(0, 1fr) 360px; }
+.chat { display: flex; flex-direction: column; min-height: 0; background: var(--chat-bg); }
+.head { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.ava { width: 40px; height: 40px; border-radius: 50%; background: linear-gradient(135deg, #3a8fd6, #2bb3a3); display: grid; place-items: center; color: #fff; font-weight: 700; flex: none; }
+.head h1 { font-size: 16px; margin: 0; font-weight: 600; }
+.head .sub { font-size: 13px; color: var(--muted); }
+.head .grow { flex: 1; min-width: 0; }
+.iconbtn { border: 0; background: var(--btn); color: var(--btn-ink); border-radius: 10px; padding: 8px 12px; cursor: pointer; font-weight: 500; white-space: nowrap; }
+.banner { font-size: 12.5px; color: var(--muted); background: var(--panel); border-bottom: 1px solid var(--line); padding: 6px 16px; }
+.msgs { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+.row { display: flex; flex-direction: column; max-width: min(560px, 88%); }
+.row.me { align-self: flex-end; align-items: flex-end; }
+.bubble { background: var(--bubble-bot); border-radius: 14px 14px 14px 4px; padding: 8px 12px 6px; white-space: pre-wrap; overflow-wrap: anywhere; box-shadow: 0 1px 1px rgba(0,0,0,.08); }
+.me .bubble { background: var(--bubble-me); border-radius: 14px 14px 4px 14px; }
+.bubble code { font: 13px var(--mono); background: rgba(127,127,127,.15); padding: 1px 4px; border-radius: 4px; }
+.time { font-size: 11px; color: var(--muted); text-align: right; margin-top: 2px; }
+.kb { display: grid; gap: 4px; margin-top: 4px; width: 100%; }
+.kbrow { display: flex; gap: 4px; }
+.kbrow button { flex: 1; border: 0; border-radius: 10px; padding: 8px 6px; background: var(--btn); color: var(--btn-ink); cursor: pointer; font-size: 13.5px; font-weight: 500; line-height: 1.25; }
+.kbrow button:hover { filter: brightness(.97); }
+.typing { align-self: flex-start; font-size: 13px; color: var(--muted); padding: 2px 6px; }
+.composer { display: flex; gap: 8px; padding: 10px 12px; background: var(--panel); border-top: 1px solid var(--line); position: relative; }
+.composer input { flex: 1; min-width: 0; width: 0; border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 20px; padding: 10px 14px; font: inherit; }
+.send { border: 0; background: var(--accent); color: var(--accent-ink); border-radius: 20px; padding: 0 16px; font-weight: 600; cursor: pointer; }
+.cmdmenu { position: absolute; left: 12px; right: 12px; bottom: 60px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,.18); max-height: 50vh; overflow: auto; display: none; z-index: 5; }
+.cmdmenu.open { display: block; }
+.cmdmenu button { display: flex; gap: 10px; width: 100%; text-align: left; border: 0; background: none; padding: 10px 14px; cursor: pointer; border-bottom: 1px solid var(--line); }
+.cmdmenu button b { color: var(--accent); min-width: 80px; }
+.cmdmenu button span { color: var(--muted); }
+/* панель тестування */
+.panel { background: var(--panel); border-left: 1px solid var(--line); overflow-y: auto; padding: 14px 14px 24px; display: flex; flex-direction: column; gap: 14px; }
+.panel h2 { font-size: 15px; margin: 0; text-wrap: balance; }
+.panel p { margin: 0; font-size: 13px; color: var(--muted); }
+.clock { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.clock .now { font: 500 14px var(--mono); font-variant-numeric: tabular-nums; }
+.pbtn { border: 1px solid var(--line); background: var(--btn); color: var(--btn-ink); border-radius: 8px; padding: 6px 10px; cursor: pointer; font-size: 13px; font-weight: 500; }
+.models { display: flex; flex-direction: column; gap: 6px; }
+.mrow { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; align-items: center; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; }
+.mrow label { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; cursor: pointer; }
+.mrow .st { font-size: 12px; color: var(--muted); grid-column: 1 / -1; font-variant-numeric: tabular-nums; }
+.mrow select { grid-column: 1 / -1; width: 100%; border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 8px; padding: 5px 8px; font: inherit; font-size: 13px; }
+.mrow.off { opacity: .55; }
+.chk { display: flex; gap: 8px; align-items: center; font-size: 13.5px; }
+.tips { font-size: 13px; color: var(--muted); display: grid; gap: 6px; }
+.tips button { text-align: left; }
+.sheetbtn { display: none; }
+@media (max-width: 860px) {
+  .app { grid-template-columns: minmax(0, 1fr); }
+  .panel { position: fixed; inset: auto 0 0 0; max-height: 78%; border-left: 0; border-top: 1px solid var(--line); border-radius: 16px 16px 0 0; box-shadow: 0 -10px 30px rgba(0,0,0,.25); transform: translateY(105%); transition: transform .25s ease; z-index: 10; }
+  .panel.open { transform: none; }
+  .sheetbtn { display: inline-block; }
+  .head { padding-top: max(10px, env(safe-area-inset-top)); }
+}
+@media (prefers-reduced-motion: reduce) { .panel { transition: none; } }
+
+.replykb { display: none; gap: 6px; padding: 8px 12px 0; background: var(--panel); flex-wrap: wrap; }
+.replykb.open { display: grid; grid-template-columns: repeat(3, 1fr); }
+.replykb button { border: 0; background: var(--btn); color: var(--btn-ink); border-radius: 9px; padding: 6px 2px; font-weight: 500; cursor: pointer; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.media { display: block; width: 100%; max-width: 320px; border-radius: 10px; margin-bottom: 6px; }
+.audio { display: flex; align-items: center; gap: 10px; padding: 6px 4px; }
+.audio .play { width: 38px; height: 38px; border-radius: 50%; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; flex: none; }
+.audio .wave { flex: 1; height: 22px; background: repeating-linear-gradient(90deg, var(--accent) 0 3px, transparent 3px 6px); opacity: .45; border-radius: 4px; }
+.video { position: relative; }
+.video::after { content: "▶"; position: absolute; inset: 0; display: grid; place-items: center; font-size: 42px; color: #fff; text-shadow: 0 2px 8px rgba(0,0,0,.5); pointer-events: none; }
+.urlbtn { text-decoration: none; display: flex; align-items: center; justify-content: center; }
+/* ---- вигляд WhatsApp та Instagram ---- */
+.kb.plat .kbrow button,.kb.plat .kbrow .listbtn{width:100%}
+.listbtn{font-weight:600}
+.listsheet{position:absolute;left:0;right:0;bottom:0;max-height:70%;overflow:auto;background:var(--panel,#fff);border-radius:16px 16px 0 0;box-shadow:0 -8px 30px rgba(0,0,0,.18);padding:8px 10px 14px;transform:translateY(105%);transition:transform .2s;z-index:30}
+.listsheet.open{transform:none}
+.lshead{display:flex;justify-content:space-between;align-items:center;padding:6px 4px 10px;font-size:15px}
+.lsclose{border:0;background:transparent;font-size:18px;cursor:pointer;padding:4px 8px}
+.lsitem{display:flex;flex-direction:column;align-items:flex-start;width:100%;text-align:left;border:0;border-top:1px solid rgba(0,0,0,.07);background:transparent;padding:11px 6px;font:inherit;cursor:pointer}
+.lsitem small{color:#667;font-size:12px;margin-top:2px}
+.quick{display:flex;gap:6px;overflow-x:auto;padding:0 10px;min-height:0}
+.quick:not(:empty){padding:6px 10px}
+.quick button{flex:0 0 auto;border:1px solid #c7c7d1;background:#fff;border-radius:18px;padding:7px 12px;font:inherit;font-size:14px;cursor:pointer;white-space:nowrap}
+.chat{position:relative}
+body[data-plat="wa"] .head{background:#008069;color:#fff}
+body[data-plat="wa"] .head .sub{color:#d6f2ea}
+body[data-plat="wa"] .msgs{background:#efeae2}
+body[data-plat="wa"] .row.me .bubble{background:#d9fdd3}
+body[data-plat="wa"] .kb.plat button{color:#008069;background:#fff}
+body[data-plat="wa"] .send{background:#008069}
+body[data-plat="ig"] .head{background:#fff;border-bottom:1px solid #eee}
+body[data-plat="ig"] .msgs{background:#fff}
+body[data-plat="ig"] .bubble{background:#efefef;border-radius:20px}
+body[data-plat="ig"] .row.me .bubble{background:linear-gradient(135deg,#7638fa,#d300c5,#ff7a00);color:#fff}
+body[data-plat="ig"] .row.me .bubble .time{color:#f4e9ff}
+body[data-plat="ig"] .ava{background:linear-gradient(135deg,#feda75,#fa7e1e,#d62976,#962fbf,#4f5bd5)}
+body[data-plat="ig"] .send{background:#3797f0}
+body[data-plat="ig"] .kb.plat button{background:#fff;border:1px solid #dbdbdb;color:#0095f6}
+[aria-pressed="true"]{outline:2px solid var(--accent)}
+
+</style>
+</head>
+<body>
+<div class="app">
+  <section class="chat" aria-label="Чат з ботом">
+    <div class="head">
+      <div class="ava" aria-hidden="true">🧭</div>
+      <div class="grow">
+        <h1>🧭 Мої боти</h1>
+        <div class="sub" id="sub">бот · симуляція</div>
+      </div>
+      <button class="iconbtn sheetbtn" id="openPanel" aria-controls="panel">🧪 Тест</button>
+    </div>
+    <div class="banner">Симуляція головного бота: меню, боти, вхідні, пересилання й захист працюють як у справжньому. Боти й події — демонстраційні.</div>
+    <div class="msgs" id="msgs" aria-live="polite"></div>
+    <div class="replykb" id="replykb"></div>
+    <form class="composer" id="form" autocomplete="off">
+      <button type="button" class="iconbtn" id="kbBtn" aria-label="Показати або сховати меню">⌨️</button>
+      <input id="inp" placeholder="Повідомлення" aria-label="Повідомлення">
+      <button class="send" type="submit" aria-label="Надіслати">➤</button>
+    </form>
+  </section>
+  <aside class="panel" id="panel" aria-label="Панель тестування">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+      <h2>🧪 Панель тестування</h2>
+      <button class="pbtn sheetbtn" id="closePanel">Закрити</button>
+    </div>
+    <div>
+      <p style="margin-bottom:6px">Месенджер (так бот виглядатиме в ньому):</p>
+      <div class="clock" id="platsw"></div>
+    </div>
+    <div>
+      <div class="clock"><span>Час бота:</span><span class="now" id="clock"></span></div>
+      <div class="clock" style="margin-top:6px">
+        <button class="pbtn" data-skip="60">⏩ +1 хв</button>
+        <button class="pbtn" data-skip="3600">⏩ +1 год</button>
+        <button class="pbtn" data-skip="86400">⏩ +1 день</button>
+      </div>
+      <p style="margin-top:6px">Перемотування запускає перевірку ботів: бот, що довго мовчить, вважається впалим.</p>
+    </div>
+    <div class="tips">
+      <b style="color:var(--ink)">Що спробувати</b>
+      <button class="pbtn" data-scn="alert">🚨 Монітор надсилає тривогу (HTTP)</button>
+      <button class="pbtn" data-scn="report">📊 Монітор надсилає звіт</button>
+      <button class="pbtn" data-scn="rule">🔀 Правило: тривоги монітора → ШІ-бот (ШІ пояснює)</button>
+      <button class="pbtn" data-scn="down">🔴 YouTube Saver перестає працювати</button>
+      <button class="pbtn" data-scn="up">🟢 YouTube Saver знову працює</button>
+      <button class="pbtn" data-scn="fwd">↪️ Переслати головному повідомлення іншого бота</button>
+      <button class="pbtn" data-scn="btb">✈️ Бот пише головному напряму (bot-to-bot)</button>
+      <button class="pbtn" data-scn="flood">🌊 Бот засипає повідомленнями (захист від флуду)</button>
+      <button class="pbtn" data-scn="loop">🔁 Петля між ботами (захист від зациклень)</button>
+      <button class="pbtn" data-scn="reset">↺ Почати спочатку</button>
+    </div>
+    <p>Ваші боти зараз:</p>
+    <div class="models" id="botsState"></div>
+  </aside>
+</div>
+<script>
+// Спільне ядро симуляцій: конструктор меню (порт uilayout.py), навігація «Назад · Додому · Вперед»
+// і вигляд кнопок для трьох месенджерів (Telegram, WhatsApp, Instagram) — як їх показує міст bridge.py.
+const esc = s => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const pad = n => String(n).padStart(2, "0");
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const PLAT_DEFAULT = "tg";
+let PLATFORM = (new URLSearchParams(location.search).get("p") || (PLAT_DEFAULT.startsWith("__") ? "tg" : PLAT_DEFAULT));
+const PLAT_NAMES = { tg: "Telegram", wa: "WhatsApp", ig: "Instagram" };
+const NAV_BACK = "◀️ Назад", NAV_HOME = "🏠 Додому", NAV_FWD = "Вперед ▶️";
+
+// ---------------------------------------------------------------- конструктор меню
+class Layout {
+  constructor(items, defLayout, defGroups, getPrefs, setPref, { locked = [], adminItems = [], isAdmin = () => true } = {}) {
+    Object.assign(this, { items, defLayout, defGroups, getPrefs, setPref, locked: new Set(locked), adminItems: new Set(adminItems), isAdmin });
+    this.hist = {};
+  }
+  groups(c) { const g = this.getPrefs(c).groups; return g == null ? { ...this.defGroups } : { ...g }; }
+  labels(c) { return { ...(this.getPrefs(c).labels || {}) }; }
+  relabels(c) { return { ...(this.getPrefs(c).relabel || {}) }; }
+  allIds(c) { return [...Object.keys(this.items), ...Object.keys(this.groups(c)).map(g => "g:" + g)]; }
+  layout(c) {
+    const saved = this.getPrefs(c).layout || [], ids = new Set(this.allIds(c)), groups = this.groups(c), out = [], have = new Set();
+    const fix = p => p.startsWith("g:") && !(p.slice(2) in groups) ? "home" : p;
+    for (const [i, p] of saved) if (ids.has(i) && !have.has(i)) { out.push([i, fix(p)]); have.add(i); }
+    for (const [i, p] of this.defLayout) if (ids.has(i) && !have.has(i)) { out.push([i, fix(p)]); have.add(i); }
+    for (const i of ids) if (!have.has(i)) out.push([i, "home"]);
+    return out.filter(([i]) => !this.adminItems.has(i) || this.isAdmin(c));
+  }
+  label(c, i) { const own = this.labels(c)[i]; if (own) return own; if (i.startsWith("g:")) return this.groups(c)[i.slice(2)] || "📂 Група"; return this.items[i][0]; }
+  target(i) { return i.startsWith("g:") ? "m:grp:" + i.slice(2) : this.items[i][1]; }
+  where(c, i) { return (this.layout(c).find(x => x[0] === i) || [0, "off"])[1]; }
+  placeName(c, p) { return p === "kb" ? (PLATFORM === "tg" ? "⌨️ меню внизу" : "⌨️ меню (слово «меню»)") : p === "home" ? "🏠 «Меню»" : p === "off" ? "🚫 приховано" : "📂 " + this.label(c, p); }
+  inPlace(c, p) { return this.layout(c).filter(x => x[1] === p).map(x => x[0]); }
+  replyLabels(c) { return this.inPlace(c, "kb").map(i => this.relabel(c, this.label(c, i))); }
+  replyRoutes(c) { const o = {}; for (const i in this.items) o[this.items[i][0]] = this.items[i][1]; for (const i of this.allIds(c)) o[this.label(c, i)] = this.target(i); return o; }
+  placeRows(c, p, badges = {}) { const cols = this.getPrefs(c).home_cols || 2, b = this.inPlace(c, p).map(i => [this.label(c, i) + (badges[i] || ""), this.target(i)]); const o = []; for (let k = 0; k < b.length; k += cols) o.push(b.slice(k, k + cols)); return o; }
+  scrGroup(c, gid, badges) { const rows = this.placeRows(c, "g:" + gid, badges); return [`<b>${esc(this.label(c, "g:" + gid))}</b>\n\n` + (rows.length ? "Оберіть розділ:" : "<i>Група порожня. Додайте сюди розділи в «🎛 Кнопки».</i>"), [...rows, [["🎛 Змінити цю групу", "m:bi:g:" + gid]]]]; }
+  scrEditor(c) {
+    const lay = this.layout(c), p = this.getPrefs(c), L = ["<b>🎛 Кнопки й меню</b>", "", "Змінюйте все: де стоїть кожен розділ, назви, групи (підменю), порядок і кількість кнопок у ряду.", ""];
+    for (const pl of ["kb", "home", ...Object.keys(this.groups(c)).map(g => "g:" + g), "off"]) { const n = lay.filter(x => x[1] === pl).map(x => this.label(c, x[0])); L.push(`<b>${esc(this.placeName(c, pl))}:</b> ` + (n.length ? esc(n.join(" · ")) : "—")); }
+    L.push("", "Натисніть на розділ, щоб змінити його.");
+    const rows = pairs(lay.map(([i]) => [this.label(c, i), "m:bi:" + i]));
+    rows.push([["➕ Нова група", "m:bgnew"], ["✏️ Будь-яка кнопка", "m:brl"]]);
+    const kc = p.kb_cols || 2, hc = p.home_cols || 2;
+    if (PLATFORM === "tg") rows.push([["⌨️ У ряд:", "m:noop"], ...[1, 2, 3, 4].map(n => [(kc === n ? "● " : "") + n, "m:bset:kb_cols:" + n])]);
+    rows.push([["🏠 У ряд:", "m:noop"], ...[1, 2, 3].map(n => [(hc === n ? "● " : "") + n, "m:bset:home_cols:" + n])]);
+    rows.push([["↺ Усе як було спочатку", "m:breset"]]);
+    return [L.join("\n"), rows];
+  }
+  cycle(c, i, place) { if (!(i.startsWith("g:") && place.startsWith("g:"))) return false; const d = Object.fromEntries(this.layout(c)); let cur = place; while (cur.startsWith("g:")) { if (cur === i) return true; cur = d[cur] || "home"; } return false; }
+  reachable(lay) { const d = Object.fromEntries(lay); for (const i of this.locked) { let cur = d[i] || "home", seen = new Set(); while (cur.startsWith("g:") && !seen.has(cur)) { seen.add(cur); cur = d[cur] || "home"; } if (cur !== "kb" && cur !== "home") return false; } return true; }
+  scrItem(c, i) {
+    if (!this.allIds(c).includes(i)) return this.scrEditor(c);
+    const place = this.where(c, i), isG = i.startsWith("g:");
+    let t = `<b>🎛 ${esc(this.label(c, i))}</b>\n\n${isG ? "Група (підменю)" : "Розділ"}. Зараз: <b>${esc(this.placeName(c, place))}</b>` + (this.locked.has(i) ? " · 🔒 не можна приховати" : "");
+    if (isG) { const ins = this.inPlace(c, i).map(x => this.label(c, x)); t += "\nУсередині: " + (ins.length ? esc(ins.join(" · ")) : "порожньо"); }
+    t += "\n\nКуди поставити:";
+    const opts = [["kb", PLATFORM === "tg" ? "⌨️ Внизу" : "⌨️ У меню"], ["home", "🏠 У «Меню»"], ...Object.keys(this.groups(c)).filter(g => "g:" + g !== i).map(g => ["g:" + g, "📂 " + this.label(c, "g:" + g)])];
+    if (!this.locked.has(i)) opts.push(["off", "🚫 Сховати"]);
+    const rows = pairs(opts.filter(([pl]) => !this.cycle(c, i, pl)).map(([pl, n]) => [(pl === place ? "● " : "") + n, `m:bmv:${i}:${pl}`]));
+    rows.push([["⬆️ Вище", "m:bup:" + i], ["⬇️ Нижче", "m:bdn:" + i]]);
+    rows.push([["✏️ Перейменувати", "m:lren:" + i], ...(i in this.labels(c) ? [["↺ Стара назва", "m:lunren:" + i]] : [])]);
+    if (isG) rows.push([["🗑 Видалити групу (вміст перейде в «Меню»)", "m:bgdel:" + i.slice(2)]]);
+    rows.push([["🎛 Усі кнопки", "m:btn"]]);
+    return [t, rows];
+  }
+  scrRelabel(c) { const rl = this.relabels(c); let t = "<b>✏️ Перейменувати будь-яку кнопку</b>\n\nНадішліть повідомлення у форматі\n<code>Старий підпис = Новий підпис</code>\n\nНаприклад: <code>🗑 Кошик = ♻️ Смітник</code>. Працює для всіх кнопок у всіх меню, разом із «Назад», «Додому» й «Вперед».";
+    if (Object.keys(rl).length) t += "\n\n<b>Ваші заміни:</b>\n" + Object.entries(rl).map(([a, b]) => `• ${esc(a)} → ${esc(b)}`).join("\n");
+    return [t, Object.entries(rl).map(([a, b], n) => [["✖️ " + b, "m:brldel:" + n]])]; }
+  apply(c, act, arg, val) {
+    let lay = this.layout(c).map(x => [...x]); const idx = lay.findIndex(x => x[0] === arg);
+    if (act === "mv" && idx >= 0) { if (val === "off" && this.locked.has(arg)) return "Цей розділ не можна приховати"; if (this.cycle(c, arg, val)) return "Група не може бути всередині самої себе"; const old = lay[idx][1]; lay[idx][1] = val; if (!this.reachable(lay)) { lay[idx][1] = old; return "Так «Налаштування» стали б недоступні — оберіть інше місце"; } }
+    else if ((act === "up" || act === "dn") && idx >= 0) { const same = lay.map((x, n) => [x, n]).filter(([x]) => x[1] === lay[idx][1]).map(([, n]) => n), k = same.indexOf(idx), j = act === "up" ? k - 1 : k + 1; if (j >= 0 && j < same.length) { const a = same[k], b = same[j]; [lay[a], lay[b]] = [lay[b], lay[a]]; } }
+    else if (act === "set") { this.setPref(c, arg, +val); return null; }
+    else if (act === "ren") { const l = this.labels(c); l[arg] = val.slice(0, 40); this.setPref(c, "labels", l); return null; }
+    else if (act === "unren") { const l = this.labels(c); delete l[arg]; this.setPref(c, "labels", l); return null; }
+    else if (act === "gnew") { const g = this.groups(c), gid = Math.random().toString(16).slice(2, 8); g[gid] = val.slice(0, 40); this.setPref(c, "groups", g); lay.push(["g:" + gid, "home"]); this.setPref(c, "layout", lay); return "g:" + gid; }
+    else if (act === "gdel") { const g = this.groups(c); delete g[arg]; this.setPref(c, "groups", g); lay = lay.filter(x => x[0] !== "g:" + arg).map(([i, p]) => [i, p === "g:" + arg ? "home" : p]); }
+    else if (act === "relabel") { const r = this.relabels(c); r[arg] = val.slice(0, 40); this.setPref(c, "relabel", r); return null; }
+    else if (act === "relabel_del") { const r = this.relabels(c), k = Object.keys(r)[+arg]; if (k) delete r[k]; this.setPref(c, "relabel", r); return null; }
+    else if (act === "reset") { for (const k of ["layout", "groups", "labels", "relabel", "kb_cols", "home_cols"]) this.setPref(c, k, null); return null; }
+    this.setPref(c, "layout", lay); return null;
+  }
+  relabel(c, t) { return this.relabels(c)[t] || t; }
+  unrelabel(c, t) { for (const [a, b] of Object.entries(this.relabels(c))) if (b === t) return a; return t; }
+  decorate(c, rows, nav = true) {
+    const out = [];
+    for (const r of rows || []) { const k = r.filter(([t, d]) => !(nav && (t.startsWith("«") || d === "m:home"))); if (k.length) out.push(k); }
+    if (nav) { const nr = []; if (this.canBack(c)) nr.push([NAV_BACK, "m:nav:back"]); if (this.current(c) !== "m:home") nr.push([NAV_HOME, "m:nav:home"]); if (this.canFwd(c)) nr.push([NAV_FWD, "m:nav:fwd"]); if (nr.length) out.push(nr); }
+    return out.map(r => r.map(([t, d]) => [this.relabel(c, t), d]));
+  }
+  h(c) { return this.hist[c] || (this.hist[c] = [[], -1]); }
+  visit(c, d) { const [st, pos] = this.h(c); if (pos >= 0 && st[pos] === d) return; st.splice(pos + 1); st.push(d); if (st.length > 30) st.shift(); this.hist[c] = [st, st.length - 1]; }
+  current(c) { const [st, pos] = this.h(c); return st[pos] || null; }
+  canBack(c) { return this.h(c)[1] > 0; }
+  canFwd(c) { const [st, pos] = this.h(c); return pos < st.length - 1; }
+  back(c) { const [st, pos] = this.h(c); if (pos > 0) { this.hist[c][1] = pos - 1; return st[pos - 1]; } return "m:home"; }
+  fwd(c) { const [st, pos] = this.h(c); if (pos < st.length - 1) { this.hist[c][1] = pos + 1; return st[pos + 1]; } return this.current(c) || "m:home"; }
+}
+// Спільні дії редактора. ask(дія, дані, підказка). Повертає [екран, підказка] або null.
+function handleEditor(L, c, p, ask) {
+  const a = p[1], rest = p.slice(2).join(":");
+  if (a === "btn") return [L.scrEditor(c), null];
+  if (a === "bi") return [L.scrItem(c, rest), null];
+  if (a === "bmv") { const g = p[p.length - 2] === "g", item = g ? p.slice(2, -2).join(":") : p.slice(2, -1).join(":"), place = g ? "g:" + p[p.length - 1] : p[p.length - 1]; const tip = L.apply(c, "mv", item, place); return [L.scrItem(c, item), tip || "Переміщено"]; }
+  if (a === "bup" || a === "bdn") { L.apply(c, a === "bup" ? "up" : "dn", rest); return [L.scrItem(c, rest), null]; }
+  if (a === "bset") { L.apply(c, "set", p[2], p[3]); return [L.scrEditor(c), null]; }
+  if (a === "lren") { ask("lren", rest, `✏️ Надішліть нову назву для «${esc(L.label(c, rest))}». Емодзі на початку — за бажанням.`); return [null, null]; }
+  if (a === "lunren") { L.apply(c, "unren", rest); return [L.scrItem(c, rest), "Назву повернуто"]; }
+  if (a === "bgnew") { ask("bgnew", null, "📂 Як назвати нову групу? Наприклад: «🧰 Інструменти». Потім перенесіть у неї розділи."); return [null, null]; }
+  if (a === "bgdel") { L.apply(c, "gdel", p[2]); return [L.scrEditor(c), "Групу видалено"]; }
+  if (a === "brl") { ask("brl", null, null); return [L.scrRelabel(c), null]; }
+  if (a === "brldel") { L.apply(c, "relabel_del", p[2]); return [L.scrRelabel(c), "Заміну прибрано"]; }
+  if (a === "breset") { L.apply(c, "reset"); return [L.scrEditor(c), "Повернуто типові кнопки"]; }
+  return null;
+}
+const EDITOR_ACTIONS = new Set(["btn", "bi", "bmv", "bup", "bdn", "bset", "lren", "lunren", "bgnew", "bgdel", "brl", "brldel", "breset"]);
+function handleEditorText(L, c, act, data, text) {
+  if (act === "lren") { L.apply(c, "ren", data, text.trim()); return [L.scrItem(c, data), "✅ Перейменовано"]; }
+  if (act === "bgnew") { const it = L.apply(c, "gnew", null, text.trim()); return [L.scrItem(c, it), "✅ Групу створено. Тепер переносьте в неї розділи."]; }
+  if (act === "brl") { if (!text.includes("=")) return [L.scrRelabel(c), "⚠️ Потрібен формат: Старий = Новий"]; const [o, n] = text.split("=", 2).map(x => x.trim()); if (!o || !n) return [L.scrRelabel(c), "⚠️ Обидва підписи мають бути непорожні"]; L.apply(c, "relabel", o, n); return [L.scrRelabel(c), `✅ «${o}» тепер «${n}»`]; }
+  return null;
+}
+
+// ---------------------------------------------------------------- кнопки під повідомленням для кожного месенджера
+// WhatsApp: до 3 коротких (≤20 символів) — кнопками, інакше список «Обрати» до 10 пунктів (9 + «➡️ Ще»).
+// Instagram: до 3 коротких — кнопками в повідомленні, інакше швидкі відповіді над клавіатурою (до 13, 12 + «➡️ Ще»).
+function flatBtns(kb) { const b = [], links = []; for (const r of kb || []) for (const [t, d] of r) { if (d === "m:noop") continue; if (d.startsWith("url:")) links.push([t, d]); else b.push([t, d]); } return [b, links]; }
+const btnHtml = ([t, d], v, cls = "") => d.startsWith("url:") ? `<button type="button" class="urlbtn ${cls}" data-url="1">🔗 ${esc(t)}</button>` : `<button type="button" class="${cls}" data-cb="${esc(d)}" data-v="${v}">${esc(t)}</button>`;
+function kbHtml(kb, v) {
+  if (!kb || !kb.length) return "";
+  if (PLATFORM === "tg") return `<div class="kb">${kb.map(r => `<div class="kbrow">${r.map(b => btnHtml(b, v)).join("")}</div>`).join("")}</div>`;
+  const [b, links] = flatBtns(kb);
+  const lim = PLATFORM === "wa" ? 3 : 3;
+  if (b.length + (PLATFORM === "ig" ? links.length : 0) <= lim && b.every(([t]) => t.length <= 20))
+    return `<div class="kb plat">${[...b, ...(PLATFORM === "ig" ? links : [])].map(x => `<div class="kbrow">${btnHtml(x, v)}</div>`).join("")}</div>`;
+  if (PLATFORM === "wa") return `<div class="kb plat"><div class="kbrow"><button type="button" class="listbtn" data-list="${v}">☰ Обрати</button></div></div>`;
+  return ""; // Instagram: швидкі відповіді показуються над полем вводу
+}
+function linksHtml(kb) { if (PLATFORM === "tg") return ""; const [, links] = flatBtns(kb); if (PLATFORM === "ig" && links.length + flatBtns(kb)[0].length <= 3) return ""; return links.length ? "\n\n" + links.map(([t, d]) => `🔗 ${esc(t)}: <u>${esc(d.slice(4))}</u>`).join("\n") : ""; }
+function pageBtns(b, per) { if (b.length <= per + 1) return [b, []]; return [b.slice(0, per), b.slice(per)]; }
+
+// ---------------------------------------------------------------- WhatsApp: список «Обрати»; Instagram: швидкі відповіді
+const PAGES = {}; // id повідомлення -> решта пунктів для «➡️ Ще»
+function sheetEl() { let el = document.getElementById("listsheet"); if (!el) { el = document.createElement("div"); el.id = "listsheet"; el.className = "listsheet"; el.setAttribute("role", "dialog"); document.querySelector(".chat").appendChild(el); } return el; }
+function openList(v, items, title) {
+  const [page, rest] = pageBtns(items, 9); if (rest.length) PAGES[v] = rest;
+  const el = sheetEl();
+  el.innerHTML = `<div class="lshead"><b>${esc(title || "Оберіть")}</b><button type="button" class="lsclose" aria-label="Закрити">✕</button></div>` +
+    page.map(([t, d]) => `<button type="button" class="lsitem" data-cb="${esc(d)}" data-v="${v}"><span>${esc(t.length > 24 ? t.slice(0, 23) + "…" : t)}</span>${t.length > 24 ? `<small>${esc(t.slice(0, 72))}</small>` : ""}</button>`).join("") +
+    (rest.length ? `<button type="button" class="lsitem" data-more="${v}"><span>➡️ Ще</span><small>ще ${rest.length}</small></button>` : "");
+  el.classList.add("open");
+}
+function closeList() { const el = document.getElementById("listsheet"); if (el) el.classList.remove("open"); }
+function quickEl() { let el = document.getElementById("quick"); if (!el) { el = document.createElement("div"); el.id = "quick"; el.className = "quick"; const f = document.getElementById("form"); f.parentNode.insertBefore(el, f); } return el; }
+function renderQuick(v, items) {
+  const el = quickEl();
+  if (!items) { const [b, links] = flatBtns(v.kb); if (!v.kb || (b.length + links.length <= 3 && b.every(([t]) => t.length <= 20))) { el.innerHTML = ""; return; } items = b; }
+  const [page, rest] = items.length > 13 ? [items.slice(0, 12), items.slice(12)] : [items, []]; if (rest.length) PAGES[v.id] = rest;
+  el.innerHTML = page.map(([t, d]) => `<button type="button" data-cb="${esc(d)}" data-v="${v.id}" data-quick="1">${esc(t.slice(0, 20))}</button>`).join("") + (rest.length ? `<button type="button" data-more="${v.id}" data-quick="1">➡️ Ще</button>` : "");
+}
+function platformClick(e, msgs) {
+  const lb = e.target.closest("[data-list]"); if (lb) { const v = msgs.get(+lb.dataset.list); openList(+lb.dataset.list, flatBtns(v.kb)[0], v.html.replace(/<[^>]+>/g, "").split("\n")[0]); return true; }
+  const mb = e.target.closest("[data-more]"); if (mb) { const v = +mb.dataset.more, rest = PAGES[v] || []; delete PAGES[v]; if (PLATFORM === "wa") openList(v, rest, "Ще варіанти"); else renderQuick({ id: v, kb: null }, rest); return true; }
+  if (e.target.closest(".lsclose")) { closeList(); return true; }
+  return false;
+}
+function applyPlatformTheme() {
+  document.body.dataset.plat = PLATFORM;
+  const kbBtn = document.getElementById("kbBtn"); if (kbBtn) { kbBtn.textContent = PLATFORM === "tg" ? "⌨️" : PLATFORM === "ig" ? "≡" : "☰"; kbBtn.setAttribute("aria-label", PLATFORM === "tg" ? "Показати або сховати меню" : "Меню"); }
+  const mb = document.getElementById("menuBtn"); if (mb) mb.style.display = PLATFORM === "tg" ? "" : "none";
+  const sw = document.getElementById("platsw"); if (sw) sw.innerHTML = Object.entries(PLAT_NAMES).map(([k, n]) => `<button class="pbtn" data-plat="${k}" ${k === PLATFORM ? 'aria-pressed="true"' : ""}>${n}</button>`).join("");
+  const q = document.getElementById("quick"); if (q) q.innerHTML = ""; closeList();
+}
+
+// Симулятор 🧭 головного бота: повторює логіку manager.py (боти, моніторинг, вхідні, пересилання з захистом
+// від зациклень, кнопки, копії). Замість мереж — демо-боти, а події викликаються з панелі тестування.
+const D = {"help": {"start": ["🚀 З чого почати", "1. «🤖 Боти» → «➕ Додати бота»: Telegram — токен від @BotFather; WhatsApp — ID номера й постійний токен Meta; Instagram — токен Instagram API; «Інший» — будь-який сервіс чи скрипт.\n2. Токен я перевіряю й одразу видаляю ваше повідомлення з ним із чату. У базі токени зашифровані.\n3. У картці бота → «🔌 Підключення» — адреса скриньки й ключ: з ними бот може писати мені сам.\n4. «🔀 Пересилання» — правила, хто кому передає повідомлення."], "api": ["🔌 Скринька й команди", "<b>Бот → головний:</b> POST на адресу скриньки з JSON <code>{key, type, text}</code>. Типи: alert (тривога — завжди зі сповіщенням), info, report.\n<b>Сигнал «я живий»:</b> POST …/hb з <code>{key}</code> раз на кілька хвилин. Якщо бот мовчить довше за HEARTBEAT_TIMEOUT — я напишу, що він упав. Разом із сигналом бот може повідомити свою адресу команд <code>cmd_url</code>.\n<b>Головний → бот:</b> я надсилаю POST на cmd_url з <code>{key, text, type, from, hop}</code>. Якщо бот відповідає <code>{\"reply\": \"…\"}</code>, відповідь з'являється у «Вхідних».\n<b>Без коду:</b> перешліть мені будь-яке повідомлення бота — воно стане подією цього бота.\n<b>Bot-to-bot:</b> з травня 2026 Telegram дозволяє ботам писати одне одному в особисті, якщо в обох увімкнено режим у @BotFather."], "rules": ["🔀 Пересилання й захист", "Правило передає подію іншому боту автоматично. Вручну — кнопка «↪️ Переслати боту» під будь-якою подією.\nЗахист від зациклень:\n• кожна передача рахується; після RELAY_MAX_HOPS (3) далі не йде;\n• однаковий текст від того самого бота за 2 хв відкидається;\n• понад RELAY_RATE_PER_MIN (30) повідомлень за хвилину від бота — пауза 5 хв і сповіщення вам."], "monitor": ["📡 Моніторинг", "Telegram: getMe (токен живий) і getWebhookInfo (черга, помилки вебхука). WhatsApp: стан номера та якість (зелена/жовта/червона). Instagram: чи дійсний токен. Інші боти: сигнал «я живий». Я пишу лише при зміні стану: впав → 🔴, проблема → 🟡, піднявся → 🟢 з тривалістю збою."], "manage": ["✏️ Що можна міняти", "Telegram: назву, опис, короткий опис, список команд, писати від імені бота. Лише в @BotFather: аватар, inline-режим, створення й видалення ботів, передача власності.\nWhatsApp: опис, статус «Про мене», команди «/». Назву номера змінює Meta після перевірки.\nInstagram: швидкі питання (Ice Breakers). Профіль — лише в застосунку."], "safety": ["🛡 Безпека", "• Головний бот відповідає лише власнику (ALLOWED_USERS).\n• Токени в базі зашифровані ключем з MANAGER_SECRET. Не змінюйте його, інакше токени доведеться ввести знову.\n• Якщо токен міг потрапити до чужих рук: @BotFather → /revoke → новий токен → у картці бота «🔑 Замінити токен».\n• Увімкніть двоетапну перевірку в Telegram — це захищає і акаунт, і всіх ботів.\n• Резервні копії — у «🧰 Інструменти»."], "buttons": ["🎛 Кнопки", "Усі розділи можна переставляти між меню внизу, «Меню» і групами, перейменовувати, ховати, створювати свої групи. Будь-яку кнопку бота можна перейменувати: «Старий = Новий». У кожному меню є «◀️ Назад», «🏠 Додому» і «Вперед ▶️»."]}, "order": ["start", "api", "rules", "monitor", "manage", "safety", "buttons"]};
+const OWNER = 1;
+const KINDS = { telegram: ["✈️", "Telegram"], whatsapp: ["🟩", "WhatsApp"], instagram: ["📸", "Instagram"], http: ["🔌", "Інший (HTTP)"] };
+const TYPES = { alert: "🚨 Тривога", info: "ℹ️ Інформація", report: "📊 Звіт", command: "⚙️ Команда", reply: "↩️ Відповідь" };
+const SOURCES = { api: "через HTTP", telegram: "напряму в Telegram", forward: "переслано вами", monitor: "моніторинг", manager: "з головного бота" };
+const STATUS_ICON = { up: "🟢", warn: "🟡", down: "🔴", unknown: "⚪️", paused: "⏸" };
+const ALERT_LEVELS = { all: "🔔 усі події", alerts: "🚨 лише тривоги", off: "🔕 без сповіщень (лише у «Вхідних»)" };
+const COMMANDS_NAME = { telegram: "⌨️ Команди", whatsapp: "⌨️ Команди", instagram: "💬 Швидкі питання" };
+const BOT_SORTS = [["status", "🚦 Стан"], ["az", "🔤 А–Я"], ["kind", "🗂 Тип"], ["new", "🆕 Нові"]];
+const EV_FILTERS = [["all", "Усі"], ["unread", "🆕"], ["alert", "🚨"], ["pin", "📌"]];
+const EV_SORTS = [["new", "🆕 Нові"], ["old", "📜 Старі"], ["bot", "🤖 Бот"], ["type", "🗂 Тип"]];
+const MAX_HOP = 3, RATE_PER_MIN = 30, PER = 8;
+const CANCEL_ROW = [["✖️ Скасувати", "m:cancel"]];
+const pairs = a => { const o = []; for (let i = 0; i < a.length; i += 2) o.push(a.slice(i, i + 2)); return o; };
+const seg = (opts, cur) => opts.map(([v, l]) => [(v === cur ? "● " : "") + l, v]);
+const short = (t, n) => { t = String(t ?? "").replace(/\s+/g, " "); return t.length <= n ? t : t.slice(0, n - 1) + "…"; };
+let S;
+const now = () => Date.now() + S.offset;
+const ts = (t, full) => { if (!t) return "—"; const d = new Date(t); return full ? `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}` : `${pad(d.getDate())}.${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const key = () => Math.random().toString(36).slice(2, 14) + Math.random().toString(36).slice(2, 14);
+function fresh() {
+  const st = { offset: 0, bots: [], events: [], rules: [], ids: { b: 1, e: 1, r: 1 }, prefs: {}, await: {}, rate: {}, muted: {}, cmdlog: [] };
+  return st;
+}
+const prefs = c => (S.prefs[c] ||= {});
+// ---------------------------------------------------------------- меню (той самий конструктор, що в manager.py)
+const ITEMS = { bots: ["🤖 Боти", "m:bl"], inbox: ["📥 Вхідні", "m:in"], send: ["📨 Надіслати", "m:snd"], menu: ["☰ Меню", "m:home"], mon: ["📡 Моніторинг", "m:mon"], rules: ["🔀 Пересилання", "m:rl"],
+  pins: ["📌 Закріплені", "m:in:0:pin"], trash: ["🗑 Кошик", "m:tr"], api: ["🔌 Підключення", "m:api"], backup: ["💾 Резервні копії", "m:bk"], btns: ["🎛 Кнопки", "m:btn"], help: ["📖 Довідка", "help:main"] };
+const L = new Layout(ITEMS, [["bots", "kb"], ["inbox", "kb"], ["send", "kb"], ["menu", "kb"], ["mon", "home"], ["rules", "home"], ["pins", "home"], ["g:tools", "home"], ["help", "home"],
+  ["api", "g:tools"], ["trash", "g:tools"], ["backup", "g:tools"], ["btns", "g:tools"]], { tools: "🧰 Інструменти" }, c => prefs(c), (c, k, v) => { prefs(c)[k] = v; }, { locked: ["bots"] });
+const VIEWS = new Set(["home", "bl", "b", "bconn", "bp", "bc", "in", "e", "rl", "mon", "api", "tr", "bk", "btn", "bi", "brl", "grp", "snd"]);
+const isView = d => d.startsWith("help:") || VIEWS.has(d.split(":")[1]) && !(d.startsWith("m:snd:"));
+
+// ---------------------------------------------------------------- дані
+const botGet = id => S.bots.find(b => b.id === id);
+const botsList = (st = "active") => S.bots.filter(b => b.state === st);
+const icon = b => b.monitor ? STATUS_ICON[b.status] : STATUS_ICON.paused;
+const label = b => b.name + (b.username && b.kind === "telegram" ? " @" + b.username : "");
+function botAdd(kind, name, username, extra = {}) { const b = { id: S.ids.b++, kind, name, username, status: "up", detail: "", monitor: true, alerts: "all", via_tg: false, cmd_url: null, key: key(), created: now(), last_check: now(), last_seen: kind === "http" ? null : now(), pinned: null, state: "active", note: "", profile: { name, description: "", short: "" }, commands: kind === "instagram" ? [["q1", "Як замовити?"]] : [["start", "Почати"], ["help", "Довідка"]], ...extra }; if (kind === "http" && !extra.status) b.status = "unknown", b.detail = "ще не надсилав сигналу «я живий»"; S.bots.push(b); return b; }
+function eventAdd(botId, type, text, source, hop = 0) {
+  text = String(text || "").trim(); if (!text) return [null, "порожній текст"];
+  const t = now(), auto = source === "api" || source === "telegram";
+  if (botId && auto && (S.muted[botId] || 0) > t) return [null, "бот на паузі через надто часті повідомлення"];
+  if (botId && auto) { const w = (S.rate[botId] || []).filter(x => t - x < 60000); w.push(t); S.rate[botId] = w; if (w.length > RATE_PER_MIN) { S.muted[botId] = t + 300000; return [null, `понад ${RATE_PER_MIN} повідомлень за хвилину — пауза 5 хв`]; } }
+  if (S.events.some(e => e.bot_id === botId && e.type === type && e.text === text && t - e.created < 120000)) return [null, "такий самий текст уже надходив менш ніж 2 хв тому"];
+  const e = { id: S.ids.e++, bot_id: botId, type: TYPES[type] ? type : "info", text, source, hop, created: t, read: false, pinned: null, state: "active", deliveries: [] };
+  S.events.push(e); return [e, null];
+}
+function eventsList(filt = "all", botId = null, sort = "new", state = "active") {
+  let ev = S.events.filter(e => e.state === state && (!botId || e.bot_id === botId));
+  if (filt === "unread") ev = ev.filter(e => !e.read); else if (filt === "alert") ev = ev.filter(e => e.type === "alert"); else if (filt === "pin") ev = ev.filter(e => e.pinned);
+  const nm = e => (botGet(e.bot_id)?.name || "").toLowerCase();
+  return ev.sort(sort === "old" ? (a, b) => a.created - b.created : sort === "bot" ? (a, b) => nm(a).localeCompare(nm(b)) || b.created - a.created : sort === "type" ? (a, b) => a.type.localeCompare(b.type) || b.created - a.created : (a, b) => b.created - a.created);
+}
+const unread = () => S.events.filter(e => e.state === "active" && !e.read).length;
+// Передати подію боту (як deliver() у manager.py): HTTP-адреса команд або Telegram bot-to-bot
+function deliver(e, to) {
+  if (e.hop >= MAX_HOP) return [false, `повідомлення вже пройшло ${e.hop} ботів — далі не передаю, щоб не зациклитись`];
+  if (e.bot_id === to.id) return [false, "не пересилаю бота самому собі"];
+  if (!to.cmd_url && !to.via_tg) return [false, "у бота не вказано, як приймати повідомлення (адреса команд або bot-to-bot)"];
+  const src = botGet(e.bot_id); S.cmdlog.push({ to: to.id, text: e.text, hop: e.hop + 1 });
+  e.deliveries.push({ to: to.id, ok: true, at: now() });
+  if (to.demoReply) { const [r] = eventAdd(to.id, "reply", to.demoReply(e.text, src), "api", e.hop + 1); if (r) return [true, "", r]; }
+  return [true, ""];
+}
+function ingest(b, type, text, source, hop = 0) {
+  const [e, why] = eventAdd(b ? b.id : null, type, text, source, hop);
+  if (!e) { if (why && why.includes("пауза") && b) sayH(`🛑 ${esc(b.name)}: ${why}. Перевірте, чи бот не зациклився.`); return [null, why]; }
+  if (b) b.last_seen = now();
+  const replies = [], done = [];
+  for (const r of S.rules.filter(r => r.enabled)) {
+    if (r.from && r.from !== e.bot_id) continue; if (r.type && r.type !== e.type) continue; if (r.contains && !e.text.toLowerCase().includes(r.contains.toLowerCase())) continue;
+    const to = botGet(r.to); if (!to || to.state !== "active") continue;
+    const [ok, , reply] = deliver(e, to); if (ok) { r.hits++; done.push(to.name); if (reply) replies.push(reply); }
+  }
+  notifyEvent(e, done); replies.forEach(r => notifyEvent(r, []));
+  return [e, null];
+}
+function notifyEvent(e, delivered) {
+  const b = botGet(e.bot_id); if (b && b.alerts === "off") return; if (b && b.alerts === "alerts" && e.type !== "alert") return;
+  sayH(`<b>${TYPES[e.type]}</b> · ${b ? (KINDS[b.kind][0] + " " + esc(label(b))) : "без бота"}\n\n${esc(e.text)}` + (delivered.length ? `\n\n🔀 Передано: ${esc(delivered.join(", "))}` : ""),
+    L.decorate(OWNER, [[["↪️ Переслати боту", `m:efw:${e.id}`], ["📌", `m:epin:${e.id}`], ["✅", `m:erd:${e.id}`]]], false));
+}
+function checkBot(b, announce = true) {
+  const old = b.status; let st = b.status, detail = b.detail;
+  if (b.kind === "http") { if (!b.last_seen) { st = "unknown"; detail = "ще не надсилав сигналу «я живий»"; } else if (now() - b.last_seen > 15 * 60000) { st = "down"; detail = `мовчить уже ${Math.floor((now() - b.last_seen) / 60000)} хв (немає сигналу «я живий»)`; } else { st = "up"; detail = ""; } }
+  else { st = b.broken || "up"; detail = { down: "токен недійсний або бот видалено", warn: "бот не встигає: у черзі 120 повідомлень" }[b.broken] || ""; }
+  const changed = st !== old; Object.assign(b, { status: st, detail, last_check: now() }); if (changed) b.since = b.since || now();
+  if (announce && changed && b.monitor) {
+    if (st === "down") ingest(b, "alert", `🔴 Бот не працює: ${detail}`, "monitor");
+    else if (st === "warn") ingest(b, "alert", `🟡 Проблема: ${detail}`, "monitor");
+    else if (st === "up" && (old === "down" || old === "warn")) { ingest(b, "info", `🟢 Знову працює (проблема тривала ${Math.floor((now() - (b.since || now())) / 60000)} хв)`, "monitor"); b.since = null; }
+  }
+  if (!changed && st === "up") b.since = null;
+}
+
+// ---------------------------------------------------------------- екрани
+function scrHome(c) {
+  const bots = botsList(), up = bots.filter(b => b.status === "up").length, bad = bots.filter(b => ["down", "warn"].includes(b.status) && b.monitor);
+  const L2 = ["<b>🧭 Головний бот</b>", "", `🤖 Ботів: <b>${bots.length}</b> · 🟢 працюють: <b>${up}</b>` + (bad.length ? ` · ⚠️ проблеми: <b>${bad.length}</b>` : ""), `📥 Непрочитаних подій: <b>${unread()}</b>`, ...bad.slice(0, 5).map(b => `${icon(b)} ${esc(b.name)}: ${esc(short(b.detail, 80))}`)];
+  return [L2.join("\n"), L.placeRows(c, "home", unread() ? { inbox: ` · ${unread()}` } : {})];
+}
+function scrBots(c) {
+  const mode = prefs(c).bots_sort || "status", ord = { down: 0, warn: 1, unknown: 2, up: 3 };
+  const bots = botsList().sort((a, b) => (!!b.pinned - !!a.pinned) || (mode === "az" ? a.name.localeCompare(b.name) : mode === "kind" ? a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name) : mode === "new" ? b.created - a.created : (ord[a.status] - ord[b.status]) || a.name.localeCompare(b.name)));
+  const L2 = [`<b>🤖 Ваші боти</b> · ${bots.length}`, ""]; if (!bots.length) L2.push("<i>Ще немає жодного. Додайте першого — це займе хвилину.</i>");
+  let head = null; for (const b of bots) { if (mode === "kind" && head !== b.kind) { head = b.kind; L2.push(`\n<b>${KINDS[head].join(" ")}</b>`); } L2.push(`${icon(b)} ${b.pinned ? "📌 " : ""}${esc(label(b))}` + (b.detail ? ` — ${esc(short(b.detail, 50))}` : "")); }
+  return [L2.join("\n"), [seg(BOT_SORTS, mode).map(([l, v]) => [l, "m:bsort:" + v]), ...pairs(bots.map(b => [`${icon(b)} ${short(b.name, 22)}`, "m:b:" + b.id])), [["➕ Додати бота", "m:badd"], ["🔄 Перевірити всіх", "m:monrun"]]]];
+}
+function scrBot(c, id) {
+  const b = botGet(id); if (!b || b.state !== "active") return scrBots(c);
+  const [ic, kn] = KINDS[b.kind];
+  const L2 = [`<b>${ic} ${esc(b.name)}</b>` + (b.username && b.kind === "telegram" ? ` · @${esc(b.username)}` : ""), `Тип: ${kn}`,
+    `Стан: ${icon(b)} ` + { up: "працює", warn: "є проблема", down: "не працює", unknown: "ще не перевірявся" }[b.status] + (b.detail ? ` — ${esc(b.detail)}` : "") + (b.monitor ? "" : " · моніторинг вимкнено"),
+    `Перевірено: ${ts(b.last_check)} · останній сигнал: ${ts(b.last_seen)}`, `Сповіщення: ${ALERT_LEVELS[b.alerts]}`,
+    "Як отримує повідомлення: " + ([b.cmd_url ? "HTTP ✅" : "", b.via_tg ? "Telegram bot-to-bot ✅" : ""].filter(Boolean).join(" · ") || "▫️ не налаштовано")];
+  if (b.note) L2.push("📝 " + esc(b.note));
+  const rows = [];
+  if (b.kind !== "http") rows.push([["✏️ Профіль", "m:bp:" + id], [COMMANDS_NAME[b.kind], "m:bc:" + id]]);
+  rows.push([["📨 Надіслати боту", "m:bsend:" + id], [`📥 Події · ${eventsList("all", id).length}`, `m:in:0:bot${id}`]]);
+  rows.push([["🔌 Підключення", "m:bconn:" + id], ["🔄 Перевірити", "m:bchk:" + id]]);
+  rows.push([[b.monitor ? "⏸ Не стежити" : "▶️ Стежити", "m:bmon:" + id], ["🔔 Сповіщення", "m:balr:" + id]]);
+  if (b.kind === "telegram") rows.push([["💬 Написати від імені бота", "m:bas:" + id]]);
+  rows.push([[b.pinned ? "📌 Відкріпити" : "📌 Закріпити", "m:bpin:" + id], ["✏️ Назва й нотатка", "m:bren:" + id]]);
+  rows.push([...(b.kind !== "http" ? [["🔑 Замінити токен", "m:btok:" + id]] : []), ["🗑 Видалити", "m:bdel:" + id]]);
+  return [L2.join("\n"), rows];
+}
+const inboxUrl = () => "https://mybots.duckdns.org/hub/" + "x".repeat(8) + "…/in";
+function scrConn(c, id) {
+  const b = botGet(id);
+  const L2 = [`<b>🔌 Підключення: ${esc(b.name)}</b>`, "", "<b>1. Бот → головний бот</b> (тривоги, звіти, будь-який текст).", `Адреса скриньки:\n<code>${inboxUrl()}</code>`, `Ключ цього бота:\n<code>${b.key}</code>`, "",
+    "Для Python-бота: покладіть поруч <code>hubclient.py</code> з архіву й задайте <code>HUB_URL</code> і <code>HUB_KEY</code>. ШІ-бот із цього архіву вже вміє: достатньо цих двох змінних.", "",
+    "<b>2. Головний бот → бот</b> (команди, пересилання):", `• HTTP-адреса команд: ${b.cmd_url ? "<code>" + esc(b.cmd_url) + "</code>" : "▫️ не задано"} — бот, що має HUB_KEY, повідомляє її сам.`,
+    `• Напряму в Telegram (bot-to-bot): ${b.via_tg ? "✅ увімкнено" : "▫️ вимкнено"} — потрібно ввімкнути «Bot-to-Bot Communication» у @BotFather для обох ботів.`];
+  const rows = [[["📋 Ключ", "copy:" + b.key], ["📋 Адреса", "copy:" + inboxUrl()]], [["✍️ Задати адресу команд", "m:bcmd:" + id], ...(b.cmd_url ? [["✖️ Прибрати", "m:bcmdx:" + id]] : [])]];
+  if (b.kind === "telegram") rows.push([["✈️ Bot-to-bot: " + (b.via_tg ? "вимкнути" : "увімкнути"), "m:bvtg:" + id]]);
+  rows.push([["🔁 Новий ключ", "m:bkey:" + id], ["📨 Тест", "m:btest:" + id]]);
+  return [L2.join("\n"), rows];
+}
+function scrProfile(id) { const b = botGet(id), p = b.profile;
+  return [`<b>✏️ Профіль: ${esc(b.name)}</b>\n\n<b>Назва:</b>\n${esc(p.name)}\n\n<b>Опис (видно до першого повідомлення):</b>\n${esc(p.description || "—")}\n\n<b>Короткий опис (у профілі):</b>\n${esc(p.short || "—")}\n\n` + (b.kind === "telegram" ? "Аватар, вбудований режим і створення нових ботів доступні лише в @BotFather." : "Фото профілю змінюється в застосунку."),
+    [[["✏️ Назва", `m:bpe:${id}:name`], ["✏️ Опис", `m:bpe:${id}:description`]], [["✏️ Короткий опис", `m:bpe:${id}:short`]]]]; }
+function scrCommands(id) { const b = botGet(id);
+  return [`<b>${COMMANDS_NAME[b.kind]}: ${esc(b.name)}</b>\n\n` + (b.commands.map(([c, d]) => b.kind === "instagram" ? `• ${esc(d)}` : `/${esc(c)} — ${esc(d)}`).join("\n") || "<i>Порожньо.</i>"), [[["✍️ Задати список", "m:bce:" + id], ["🗑 Очистити", "m:bcx:" + id]]]]; }
+function scrInbox(c, page = 0, filt) {
+  let botId = null; if (filt && filt.startsWith("bot")) { botId = +filt.slice(3); filt = "all"; }
+  filt = filt || prefs(c).inbox_filter || "all"; if (!botId) prefs(c).inbox_filter = filt;
+  const sort = prefs(c).inbox_sort || "new", ev = eventsList(filt, botId, sort), pages = Math.max(1, Math.ceil(ev.length / PER)); page = Math.max(0, Math.min(page, pages - 1));
+  const ch = ev.slice(page * PER, page * PER + PER), nm = id => botGet(id)?.name || "без бота";
+  const L2 = [`<b>${botId ? "📥 Події: " + esc(nm(botId)) : "📥 Вхідні"}</b> · ${ev.length}`, "", ...ch.map(e => `${e.read ? "▫️" : "🆕"}${e.pinned ? "📌" : ""} ${TYPES[e.type].slice(0, 2)} <b>${esc(nm(e.bot_id))}</b> · ${ts(e.created)}\n${esc(short(e.text, 110))}`)];
+  if (!ch.length) L2.push("<i>Порожньо.</i>");
+  const rows = []; if (!botId) rows.push(seg(EV_FILTERS, filt).map(([l, v]) => [l, "m:in:0:" + v]));
+  rows.push(seg(EV_SORTS, sort).map(([l, v]) => [l, "m:isort:" + v]));
+  rows.push(...ch.map(e => [[`${TYPES[e.type].slice(0, 2)} ${short(nm(e.bot_id), 12)}: ${short(e.text, 26)}`, "m:e:" + e.id]]));
+  if (pages > 1) { const f = botId ? "bot" + botId : filt; rows.push([page ? ["⏪", `m:in:${page - 1}:${f}`] : ["·", "m:noop"], [`${page + 1}/${pages}`, "m:noop"], page < pages - 1 ? ["⏩", `m:in:${page + 1}:${f}`] : ["·", "m:noop"]]); }
+  if (ch.length) rows.push([["✅ Усе прочитано", "m:iread"]]);
+  return [L2.join("\n"), rows];
+}
+function scrEvent(c, id) {
+  const e = S.events.find(x => x.id === id); if (!e) return scrInbox(c); e.read = true; const b = botGet(e.bot_id);
+  const L2 = [`<b>${TYPES[e.type]}</b> · ${b ? esc(label(b)) : "без бота"}`, `${ts(e.created, 1)} · ${SOURCES[e.source]}` + (e.hop ? ` · пройшло ботів: ${e.hop}` : ""), "", esc(e.text), ...e.deliveries.map(d => `✅ → ${esc(botGet(d.to)?.name || "?")} ${ts(d.at)}`)];
+  const rows = [[["↪️ Переслати боту", "m:efw:" + id], ["📋 Текст", "copy:" + e.text.slice(0, 256)]], [[e.pinned ? "📌 Відкріпити" : "📌 Закріпити", "m:epin:" + id], ["🗑 У кошик", "m:edel:" + id]]];
+  if (b) rows.push([["🤖 " + short(b.name, 20), "m:b:" + b.id]]); return [L2.join("\n"), rows];
+}
+function scrPick(title, prefix, exclude, extra) { const bots = botsList().filter(b => b.id !== exclude); const rows = pairs(bots.map(b => [`${KINDS[b.kind][0]} ${short(b.name, 22)}`, `${prefix}:${b.id}`])); if (extra) rows.unshift([extra]);
+  return [`<b>${title}</b>\n\nОберіть бота:` + (bots.length ? "" : "\n\n<i>Спершу додайте ботів.</i>"), rows]; }
+function scrRules() { const nm = id => botGet(id)?.name || "будь-який бот";
+  const L2 = ["<b>🔀 Автоматичне пересилання</b>", "", "Правило: <i>від кого → кому</i>, за типом або словом. Наприклад: усі 🚨 тривоги від монітора → у ШІ-бота, щоб він пояснив, що сталося.", "",
+    `🛡 Захист від зациклень: не більше ${MAX_HOP} передач поспіль, повтори за 2 хв відкидаються, понад ${RATE_PER_MIN} повідомлень/хв від бота — пауза 5 хв.`, "",
+    ...S.rules.map(r => `${r.enabled ? "✅" : "⏸"} #${r.id} ${esc(r.from ? nm(r.from) : "будь-який бот")}${r.type ? " · " + TYPES[r.type] : ""}${r.contains ? " · «" + esc(r.contains) + "»" : ""} → <b>${esc(nm(r.to))}</b> · спрацювало ${r.hits}`)];
+  if (!S.rules.length) L2.push("<i>Правил ще немає.</i>");
+  return [L2.join("\n"), [...S.rules.map(r => [[`${r.enabled ? "⏸" : "▶️"} #${r.id}`, "m:rtog:" + r.id], [`🗑 #${r.id}`, "m:rdel:" + r.id]]), [["➕ Нове правило", "m:rnew"]]]]; }
+function scrMonitor() { const bots = botsList().sort((a, b) => a.name.localeCompare(b.name));
+  return [["<b>📡 Моніторинг</b>", "", "Перевірка кожні 5 хв. Бот без токена вважається впалим, якщо мовчить довше 15 хв.", "", ...bots.map(b => `${icon(b)} <b>${esc(b.name)}</b> · перевірено ${ts(b.last_check).slice(6)}` + (b.detail ? `\n    ${esc(short(b.detail, 90))}` : "")), ...(bots.length ? [] : ["<i>Немає ботів.</i>"])].join("\n"), [[["🔄 Перевірити всіх зараз", "m:monrun"]]]]; }
+function scrApi() { return [`<b>🔌 Як боти підключаються до головного</b>\n\nСкринька (HTTP POST, JSON):\n<code>${inboxUrl()}</code>\n<code>{"key": "ключ бота", "type": "alert|info|report", "text": "…"}</code>\n\nСигнал «я живий»: <code>…/hb</code> з <code>{"key": …, "cmd_url": …}</code>\nПростий варіант для будь-якого сервісу (GET):\n<code>${inboxUrl()}?key=…&amp;text=…</code>\n\nКлюч кожного бота — у його картці → «🔌 Підключення».\nВручну: просто перешліть мені повідомлення від будь-якого бота.\nНапряму в Telegram: увімкніть «Bot-to-Bot Communication» у @BotFather для обох ботів — тоді бот може писати мені сам.`, [[["📖 Детально", "help:g:api"]]]]; }
+function scrTrash() { const bots = botsList("trash"), ev = S.events.filter(e => e.state === "trash");
+  const L2 = ["<b>🗑 Кошик</b> · видаляється через 30 днів", "", ...bots.map(b => `🤖 ${esc(b.name)} · ще 30 дн`), ...ev.slice(0, 10).map(e => `📥 ${esc(short(e.text, 60))}`)]; if (!bots.length && !ev.length) L2.push("<i>Порожньо.</i>");
+  const rows = [...bots.map(b => [["↩️ " + short(b.name, 24), "m:brs:" + b.id]]), ...ev.slice(0, 10).map(e => [["↩️ " + short(e.text, 24), "m:ers:" + e.id]])]; if (bots.length || ev.length) rows.push([["🧹 Очистити зараз", "m:trempty"]]); return [L2.join("\n"), rows]; }
+const BK_T = { file: ["📱", "Файлом у чат"], channel: ["📢", "Приватний канал Telegram"], gdrive: ["🟢", "Google Диск"], dropbox: ["🔵", "Dropbox"], onedrive: ["🟦", "OneDrive"] };
+function scrBackup() { const b = S.bk || (S.bk = { conn: {}, last: null, days: 7 });
+  return [["<b>💾 Резервні копії</b>", "", `Остання копія: ${b.last ? ts(b.last, 1) : "ще не було"} · авто: кожні ${b.days} дн`, "", "<b>Куди зберігати:</b>", ...Object.entries(BK_T).map(([k, [ic, n]]) => `${k === "file" || b.conn[k] ? "✅" : "▫️"} ${ic} ${n}`)].join("\n"),
+    [[["💾 Зробити копію зараз", "m:bkgo"]], ...Object.entries(BK_T).filter(([k]) => k !== "file").map(([k, [ic, n]]) => [[`${ic} ${n}` + (b.conn[k] ? " ✅" : ""), "m:bkcon:" + k]]), [["♻️ Відновити з копії", "m:bkrs"]]]]; }
+function helpScreen(d) { const p = d.split(":"); if (p[1] === "g" && D.help[p[2]]) { const [t, body] = D.help[p[2]]; return [`<b>${t}</b>\n\n${body}`, []]; }
+  return ["<b>📖 Довідка головного бота</b>\n\nПрацює без ШІ. Оберіть розділ:", pairs(D.order.map(k => [D.help[k][0], "help:g:" + k]))]; }
+
+// ---------------------------------------------------------------- маршрутизація
+async function openData(c, d, v, rec = true) { if (d.startsWith("help:")) { if (rec) L.visit(c, d); const s = helpScreen(d); return show(c, s, v); } return route(c, d, v, rec); }
+function show(c, s, v) { const rows = L.decorate(c, s[1]); v ? botEdit(v, s[0], rows) : sayH(s[0], rows); }
+async function route(c, data, v, rec = true) {
+  const p = data.split(":"), a = p[1] || "home", arg = p[2], id = () => +p[2]; let scr = null, toast = null;
+  if (a === "nav") { let t; if (arg === "home") { L.visit(c, "m:home"); t = "m:home"; } else t = arg === "back" ? L.back(c) : L.fwd(c); return openData(c, t, v, false); }
+  if (rec && isView(data)) L.visit(c, data);
+  if (EDITOR_ACTIONS.has(a)) { let pr = null; const [s2, tip] = handleEditor(L, c, p, (act, d, x) => { S.await[c] = [act, d]; pr = x; }); if (pr) return sayH(pr, [CANCEL_ROW]); if (["bmv", "breset", "bgdel", "lunren", "bset"].includes(a)) renderReplyKb(); if (tip) note(tip); if (s2) show(c, s2, v); return; }
+  switch (a) {
+    case "noop": return;
+    case "cancel": delete S.await[c]; scr = scrHome(c); break;
+    case "home": scr = scrHome(c); break;
+    case "grp": scr = L.scrGroup(c, arg); break;
+    case "bl": scr = scrBots(c); break;
+    case "bsort": prefs(c).bots_sort = arg; scr = scrBots(c); break;
+    case "b": scr = scrBot(c, id()); break;
+    case "badd": scr = ["<b>➕ Новий бот</b>\n\nЯкий бот?", Object.entries(KINDS).map(([k, [i, n]]) => [[`${i} ${n}`, "m:badd2:" + k]])]; break;
+    case "badd2": S.await[c] = ["add_" + arg]; scr = [{ telegram: "✈️ Надішліть <b>токен</b> бота з @BotFather (виглядає як <code>123456:ABC…</code>). Повідомлення з токеном я одразу видалю.\n\n🧪 У симуляції підійде будь-який текст.", whatsapp: "🟩 Надішліть <b>ID номера</b> (Phone number ID) і <b>постійний токен</b> через пробіл:\n<code>123456789012345 EAAG…</code>", instagram: "📸 Надішліть <b>токен Instagram API</b> (Instagram Login, з правами instagram_business_manage_messages).", http: "🔌 Як назвати цей бот чи сервіс? Наприклад: «Монітор сайту»." }[arg], [CANCEL_ROW]]; break;
+    case "bchk": { const b = botGet(id()); checkBot(b); toast = { up: "🟢 Працює", warn: "🟡 " + b.detail, down: "🔴 " + b.detail, unknown: b.detail }[b.status]; scr = scrBot(c, b.id); break; }
+    case "bmon": { const b = botGet(id()); b.monitor = !b.monitor; scr = scrBot(c, b.id); break; }
+    case "balr": { const b = botGet(id()), o = Object.keys(ALERT_LEVELS); b.alerts = o[(o.indexOf(b.alerts) + 1) % o.length]; toast = ALERT_LEVELS[b.alerts]; scr = scrBot(c, b.id); break; }
+    case "bpin": { const b = botGet(id()); b.pinned = b.pinned ? null : now(); scr = scrBot(c, b.id); break; }
+    case "bren": S.await[c] = ["bren", id()]; scr = ["✏️ Надішліть нову назву. Можна додати нотатку з нового рядка — наприклад, для чого цей бот.", [CANCEL_ROW]]; break;
+    case "bdel": { const b = botGet(id()); scr = [`🗑 Перенести «${esc(b.name)}» у кошик? Сам бот продовжить працювати — я лише перестану ним керувати й стежити.`, [[["🗑 Так", "m:bdely:" + b.id], ["✖️ Ні", "m:b:" + b.id]]]]; break; }
+    case "bdely": botGet(id()).state = "trash"; toast = "🗑 У кошику: видалиться через 30 днів"; scr = scrBots(c); break;
+    case "brs": botGet(id()).state = "active"; toast = "↩️ Відновлено"; scr = scrTrash(); break;
+    case "btok": S.await[c] = ["btok", id()]; scr = [`🔑 <b>Новий токен для «${esc(botGet(id()).name)}»</b>\n\n${botGet(id()).kind === "telegram" ? "Спершу в @BotFather: /mybots → бот → API Token → Revoke current token. Старий токен перестане працювати.\n\n" : ""}Надішліть новий токен — я перевірю його й видалю повідомлення.`, [CANCEL_ROW]]; break;
+    case "bconn": scr = scrConn(c, id()); break;
+    case "bkey": botGet(id()).key = key(); toast = "Новий ключ. Оновіть HUB_KEY у цього бота."; scr = scrConn(c, id()); break;
+    case "bcmd": S.await[c] = ["bcmd", id()]; scr = ["✍️ Надішліть HTTP-адресу, на яку я надсилатиму команди цьому боту (POST JSON).", [CANCEL_ROW]]; break;
+    case "bcmdx": botGet(id()).cmd_url = null; scr = scrConn(c, id()); break;
+    case "bvtg": { const b = botGet(id()); b.via_tg = !b.via_tg; scr = scrConn(c, b.id); break; }
+    case "btest": { const b = botGet(id()), [e] = eventAdd(null, "command", "🔔 Тестове повідомлення від головного бота", "manager"); const [ok, why, r] = deliver(e, b); toast = ok ? "✅ Доставлено" : "⚠️ " + why; scr = scrConn(c, b.id); if (r) setTimeout(() => notifyEvent(r, []), 0); break; }
+    case "bp": scr = scrProfile(id()); break;
+    case "bpe": S.await[c] = ["bpe", [id(), p[3]]]; scr = ["✏️ Надішліть новий текст.", [CANCEL_ROW]]; break;
+    case "bc": scr = scrCommands(id()); break;
+    case "bce": S.await[c] = ["bce", id()]; scr = [`✍️ Надішліть список, кожен пункт з нового рядка:\n<code>${botGet(id()).kind === "instagram" ? "Як замовити?\nДе ви знаходитесь?" : "start - Почати\nhelp - Довідка\nstatus - Стан"}</code>`, [CANCEL_ROW]]; break;
+    case "bcx": botGet(id()).commands = []; toast = "Очищено"; scr = scrCommands(id()); break;
+    case "bas": S.await[c] = ["bas", id()]; scr = ["💬 Надішліть текст — бот напише його вам (якщо ви вже відкривали чат із цим ботом).", [CANCEL_ROW]]; break;
+    case "snd": case "bsend": if (a === "snd" && !arg) { scr = scrPick("📨 Надіслати боту", "m:bsend"); break; } S.await[c] = ["bsend", +arg]; scr = [`📨 Що передати боту «${esc(botGet(+arg).name)}»? Він отримає це як команду від головного бота.`, [CANCEL_ROW]]; break;
+    case "in": scr = scrInbox(c, +(arg || 0), p[3]); break;
+    case "isort": prefs(c).inbox_sort = arg; scr = scrInbox(c); break;
+    case "iread": S.events.forEach(e => e.read = true); toast = "✅ Усе прочитано"; scr = scrInbox(c); break;
+    case "e": scr = scrEvent(c, id()); break;
+    case "erd": S.events.find(e => e.id === id()).read = true; toast = "✅ Прочитано"; break;
+    case "epin": { const e = S.events.find(x => x.id === id()); e.pinned = e.pinned ? null : now(); toast = e.pinned ? "📌 Закріплено" : "Відкріплено"; if (v && VIEW.get(v)?.html.includes("·")) scr = scrEvent(c, e.id); break; }
+    case "edel": S.events.find(e => e.id === id()).state = "trash"; toast = "🗑 У кошику"; scr = scrInbox(c); break;
+    case "ers": S.events.find(e => e.id === id()).state = "active"; toast = "↩️ Відновлено"; scr = scrTrash(); break;
+    case "efw": { const e = S.events.find(x => x.id === id()); scr = scrPick("↪️ Кому переслати", "m:efw2:" + e.id, e.bot_id); break; }
+    case "efw2": { const e = S.events.find(x => x.id === +p[2]), to = botGet(+p[3]), [ok, why, r] = deliver(e, to); scr = [ok ? "✅ Передано боту «" + esc(to.name) + "»" : "⚠️ Не вдалося: " + esc(why), [[["📥 До події", "m:e:" + e.id]]]]; if (r) setTimeout(() => notifyEvent(r, []), 300); break; }
+    case "rl": scr = scrRules(); break;
+    case "rnew": scr = scrPick("🔀 Нове правило · 1/4 · від кого", "m:rn1", null, ["🌐 Будь-який бот", "m:rn1:0"]); break;
+    case "rn1": S.await[c] = ["rule", { from: id() || null }]; scr = ["<b>🔀 2/4 · Які події</b>", [[["Усі", "m:rn2:any"]], ...pairs(Object.entries(TYPES).filter(([k]) => k !== "reply").map(([k, t]) => [t, "m:rn2:" + k]))]]; break;
+    case "rn2": { const st = (S.await[c] || [0, {}])[1]; st.type = arg === "any" ? null : arg; S.await[c] = ["rule_contains", st]; scr = ["<b>🔀 3/4 · Слово-фільтр</b>\n\nНадішліть слово, яке має бути в тексті, або натисніть «Будь-який текст».", [[["Будь-який текст", "m:rn3"]], CANCEL_ROW]]; break; }
+    case "rn3": { const st = (S.await[c] || [0, {}])[1]; S.await[c] = ["rule", st]; scr = scrPick("🔀 4/4 · кому передавати", "m:rn4", st.from); break; }
+    case "rn4": { const st = (S.await[c] || [0, {}])[1]; delete S.await[c]; S.rules.push({ id: S.ids.r++, from: st.from, type: st.type, contains: st.contains, to: id(), enabled: true, hits: 0 }); toast = "✅ Правило створено"; scr = scrRules(); break; }
+    case "rtog": { const r = S.rules.find(x => x.id === id()); r.enabled = !r.enabled; scr = scrRules(); break; }
+    case "rdel": S.rules = S.rules.filter(x => x.id !== id()); toast = "Видалено"; scr = scrRules(); break;
+    case "mon": scr = scrMonitor(); break;
+    case "monrun": botsList().forEach(b => checkBot(b)); scr = scrMonitor(); break;
+    case "api": scr = scrApi(); break;
+    case "tr": scr = scrTrash(); break;
+    case "trempty": S.bots = S.bots.filter(b => b.state !== "trash"); S.events = S.events.filter(e => e.state !== "trash"); toast = "🧹 Очищено"; scr = scrTrash(); break;
+    case "bk": scr = scrBackup(); break;
+    case "bkcon": S.bk.conn[arg] = !S.bk.conn[arg]; toast = S.bk.conn[arg] ? `✅ ${BK_T[arg][1]} підключено (у справжньому боті тут відкриється вхід у ваш акаунт)` : "Відключено"; scr = scrBackup(); break;
+    case "bkgo": { S.bk.last = now(); const d = new Date(now()), name = `manager-backup-${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}.db.gz`; sayH(`📎 <b>${name}</b> · 2.4 КБ\n💾 Резервна копія головного бота.`); sayH(`💾 <b>Копія ${name}</b>\n` + Object.entries(BK_T).filter(([k]) => k === "file" || S.bk.conn[k]).map(([k, [ic, n]]) => `✅ ${ic} ${n}`).join("\n")); return; }
+    case "bkrs": scr = ["<b>♻️ Відновити з копії</b>\n\nНадішліть мені файл копії або оберіть хмару. 🧪 У симуляції дані не змінюються.", []]; break;
+    default: scr = scrHome(c);
+  }
+  if (toast) note(toast);
+  if (scr) show(c, scr, v);
+}
+async function handleAwait(c, text) {
+  const [act, data] = S.await[c]; delete S.await[c]; const sh = (pre, s) => sayH(pre + s[0], L.decorate(c, s[1]));
+  if (["lren", "bgnew", "brl"].includes(act)) { const [s2, tip] = handleEditorText(L, c, act, data, text); say(tip); renderReplyKb(); if (act === "brl") S.await[c] = ["brl"]; return sayH(s2[0], L.decorate(c, s2[1])); }
+  if (act.startsWith("add_")) { const kind = act.slice(4); if (kind !== "http" && PLATFORM === "tg") { const last = [...msgsEl.querySelectorAll(".row.me")].pop(); if (last) last.remove(); }
+    const names = { telegram: ["Мій новий бот", "my_new_bot"], whatsapp: ["WhatsApp +380 50 000 00 00", null], instagram: ["greenpost.ua", "greenpost.ua"] };
+    const b = kind === "http" ? botAdd("http", text.slice(0, 60)) : botAdd(kind, ...names[kind]);
+    say("✅ Бота додано." + (kind !== "http" ? (PLATFORM === "tg" ? " Повідомлення з токеном видалено з чату." : " Видаліть повідомлення з токеном із чату.") : " Далі відкрийте «🔌 Підключення»: там ключ і адреса для цього бота.")); L.visit(c, "m:b:" + b.id); return sayH(scrBot(c, b.id)[0], L.decorate(c, scrBot(c, b.id)[1])); }
+  if (act === "bren") { const b = botGet(data), [n, ...rest] = text.split("\n"); b.name = n.slice(0, 60); b.note = rest.join(" ").trim(); return sh("✅ Збережено\n\n", scrBot(c, b.id)); }
+  if (act === "btok") return sh("✅ Токен замінено, повідомлення з ним видалено.\n\n", scrBot(c, data));
+  if (act === "bcmd") { if (!/^https?:\/\//.test(text)) { S.await[c] = [act, data]; return say("Адреса має починатися з https://"); } botGet(data).cmd_url = text; return sh("✅ Адресу команд збережено\n\n", scrConn(c, data)); }
+  if (act === "bpe") { botGet(data[0]).profile[data[1]] = text; if (data[1] === "name") botGet(data[0]).name = text; return sh("✅ Оновлено в " + KINDS[botGet(data[0]).kind][1] + "\n\n", scrProfile(data[0])); }
+  if (act === "bce") { const b = botGet(data); b.commands = text.split("\n").map(s => s.trim()).filter(Boolean).map((s, i) => b.kind === "instagram" ? ["q" + i, s] : [s.split(/\s*-\s*/)[0].replace("/", ""), s.split(/\s*-\s*/)[1] || ""]); return sh("✅ Збережено\n\n", scrCommands(data)); }
+  if (act === "bas") return say(`✅ «${botGet(data).name}» надіслав вам повідомлення.`);
+  if (act === "bsend") { const b = botGet(data), [e] = eventAdd(null, "command", text, "manager"); const [ok, why, r] = deliver(e, b); say(ok ? "✅ Передано" : "⚠️ " + why); if (r) notifyEvent(r, []); return; }
+  if (act === "rule_contains") { data.contains = text; S.await[c] = ["rule", data]; const s = scrPick("🔀 4/4 · кому передавати", "m:rn4", data.from); return sayH(s[0], L.decorate(c, s[1])); }
+}
+async function handleText(c, text, silent) {
+  text = text.trim(); if (!text) return; if (!silent) userSend(text); await sleep(150);
+  if (PLATFORM !== "tg" && ["меню", "menu", "☰"].includes(text.toLowerCase())) { delete S.await[c]; return sendPlatformMenu(c); }
+  const routes = L.replyRoutes(c), pressed = L.unrelabel(c, text);
+  if (routes[pressed]) { delete S.await[c]; return openData(c, routes[pressed]); }
+  if (text === "/start") { say("🧭 Головний бот на зв'язку." + (PLATFORM === "tg" ? " Меню — внизу екрана." : " Меню — напишіть «меню» в будь-який момент.")); openReplyKb(PLATFORM === "tg"); return route(c, "m:home"); }
+  if (text === "/help") return openData(c, "help:main");
+  if (S.await[c]) return handleAwait(c, text);
+  say("Надішліть команду кнопками меню. Щоб додати подію вручну — перешліть мені повідомлення від бота.");
+}
+
+// ---------------------------------------------------------------- чат (як у симуляції ШІ-бота)
+const msgsEl = document.getElementById("msgs"), VIEW = new Map(); let vid = 1;
+const fmtTime = () => { const d = new Date(now()); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+function renderRow(v) { let row = document.getElementById("v" + v.id); if (!row) { row = document.createElement("div"); row.id = "v" + v.id; msgsEl.appendChild(row); }
+  row.className = "row" + (v.me ? " me" : ""); row.innerHTML = `<div class="bubble">${v.html}${v.kb ? linksHtml(v.kb) : ""}<div class="time">${v.time}</div></div>${kbHtml(v.kb, v.id)}`; if (!v.me && PLATFORM === "ig") renderQuick(v); }
+function reveal(id) { const el = document.getElementById("v" + id); if (!el) return; if (el.offsetHeight > msgsEl.clientHeight * .8) el.scrollIntoView({ block: "start" }); else msgsEl.scrollTop = msgsEl.scrollHeight; }
+function botSend(html, kb) { let copies = []; if (PLATFORM !== "tg" && kb) kb = kb.map(r => r.filter(([t, d]) => { if (d.startsWith("copy:")) { copies.push(d.slice(5)); return false; } return true; })).filter(r => r.length);
+  const v = { id: vid++, html, kb, time: fmtTime() }; VIEW.set(v.id, v); renderRow(v); reveal(v.id); copies.forEach(t => botSend(esc(t))); return v.id; }
+function botEdit(id, html, kb) { const v = VIEW.get(id); if (!v || PLATFORM !== "tg") return botSend(html, kb); v.html = html; v.kb = kb; renderRow(v); reveal(id); }
+function userSend(text, html) { const v = { id: vid++, me: true, html: html || esc(text), time: fmtTime() }; VIEW.set(v.id, v); renderRow(v); reveal(v.id); }
+const note = t => botSend(`<i>${esc(t)}</i>`), say = (t, kb) => botSend(esc(t), kb), sayH = (h, kb) => botSend(h, kb);
+function sendPlatformMenu(c) { sayH(PLATFORM === "wa" ? "☰ <b>Меню</b>" : "☰ Меню", L.replyLabels(c).map(l => [[l, "__menu:" + l]])); }
+const inp = document.getElementById("inp"), replykb = document.getElementById("replykb");
+let busy = false;
+async function run(fn) { if (busy) return; busy = true; try { await fn(); } catch (e) { console.error(e); note("Помилка симуляції: " + e.message); } finally { busy = false; renderPanel(); } }
+function openReplyKb(open) { replykb.classList.toggle("open", open ?? !replykb.classList.contains("open")); }
+function renderReplyKb() { const items = L.replyLabels(OWNER); replykb.style.gridTemplateColumns = `repeat(${prefs(OWNER).kb_cols || 2}, 1fr)`; replykb.innerHTML = PLATFORM === "tg" ? items.map(k => `<button type="button" data-reply="${esc(k)}">${esc(k)}</button>`).join("") : ""; }
+document.getElementById("form").addEventListener("submit", e => { e.preventDefault(); const t = inp.value; inp.value = ""; run(() => handleText(OWNER, t)); });
+document.querySelector(".chat").addEventListener("click", e => {
+  if (platformClick(e, VIEW)) return;
+  const b = e.target.closest("button[data-cb]"); if (!b) return; const d = b.dataset.cb, v = +b.dataset.v;
+  closeList(); if (b.dataset.quick) quickEl().innerHTML = "";
+  if (d.startsWith("copy:")) { try { navigator.clipboard.writeText(d.slice(5)).catch(() => {}); } catch (_) {} return note("📋 Скопійовано"); }
+  if (PLATFORM !== "tg") userSend(b.textContent.trim());
+  if (d.startsWith("__menu:")) return run(() => handleText(OWNER, d.slice(7), true));
+  run(() => d.startsWith("help:") ? openData(OWNER, d, v) : route(OWNER, d, v));
+});
+replykb.addEventListener("click", e => { const b = e.target.closest("[data-reply]"); if (b) run(() => handleText(OWNER, b.dataset.reply)); });
+document.getElementById("kbBtn").addEventListener("click", () => PLATFORM === "tg" ? openReplyKb() : run(() => handleText(OWNER, "меню")));
+
+// ---------------------------------------------------------------- панель тестування
+function renderPanel() { const d = new Date(now()); document.getElementById("clock").textContent = `${pad(d.getDate())}.${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  document.getElementById("botsState").innerHTML = botsList().map(b => `<div class="mrow"><span>${icon(b)} ${esc(b.name)}</span><span>${KINDS[b.kind][1]}</span></div>`).join("") || "<p>Ботів немає.</p>"; }
+const panel = document.getElementById("panel"), closeSheet = () => panel.classList.remove("open");
+document.getElementById("openPanel").addEventListener("click", () => panel.classList.add("open"));
+document.getElementById("closePanel").addEventListener("click", closeSheet);
+document.getElementById("platsw").addEventListener("click", e => { const b = e.target.closest("[data-plat]"); if (!b) return; PLATFORM = b.dataset.plat; applyPlatformTheme(); boot(); });
+document.querySelectorAll("[data-skip]").forEach(b => b.addEventListener("click", () => { S.offset += +b.dataset.skip * 1000; note(`🧪 Минуло: ${b.textContent.replace("⏩ ", "")}.`); run(async () => botsList().forEach(x => checkBot(x))); }));
+const mon = () => S.bots.find(b => b.demo === "mon"), ai = () => S.bots.find(b => b.demo === "ai"), tgb = () => S.bots.find(b => b.demo === "yt");
+document.querySelectorAll("[data-scn]").forEach(b => b.addEventListener("click", () => { const s = b.dataset.scn; closeSheet(); run(async () => {
+  if (s === "reset") return boot();
+  if (s === "alert") { ingest(mon(), "alert", "🔴 Сайт greenpost.ua не відповідає (HTTP 502)", "api"); }
+  if (s === "report") { ingest(mon(), "report", "📊 Звіт за добу: GreenPost +12 підписників, 3 нові пости, охоплення 4 210", "api"); }
+  if (s === "rule") { if (!S.rules.length) { S.rules.push({ id: S.ids.r++, from: mon().id, type: "alert", contains: null, to: ai().id, enabled: true, hits: 0 }); note("🧪 Додано правило: 🚨 тривоги від «Монітор GreenPost» → «ШІ-бот». Тепер надішліть тривогу."); } ingest(mon(), "alert", "🔴 Канал GreenPost: -40 підписників за годину", "api"); }
+  if (s === "down") { tgb().broken = "down"; checkBot(tgb()); }
+  if (s === "up") { tgb().broken = null; S.offset += 12 * 60000; checkBot(tgb()); }
+  if (s === "flood") { for (let i = 0; i < 35; i++) ingest(mon(), "info", "автоматичне повідомлення " + i, "api"); note("🧪 Монітор надіслав 35 повідомлень за хвилину — головний бот поставив його на паузу. Сигнали моніторингу й ваші пересилання проходять і далі."); }
+  if (s === "loop") { const e = { id: 0, bot_id: mon().id, type: "alert", text: "петля між ботами", hop: 3, deliveries: [] }; const [ok, why] = deliver(e, ai()); note(`🧪 Повідомлення, що вже пройшло 3 ботів: ${ok ? "передано" : "не передано — " + why}.`); }
+  if (s === "fwd") { userSend("", `<i>↪️ Переслано від YouTube Saver @yt_saver_bot</i>\nГотово: відео «Прибирання парку» завантажено (128 МБ).`); await sleep(200); const [e, why] = ingest(tgb(), "info", "Готово: відео «Прибирання парку» завантажено (128 МБ).", "forward"); say(e ? "📥 Додано до подій бота." : "Не додано: " + why); }
+  if (s === "btb") { userSend("", `<i>🤖 @yt_saver_bot (bot-to-bot)</i>\nЧерга завантажень порожня, усе готово.`); await sleep(200); ingest(tgb(), "info", "Черга завантажень порожня, усе готово.", "telegram"); }
+}); }));
+setInterval(() => { if (!busy) renderPanel(); }, 5000);
+function boot() {
+  S = fresh(); VIEW.clear(); msgsEl.innerHTML = ""; vid = 1; L.hist = {}; applyPlatformTheme();
+  const a = botAdd("telegram", "ШІ-бот", "my_shi_helper_bot", { demo: "ai", cmd_url: "https://mybots.duckdns.org/ai/…/cmd", demoReply: (t, src) => `ШІ: «${short(t, 60)}» від ${src ? src.name : "вас"} — схоже на збій хостингу. Перевірте статус сервера й журнал помилок; якщо за 10 хв не відновиться — перезапустіть.` });
+  botAdd("http", "Монітор GreenPost", null, { demo: "mon", status: "up", detail: "", last_seen: now(), cmd_url: null });
+  botAdd("telegram", "YouTube Saver", "yt_saver_bot", { demo: "yt", via_tg: true });
+  botAdd("instagram", "greenpost.ua", "greenpost.ua", { demo: "ig" });
+  ingest(mon(), "report", "📊 Звіт за ніч: усі 4 канали працюють, нових скарг немає.", "api"); S.events.forEach(e => e.read = false);
+  renderPanel(); renderReplyKb(); openReplyKb(PLATFORM === "tg"); msgsEl.innerHTML = ""; VIEW.clear(); vid = 1;
+  run(() => handleText(OWNER, "/start")).then(() => note(PLATFORM === "tg" ? "🧪 Це головний бот: керує вашими ботами. У «🧪 Тест» — події від ботів, падіння, флуд, петлі й інші месенджери." : "🧪 Головний бот у " + PLAT_NAMES[PLATFORM] + ". Меню — слово «меню» або кнопка внизу. У «🧪 Тест» — події від ботів і падіння."));
+}
+boot();
+
+</script>
+</body>
+</html>

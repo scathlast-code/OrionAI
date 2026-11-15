@@ -1,0 +1,12 @@
+# Default: all currently integrated OrionAI services on one host.
+# docker compose -f docker-compose.yml up -d --build
+# This file documents the default; original docker-compose.yml is the executable source.
+services:
+  ai:
+    build: ..
+    command: python bot.py
+    env_file: ../.env
+    volumes: [orion-data:/data]
+    restart: unless-stopped
+volumes:
+  orion-data:

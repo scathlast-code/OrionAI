@@ -1,6 +1,6 @@
 # Запуск обох ботів (ШІ-бот і 🧭 головний бот) у Telegram на одному сервері.
 #   docker compose up -d --build        — запустити або оновити після зміни коду
-#   docker compose logs -f ai           — журнал ШІ-бота (hub — головного)
+#   docker compose logs -f ai           — журнал Оріона (разом із 🧭 головним ботом)
 services:
   ai:
     build: .
@@ -12,15 +12,26 @@ services:
       - ai-data:/data
     restart: always
 
-  hub:
-    build: .
-    command: python manager.py
-    env_file: .env
-    environment:
-      PORT: "8080"
-    volumes:
-      - hub-data:/data
-    restart: always
+  # 🧭 Головний бот тепер усередині Оріона (розділ «🧭 Мої боти»). Окремий запуск лишився можливим:
+  # розкоментуйте цей блок і поверніть у Caddyfile reverse_proxy hub:8080 для /hub.
+  # hub:
+  #   build: .
+  #   command: python manager.py
+  #   env_file: .env
+  #   environment:
+  #     PORT: "8080"
+  #   volumes:
+  #     - hub-data:/data
+  #   restart: always
+
+  # 🌐 Власний RSSHub для чужих X/Threads/Instagram/Facebook без офіційного API (необовʼязково).
+  # Розкоментуйте й додайте в .env: RSSHUB_URL=http://rsshub:1200
+  # rsshub:
+  #   image: diygod/rsshub:chromium-bundled
+  #   environment:
+  #     NODE_ENV: production
+  #     ACCESS_KEY: ${RSSHUB_KEY:-}
+  #   restart: always
 
   caddy:  # HTTPS-адреса для обох ботів (сертифікат Let's Encrypt — сам і безкоштовно)
     image: caddy:2
@@ -31,7 +42,20 @@ services:
       - caddy-data:/data
     restart: always
 
+  ollama:  # 🦙 своя модель на цьому ж сервері (необов'язково). Вмикається рядком COMPOSE_PROFILES=ollama у .env
+    image: ollama/ollama
+    profiles: ["ollama"]
+    environment:
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:--1}     # -1 — модель лишається в пам'яті й відповідає без 10–40 с завантаження
+      OLLAMA_MAX_LOADED_MODELS: "1"                   # одна модель у пам'яті — решта місця ботам
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH:-8192}
+    volumes:
+      - ollama-data:/root/.ollama                     # скачані моделі не губляться при оновленні
+    restart: always                                   # назовні не відкрито: до неї ходять лише боти
+
 volumes:
+  ollama-data:
   ai-data:
   hub-data:
   caddy-data:

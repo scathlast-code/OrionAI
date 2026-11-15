@@ -5,3 +5,12 @@ uvicorn==0.54.0
 pillow==12.3.0
 edge-tts==7.3.1
 cryptography>=44
+playwright==1.64.1
+pymupdf>=1.26,<2
+
+fastapi>=0.115,<1
+
+geoip2>=4.8,<6
+telethon>=1.36,<2
+openpyxl>=3.1,<4        # Excel зі статистикою UTM
+python-docx>=1.1,<2     # Word-звіт UTM

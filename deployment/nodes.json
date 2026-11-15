@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "max_nodes": 10,
+  "default_mode": "single",
+  "nodes": [
+    {
+      "id": "node-01",
+      "label": "Основний сервер",
+      "enabled": true,
+      "roles": [
+        "all"
+      ],
+      "endpoint": null
+    },
+    {
+      "id": "node-02",
+      "label": "Сервер 2",
+      "enabled": false,
+      "roles": [],
+      "endpoint": null
+    },
+    {
+      "id": "node-03",
+      "label": "Сервер 3",
+      "enabled": false,
+      "roles": [],
+      "endpoint": null
+    },
+    {
+      "id": "node-04",
+      "label": "Сервер 4",
+      "enabled": false,
+      "roles": [],
+      "endpoint": null
+    },
+    {
+      "id": "node-05",
+      "label": "Сервер 5",
+      "enabled": false,
+      "roles": [],
+      "endpoint": null
+    },
+    {
+      "id": "node-06",
+      "label": "Сервер 6",
+      "enabled": false,
+      "roles": [],
+      "endpoint": null
+    },
+    {
+      "id": "node-07",
+      "label": "Сервер 7",
+      "enabled": false,
+      "roles": [],
+      "endpoint": null
+    },
+    {
+      "id": "node-08",
+      "label": "Сервер 8",
+      "enabled": false,
+      "roles": [],
+      "endpoint": null
+    },
+    {
+      "id": "node-09",
+      "label": "Сервер 9",
+      "enabled": false,
+      "roles": [],
+      "endpoint": null
+    },
+    {
+      "id": "node-10",
+      "label": "Сервер 10",
+      "enabled": false,
+      "roles": [],
+      "endpoint": null
+    }
+  ]
+}

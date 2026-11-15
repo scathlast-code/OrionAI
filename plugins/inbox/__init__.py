@@ -1,0 +1,329 @@
+"""📮 Скринька: інші люди пишуть власнику прямо в бот (без SendPulse), власник відповідає звідти ж.
+
+- Незнайомі (не учасники ШІ) пишуть будь-що — повідомлення копіюються власнику з підписом і кнопками.
+- Учасники пишуть власнику через «📮 Написати власнику» або /owner (звичайні їхні повідомлення йдуть до ШІ).
+- Власник відповідає reply на скопійоване повідомлення (будь-яким типом) або кнопкою «↩️ Відповісти».
+"""
+from __future__ import annotations
+
+import logging
+import sqlite3
+import time
+from contextlib import closing
+
+from plugins import Plugin as Base, esc
+
+log = logging.getLogger("orion.plugins.inbox")
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS people (user INTEGER PRIMARY KEY, name TEXT, username TEXT, first REAL, last REAL,
+    count INTEGER DEFAULT 0, unread INTEGER DEFAULT 0, blocked INTEGER DEFAULT 0, note TEXT DEFAULT '');
+CREATE TABLE IF NOT EXISTS msgs (id INTEGER PRIMARY KEY AUTOINCREMENT, user INTEGER, at REAL, dir TEXT, kind TEXT, text TEXT,
+    src_msg INTEGER, owner_chat INTEGER, owner_msg INTEGER);
+CREATE INDEX IF NOT EXISTS msgs_owner ON msgs(owner_chat, owner_msg);
+CREATE INDEX IF NOT EXISTS msgs_user ON msgs(user, id);
+CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT);
+"""
+DEFAULTS = {"who": "all", "greeting": "👋 Вітаю! Напишіть повідомлення або надішліть новину, фото чи файл — я передам власнику, і він відповість тут.",
+            "ack": "1", "silent": "0", "flood": "20"}
+WHO = {"all": "пишуть усі", "members": "лише учасники бота", "closed": "ніхто (закрито)"}
+
+
+def kind_of(m):
+    for k in ("photo", "video", "voice", "video_note", "audio", "document", "sticker", "animation", "location", "contact", "poll"):
+        if getattr(m, k, None):
+            return k
+    return "text"
+
+
+KIND_ICON = {"text": "💬", "photo": "🖼", "video": "🎬", "voice": "🎙", "video_note": "⭕️", "audio": "🎵", "document": "📎",
+             "sticker": "🙂", "animation": "🎞", "location": "📍", "contact": "👤", "poll": "📊"}
+
+
+class Plugin(Base):
+    id = "inb"
+    icon = "📮"
+    title = "Скринька"
+    version = "1.0"
+    admin_only = False
+    summary = ("Люди пишуть вам прямо в бот — текст, фото, голосові, файли, новини. Вам приходить сповіщення з підписом, хто це, "
+               "а відповідаєте ви просто відповіддю (reply) на повідомлення. Без SendPulse і сторонніх сервісів.")
+    VIEWS = {"", "t", "set", "who", "bl"}
+
+    def __init__(self, host):
+        super().__init__(host)
+        self.db_path = self.dir / "inbox.db"
+        with closing(self.db()) as con, con:
+            con.executescript(SCHEMA)
+        self.reply_to: dict[int, int] = {}       # власник -> кому відповідаємо наступним повідомленням
+        self.compose: set[int] = set()           # учасники, які зараз пишуть власнику
+        self.flood: dict[int, list] = {}
+        self.commands = [("owner", self.cmd_owner, "Написати власнику бота")]
+
+    def db(self):
+        con = sqlite3.connect(self.db_path, timeout=10)
+        con.row_factory = sqlite3.Row
+        return con
+
+    def get(self, k):
+        with closing(self.db()) as con:
+            r = con.execute("SELECT v FROM settings WHERE k=?", (k,)).fetchone()
+        return r["v"] if r else DEFAULTS.get(k, "")
+
+    def set(self, k, v):
+        with closing(self.db()) as con, con:
+            con.execute("INSERT INTO settings(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, str(v)))
+
+    def person(self, uid):
+        with closing(self.db()) as con:
+            r = con.execute("SELECT * FROM people WHERE user=?", (int(uid),)).fetchone()
+        return dict(r) if r else None
+
+    def status_line(self):
+        with closing(self.db()) as con:
+            n, u = con.execute("SELECT COUNT(*), COALESCE(SUM(unread),0) FROM people").fetchone()
+        return f"розмов {n} · непрочитаних {u} · пишуть: {WHO.get(self.get('who'))}"
+
+    # ================================================================ вхідні
+    async def on_private(self, update, ctx):
+        """True — повідомлення оброблене скринькою (далі в боті не йде)."""
+        msg = update.message
+        if not msg or msg.chat.type != "private" or not update.effective_user:
+            return False
+        uid = update.effective_user.id
+        H = self.host
+        if H.is_admin(uid):
+            target = None
+            if msg.reply_to_message:
+                target = self._owner_map(msg.chat_id, msg.reply_to_message.message_id)
+            if target is None and uid in self.reply_to and not (msg.text or "").startswith("/"):
+                target = self.reply_to.pop(uid)
+            if target is None:
+                return False
+            return await self._send_to_person(ctx, msg, target)
+        if H.is_allowed(uid):
+            if uid in self.compose and not (msg.text or "").startswith("/"):
+                self.compose.discard(uid)
+                await self._deliver(ctx, msg, update.effective_user, member=True)
+                return True
+            return False
+        # незнайомий
+        if self.host.extra.get("preinvited", lambda u: False)(update.effective_user):
+            return False  # запрошений — далі стандартний потік згоди
+        if self.get("who") != "all":
+            return False
+        if (msg.text or "").split(" ")[0].split("@")[0] in ("/id",) or (msg.text or "").startswith("/start inv_"):
+            return False  # /id і запрошення — стандартний потік бота
+        p = self.person(uid)
+        if p and p["blocked"]:
+            return True  # мовчки
+        if (msg.text or "").startswith("/start"):
+            await msg.reply_text(self.get("greeting"))
+            return True
+        if not self._flood_ok(uid):
+            await msg.reply_text("⏳ Забагато повідомлень поспіль. Спробуйте трохи пізніше.")
+            return True
+        await self._deliver(ctx, msg, update.effective_user)
+        return True
+
+    def _flood_ok(self, uid):
+        now = time.time()
+        lst = [t for t in self.flood.get(uid, []) if t > now - 600]
+        lst.append(now)
+        self.flood[uid] = lst
+        return len(lst) <= int(self.get("flood") or 20)
+
+    def _owner_map(self, owner_chat, owner_msg):
+        with closing(self.db()) as con:
+            r = con.execute("SELECT user FROM msgs WHERE owner_chat=? AND owner_msg=? ORDER BY id DESC LIMIT 1", (owner_chat, owner_msg)).fetchone()
+        return r["user"] if r else None
+
+    async def _deliver(self, ctx, msg, user, member=False):
+        now = time.time()
+        k = kind_of(msg)
+        text = msg.text or msg.caption or ""
+        with closing(self.db()) as con, con:
+            con.execute("INSERT INTO people(user,name,username,first,last,count,unread) VALUES(?,?,?,?,?,1,1) "
+                        "ON CONFLICT(user) DO UPDATE SET name=excluded.name, username=excluded.username, last=excluded.last, "
+                        "count=count+1, unread=unread+1", (user.id, user.full_name, user.username or "", now, now))
+            n = con.execute("SELECT count FROM people WHERE user=?", (user.id,)).fetchone()[0]
+        fwd = getattr(msg, "forward_origin", None)
+        fsrc = ""
+        if fwd is not None:
+            ch = getattr(fwd, "chat", None) or getattr(fwd, "sender_chat", None)
+            fsrc = (ch.title if ch else getattr(getattr(fwd, "sender_user", None), "full_name", "") or getattr(fwd, "sender_user_name", "")) or "?"
+        head = (f"📮 <b>{esc(user.full_name)}</b>" + (f" @{esc(user.username)}" if user.username else "") + f" · <code>{user.id}</code>"
+                + (" · учасник" if member else "") + f" · {n}-е" + (f"\n↪️ переслано з «{esc(fsrc)}»" if fsrc else "")
+                + "\n<i>Відповідь — просто reply на повідомлення нижче.</i>")
+        rows = [[("↩️ Відповісти", self.cb("r", user.id)), ("📰 У ньюзрум", self.cb("n", user.id, msg.message_id))],
+                [("🚫 Заблокувати", self.cb("b", user.id)), ("✅ Прочитано", self.cb("ok", user.id))]]
+        silent = self.get("silent") == "1"
+        bot = ctx.bot
+        for owner in self.host.admins():
+            try:
+                await bot.send_message(owner, head, parse_mode="HTML", disable_notification=silent)
+                copied = await bot.copy_message(owner, msg.chat_id, msg.message_id, reply_markup=self._kb(rows), disable_notification=silent)
+                with closing(self.db()) as con, con:
+                    con.execute("INSERT INTO msgs(user,at,dir,kind,text,src_msg,owner_chat,owner_msg) VALUES(?,?,?,?,?,?,?,?)",
+                                (user.id, now, "in", k, text[:4000], msg.message_id, owner, copied.message_id))
+            except Exception:  # noqa: BLE001
+                log.exception("inbox deliver to owner failed")
+        if self.get("ack") == "1":
+            await msg.reply_text("✅ Передав. Відповідь прийде сюди.")
+
+    def _kb(self, rows):
+        kb = self.host.extra.get("kb")
+        return kb(rows) if kb else None
+
+    async def _send_to_person(self, ctx, msg, target):
+        p = self.person(target)
+        try:
+            sent = await ctx.bot.copy_message(target, msg.chat_id, msg.message_id)
+        except Exception as exc:  # noqa: BLE001
+            await msg.reply_text(f"⚠️ Не доставлено: {exc}\n(людина могла заблокувати бота)")
+            return True
+        with closing(self.db()) as con, con:
+            con.execute("INSERT INTO msgs(user,at,dir,kind,text,src_msg,owner_chat,owner_msg) VALUES(?,?,?,?,?,?,?,?)",
+                        (target, time.time(), "out", kind_of(msg), (msg.text or msg.caption or "")[:4000], sent.message_id, msg.chat_id, msg.message_id))
+            con.execute("UPDATE people SET unread=0 WHERE user=?", (target,))
+        await msg.reply_text(f"✅ Надіслано: {(p or {}).get('name') or target}")
+        return True
+
+    async def cmd_owner(self, update, ctx):
+        uid = update.effective_user.id
+        text = (update.message.text or "").partition(" ")[2].strip()
+        if self.host.is_admin(uid):
+            t, rows = self.home(uid)
+            return await self.host.notify(uid, t, rows)
+        if self.get("who") == "closed":
+            return await update.message.reply_text("📮 Власник зараз не приймає повідомлень.")
+        if text:
+            update.message.text = text
+            await self._deliver(ctx, update.message, update.effective_user, member=True)
+            return
+        self.compose.add(uid)
+        await update.message.reply_text("📮 Напишіть повідомлення власнику — наступне, що ви надішлете (текст, фото, файл, голосове), отримає саме він.")
+
+    # ================================================================ екрани
+    def home(self, chat):
+        if not self.host.is_admin(chat):
+            return ("📮 <b>Написати власнику</b>\n\nНаступне ваше повідомлення (будь-якого типу) отримає власник бота, а не ШІ.",
+                    [[("✍️ Написати", self.cb("w"))]])
+        with closing(self.db()) as con:
+            ps = [dict(r) for r in con.execute("SELECT * FROM people WHERE blocked=0 ORDER BY unread>0 DESC, last DESC LIMIT 12")]
+            tot = con.execute("SELECT COALESCE(SUM(unread),0) FROM people").fetchone()[0]
+        lines = ["📮 <b>Скринька</b>", f"Непрочитаних: {tot} · пишуть: {WHO.get(self.get('who'))}", "",
+                 "Повідомлення людей приходять вам одразу. Відповідайте reply на них — людина отримає відповідь від бота."]
+        rows = []
+        for p in ps:
+            mark = f"🔵{p['unread']} " if p["unread"] else ""
+            rows.append([(f"{mark}{p['name'][:26]} · {p['count']}", self.cb("t", p["user"]))])
+        if not ps:
+            lines.append("\nПоки ніхто не писав. Поділіться посиланням на бота — t.me/ваш_бот.")
+        rows.append([("⚙️ Налаштування скриньки", self.cb("set")), ("🚫 Заблоковані", self.cb("bl"))])
+        return "\n".join(lines), rows
+
+    def thread(self, uid):
+        p = self.person(uid)
+        if not p:
+            return "Розмову не знайдено.", [[("« Скринька", self.cb())]]
+        with closing(self.db()) as con:
+            ms = [dict(r) for r in con.execute("SELECT * FROM msgs WHERE user=? AND (dir='out' OR owner_chat=?) ORDER BY id DESC LIMIT 12",
+                                               (int(uid), self.host.admins()[0] if self.host.admins() else 0))][::-1]
+            con.execute("UPDATE people SET unread=0 WHERE user=?", (int(uid),))
+        lines = [f"📮 <b>{esc(p['name'])}</b>" + (f" @{esc(p['username'])}" if p["username"] else "") + f" · <code>{p['user']}</code>",
+                 f"Повідомлень: {p['count']} · перше: {time.strftime('%d.%m.%Y', time.localtime(p['first']))}" + (" · 🚫 заблоковано" if p["blocked"] else ""), ""]
+        for m in ms:
+            who = "👤" if m["dir"] == "in" else "↩️ ви"
+            lines.append(f"{time.strftime('%d.%m %H:%M', time.localtime(m['at']))} {who} {KIND_ICON.get(m['kind'], '')} {esc((m['text'] or '')[:160])}")
+        rows = [[("↩️ Відповісти", self.cb("r", uid)), (("✅ Розблокувати" if p["blocked"] else "🚫 Заблокувати"), self.cb("b", uid))],
+                [("« Скринька", self.cb())]]
+        return "\n".join(lines)[:4000], rows
+
+    def settings(self):
+        text = ("⚙️ <b>Налаштування скриньки</b>\n\n"
+                f"Хто може писати вам: <b>{WHO.get(self.get('who'))}</b>\n"
+                f"Відповідь людині «✅ Передав»: {'так' if self.get('ack') == '1' else 'ні'}\n"
+                f"Сповіщення: {'без звуку' if self.get('silent') == '1' else 'зі звуком'}\n"
+                f"Захист від флуду: до {self.get('flood')} повідомлень за 10 хв від однієї людини\n\n"
+                f"Привітання (на /start):\n<i>{esc(self.get('greeting'))}</i>\n\n"
+                "Учасники бота пишуть вам через /owner або «📮 Написати власнику»; незнайомі — просто пишуть боту.")
+        rows = [[(("● " if self.get("who") == k else "") + v.split(" (")[0].capitalize(), self.cb("who", k))] for k, v in WHO.items()]
+        rows += [[(("✅ «Передав»: так" if self.get("ack") == "1" else "✅ «Передав»: ні"), self.cb("ack")),
+                  (("🔕 Без звуку" if self.get("silent") == "1" else "🔔 Зі звуком"), self.cb("sil"))],
+                 [("✏️ Привітання", self.cb("gr"))], [("« Скринька", self.cb())]]
+        return text, rows
+
+    def blocked_screen(self):
+        with closing(self.db()) as con:
+            ps = [dict(r) for r in con.execute("SELECT * FROM people WHERE blocked=1 ORDER BY last DESC LIMIT 30")]
+        rows = [[(f"✅ Розблокувати {p['name'][:24]}", self.cb("b", p["user"]))] for p in ps] + [[("« Скринька", self.cb())]]
+        return ("🚫 <b>Заблоковані</b>\n\n" + ("\n".join(esc(p["name"]) for p in ps) or "Нікого.")), rows
+
+    async def route(self, update, ctx, chat, args):
+        a = args[0] if args else ""
+        x = args[1] if len(args) > 1 else None
+        y = args[2] if len(args) > 2 else None
+        if a == "w":
+            self.compose.add(chat)
+            return "✍️ Пишіть", ("📮 Наступне ваше повідомлення отримає власник.", [])
+        if not self.host.is_admin(chat):
+            return None, self.home(chat)
+        if a == "":
+            return None, self.home(chat)
+        if a == "t":
+            return None, self.thread(int(x))
+        if a == "r":
+            self.reply_to[chat] = int(x)
+            p = self.person(x) or {}
+            return None, (f"↩️ Наступне ваше повідомлення (будь-якого типу) піде до <b>{esc(p.get('name', x))}</b>.",
+                          [[("✖️ Скасувати", self.cb("rx"))]])
+        if a == "rx":
+            self.reply_to.pop(chat, None)
+            return "Скасовано", self.home(chat)
+        if a == "b":
+            p = self.person(x)
+            with closing(self.db()) as con, con:
+                con.execute("UPDATE people SET blocked=? , unread=0 WHERE user=?", (0 if p and p["blocked"] else 1, int(x)))
+            return ("Розблоковано" if p and p["blocked"] else "🚫 Заблоковано: більше не отримаєте від цієї людини"), self.thread(int(x))
+        if a == "ok":
+            with closing(self.db()) as con, con:
+                con.execute("UPDATE people SET unread=0 WHERE user=?", (int(x),))
+            return "✅ Прочитано", None
+        if a == "n":
+            with closing(self.db()) as con:
+                r = con.execute("SELECT text, kind FROM msgs WHERE user=? AND src_msg=? ORDER BY id DESC LIMIT 1", (int(x), int(y))).fetchone()
+            news = (self.host.extra.get("plugin") or (lambda pid: None))("news")
+            if not news or not r:
+                return "Ньюзрум недоступний", None
+            p = self.person(x) or {}
+            iid, st, dup = news.ingest("reader", r["text"] or "", f"Читач: {p.get('name', x)}", requested_by=chat)
+            if st == "duplicate":
+                return f"♻️ Повтор матеріалу #{dup}", None
+            return (f"📰 Узяв у ньюзрум #{iid}" if iid else "Порожньо (фото/файл без тексту — перешліть його в ньюзрум вручну)"), None
+        if a == "set":
+            return None, self.settings()
+        if a == "who":
+            self.set("who", x)
+            return None, self.settings()
+        if a == "ack":
+            self.set("ack", "0" if self.get("ack") == "1" else "1")
+            return None, self.settings()
+        if a == "sil":
+            self.set("silent", "0" if self.get("silent") == "1" else "1")
+            return None, self.settings()
+        if a == "gr":
+            self.ask(chat, "gr")
+            return None, ("✏️ Текст привітання для тих, хто вперше пише боту:", [[("✖️ Скасувати", "m:cancel")]])
+        if a == "bl":
+            return None, self.blocked_screen()
+        return None, self.home(chat)
+
+    def is_view(self, args):
+        return not args or args[0] in self.VIEWS
+
+    async def on_text(self, update, ctx, chat, key, data, text):
+        if key == "gr":
+            self.set("greeting", text.strip()[:1000])
+            return "Збережено", self.settings()
+        return None, self.home(chat)

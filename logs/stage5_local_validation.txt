@@ -1,0 +1,6 @@
+Stage 5 local validation — 2026-11-05
+PASS: Python compileall of project modules
+PASS: SQLite draft create / pagination / select all / select one / submit / render / reject / approve
+PASS: Unauthorized owner cannot access another user's draft
+NOT TESTED: Telegram API integration, Mini App HTTPS deployment, BotFather settings, Oracle/Railway live operation
+NOT IMPLEMENTED: Telegram sticker set publication and image thumbnails

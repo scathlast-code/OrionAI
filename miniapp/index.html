@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>OrionAI</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{--bg:var(--tg-theme-bg-color,#0f1720);--card:var(--tg-theme-secondary-bg-color,#17212b);--txt:var(--tg-theme-text-color,#eef3f7);
+--hint:var(--tg-theme-hint-color,#8b9aa8);--acc:var(--tg-theme-button-color,#5aa9ff);--acct:var(--tg-theme-button-text-color,#fff);
+--sep:color-mix(in srgb,var(--hint) 22%,transparent);--danger:#ff6b6b}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--txt);font:16px/1.4 -apple-system,system-ui,"SF Pro Text",Roboto,sans-serif}
+main{padding:14px 16px calc(92px + env(safe-area-inset-bottom));max-width:720px;margin:0 auto}
+.top{display:flex;align-items:flex-start;gap:10px;margin:4px 0 12px}
+.top h1{flex:1;font-size:26px;line-height:1.15;margin:0;letter-spacing:-.4px}
+.ic{border:0;background:var(--card);color:var(--txt);width:38px;height:38px;border-radius:12px;font-size:18px;cursor:pointer;flex:none}
+.ic.on{background:#f5c451;color:#2b2105}.ic.pill{width:auto;padding:0 12px;font-size:14px;font-weight:600}
+.sub{color:var(--hint);font-size:14.5px;margin:-4px 0 14px;white-space:pre-wrap}
+.card{background:var(--card);border-radius:16px;padding:14px 15px;margin:0 0 14px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:15px}
+.card b{font-weight:650}.card code{background:color-mix(in srgb,var(--hint) 18%,transparent);padding:0 5px;border-radius:5px;font-size:13.5px}
+.card a{color:var(--acc)}
+.list{background:var(--card);border-radius:16px;overflow:hidden;margin:0 0 14px}
+.cell{display:flex;align-items:center;gap:12px;width:100%;border:0;background:none;color:var(--txt);text-align:left;padding:13px 15px;font:inherit;cursor:pointer;position:relative}
+.cell+.cell::before{content:"";position:absolute;left:56px;right:0;top:0;height:1px;background:var(--sep)}
+.cell .em{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;background:color-mix(in srgb,var(--acc) 16%,transparent);font-size:17px;flex:none}
+.cell .lb{flex:1;min-width:0}.cell .badge{background:var(--acc);color:var(--acct);border-radius:20px;padding:1px 9px;font-size:13px;font-weight:600}
+.cell .chev{color:var(--hint);font-size:18px}.cell.danger{color:var(--danger)}.cell.danger .em{background:color-mix(in srgb,var(--danger) 16%,transparent)}
+.cell:active{background:color-mix(in srgb,var(--hint) 12%,transparent)}
+.seg{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 14px}
+.seg button{flex:1 1 auto;min-width:0;border:0;border-radius:12px;padding:10px 12px;background:var(--card);color:var(--txt);font:inherit;font-size:14.5px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.seg button.sel{background:var(--acc);color:var(--acct);font-weight:600}
+.notes{margin:0 0 14px}.notes div{background:color-mix(in srgb,var(--acc) 12%,transparent);border-radius:12px;padding:10px 12px;margin:6px 0;font-size:14px}
+nav{position:fixed;left:0;right:0;bottom:0;background:color-mix(in srgb,var(--card) 94%,transparent);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+display:flex;justify-content:space-around;padding:6px 4px calc(6px + env(safe-area-inset-bottom));border-top:1px solid var(--sep)}
+nav button{border:0;background:none;color:var(--hint);font:inherit;font-size:11px;display:flex;flex-direction:column;align-items:center;gap:2px;padding:4px 8px;cursor:pointer;min-width:58px}
+nav button span{font-size:21px;filter:grayscale(.6);opacity:.8}nav button.on{color:var(--acc)}nav button.on span{filter:none;opacity:1}
+.sheet{position:fixed;left:0;right:0;bottom:0;background:var(--card);border-radius:18px 18px 0 0;padding:14px 16px calc(16px + env(safe-area-inset-bottom));box-shadow:0 -10px 30px #0007;transform:translateY(110%);transition:.25s;z-index:5}
+.sheet.on{transform:none}.sheet textarea{width:100%;min-height:96px;border-radius:12px;border:1px solid var(--sep);background:var(--bg);color:var(--txt);padding:10px;font:inherit}
+.sheet .row{display:flex;gap:8px;margin-top:10px}.sheet .row button{flex:1;border:0;border-radius:12px;padding:12px;font:inherit;cursor:pointer;background:var(--bg);color:var(--txt)}
+.sheet .row .pri{background:var(--acc);color:var(--acct);font-weight:650}
+.toast{position:fixed;left:50%;top:14px;transform:translate(-50%,-30px);opacity:0;background:var(--card);border-radius:12px;padding:10px 14px;box-shadow:0 6px 20px #0006;transition:.25s;z-index:9;max-width:92vw;font-size:14px}
+.toast.on{opacity:1;transform:translate(-50%,0)}
+.skel{height:52px;border-radius:14px;background:linear-gradient(90deg,var(--card),color-mix(in srgb,var(--card) 70%,var(--hint)),var(--card));background-size:200% 100%;animation:sk 1.2s infinite;margin:8px 0}
+@keyframes sk{to{background-position:-200% 0}}
+body.marking .cell,body.marking .seg button,body.marking .card{outline:1.5px dashed #f5c451;outline-offset:-2px}
+.bub{max-width:86%;padding:9px 12px;border-radius:16px;margin:6px 0;white-space:pre-wrap;overflow-wrap:anywhere;font-size:15px}
+.bub.user{margin-left:auto;background:var(--acc);color:var(--acct);border-bottom-right-radius:5px}
+.bub.assistant{background:var(--card);border-bottom-left-radius:5px}.bub small{display:block;opacity:.65;font-size:11.5px;margin-top:3px}
+.composer{position:fixed;left:0;right:0;bottom:calc(58px + env(safe-area-inset-bottom));display:flex;gap:8px;padding:8px 12px;background:var(--bg);border-top:1px solid var(--sep)}
+.composer textarea{flex:1;resize:none;height:42px;max-height:120px;border-radius:21px;border:1px solid var(--sep);background:var(--card);color:var(--txt);padding:10px 14px;font:inherit}
+.composer button{border:0;width:42px;height:42px;border-radius:50%;background:var(--card);color:var(--txt);font-size:18px;cursor:pointer;flex:none}
+.composer .send{background:var(--acc);color:var(--acct)}
+.typing{color:var(--hint);font-size:13px;margin:6px 2px}
+.empty{text-align:center;color:var(--hint);padding:50px 10px}
+</style>
+</head>
+<body>
+<main id="main"><div class="skel"></div><div class="skel"></div><div class="skel"></div></main>
+<nav id="tabs"></nav>
+<input type="file" id="filein" style="display:none">
+<div class="sheet" id="sheet"><div id="sheetq" class="sub" style="margin:0 0 8px"></div><input type="hidden" id="sheetmode"><textarea id="sheett"></textarea>
+<div class="row"><button onclick="cancelInput()">Скасувати</button><button id="sheetfile" onclick="pickFile(document.getElementById('sheett').value)">📎 Файл</button><button class="pri" onclick="sendInput()">Готово</button></div></div>
+<div class="toast" id="toast"></div>
+<script>
+const TG = window.Telegram && Telegram.WebApp;
+const init = TG && TG.initData;
+const API = new URL('app/api', location.href.replace(/app\/?(#.*)?$/, '')).href;
+const TABS = [['chat','💬','Розмова'],['m:pl:news','📰','Ньюзрум'],['m:pl:inb','📮','Скринька'],['m:pl:stk','🧷','Стікери'],['m:home','☰','Меню']];
+const HASH = {chat:'chat', menu:'m:home', news:'m:pl:news', inbox:'m:pl:inb', stk:'m:pl:stk', lists:'m:pl:news:L', find:'m:pl:news:D'};
+let hist = [], cur = null, marking = false, busy = false;
+
+function toast(t){const e=document.getElementById('toast');e.textContent=t;e.classList.add('on');clearTimeout(toast.t);toast.t=setTimeout(()=>e.classList.remove('on'),2600)}
+function haptic(k){try{TG.HapticFeedback.impactOccurred(k||'light')}catch(_){}}
+function sanitize(html){
+  const d=document.createElement('div');d.innerHTML=html.replace(/\n/g,'<br>');
+  (function walk(n){for(const c of [...n.childNodes]){if(c.nodeType===1){const t=c.tagName.toLowerCase();
+    if(!['b','strong','i','em','u','s','code','pre','a','br'].includes(t)){c.replaceWith(...c.childNodes);continue}
+    for(const a of [...c.attributes]) if(!(t==='a'&&a.name==='href'&&/^https?:/.test(a.value))) c.removeAttribute(a.name);
+    if(t==='a'){c.target='_blank';c.onclick=e=>{e.preventDefault();try{TG.openLink(c.href)}catch(_){window.open(c.href)}}}
+    walk(c)}}})(d);return d.innerHTML}
+function split(label){
+  const m=label.match(/^(\p{Extended_Pictographic}(?:️|‍\p{Extended_Pictographic})*|[●▫️«])\s*/u);
+  let icon=m?m[1]:'', rest=m?label.slice(m[0].length):label, badge='';
+  const b=rest.match(/\s·\s*(\d+)$/); if(b){badge=b[1];rest=rest.slice(0,b.index)}
+  return {icon,rest,badge}}
+async function call(op, data, extra){
+  if(!init){render({text:'<b>Відкрийте з Telegram</b>\nЗастосунок працює всередині бота: синя кнопка ліворуч від поля вводу або ⚙️ → 📱 Чат і застосунок.',rows:[]},true);return null}
+  busy=true;
+  try{const r=await fetch(API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({initData:init,op,data},extra||{}))});
+    if(r.status===403){render({text:'<b>Немає доступу</b>\nЦей застосунок відкривається лише для учасників бота.',rows:[]},true);return null}
+    if(!r.ok){toast('Помилка API: HTTP '+r.status);return null}
+    return await r.json()}catch(e){toast(e instanceof SyntaxError?'Некоректна відповідь сервера':'Сервер API недоступний');return null}finally{busy=false}}
+async function open_(data, push=true){
+  if(busy) return; const res=await call('screen',data); if(!res) return;
+  if(!res.text){ if(res.toast) toast(res.toast); for(const n of res.notes||[]) toast(n); return }
+  if(push && cur && cur!==data) hist.push(cur); cur=data; render(res); syncBack();
+}
+async function openChat(push=true){
+  if(push && cur && cur!=='chat') hist.push(cur); cur='chat'; syncBack();
+  const res=await call('history','chat'); if(!res) return; renderChat(res);
+}
+function renderChat(res, typing){
+  const main=document.getElementById('main'); main.innerHTML='';
+  const top=document.createElement('div');top.className='top';top.innerHTML='<h1></h1>';top.querySelector('h1').textContent='💬 '+(res.dialog||'Розмова');
+  const chat=document.createElement('button');chat.className='ic pill';chat.textContent='↗ Чат';chat.title='Продовжити в чаті з ботом';chat.onclick=toChat;top.appendChild(chat);main.appendChild(top);
+  const sub=document.createElement('div');sub.className='sub';sub.textContent='Та сама розмова, що й у чаті з ботом: пишіть тут або там — історія спільна.';main.appendChild(sub);
+  for(const m of res.messages||[]){const b=document.createElement('div');b.className='bub '+(m.role==='user'?'user':'assistant');b.textContent=m.text;
+    if(m.provider){const sm=document.createElement('small');sm.textContent=m.provider;b.appendChild(sm)}main.appendChild(b)}
+  if(!(res.messages||[]).length){const e=document.createElement('div');e.className='empty';e.textContent='Почніть розмову — напишіть питання, перешліть текст новини або надішліть файл 📎';main.appendChild(e)}
+  if(typing){const t=document.createElement('div');t.className='typing';t.textContent='Думаю над відповіддю…';main.appendChild(t)}
+  main.style.paddingBottom='160px';
+  let c=document.getElementById('composer');
+  if(!c){c=document.createElement('div');c.id='composer';c.className='composer';
+    c.innerHTML='<button title="Файл або фото">📎</button><textarea placeholder="Повідомлення…"></textarea><button class="send">➤</button>';
+    document.body.appendChild(c);c.children[0].onclick=()=>pickFile(null);c.children[2].onclick=say;
+    c.children[1].addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();say()}})}
+  c.style.display='flex';tabs();window.scrollTo(0,document.body.scrollHeight);
+}
+async function say(){const ta=document.querySelector('#composer textarea');const t=ta.value.trim();if(!t||busy)return;ta.value='';
+  const h=await call('history','chat');if(h){h.messages.push({role:'user',text:t});renderChat(h,true)}
+  const res=await call('say','chat',{text:t,user:userInfo()});if(!res)return;showResult(res)}
+function showResult(res){
+  if(res.text){hist.push('chat');cur=null;render(res);return}   // плагін показав екран (ньюзрум, стікери, імпорт…)
+  for(const n of res.notes||[]) if(!(res.replies||[]).length) toast(n);
+  openChat(false);
+}
+function userInfo(){const u=(TG&&TG.initDataUnsafe&&TG.initDataUnsafe.user)||{};return {name:[u.first_name,u.last_name].filter(Boolean).join(' '),username:u.username||''}}
+function pickFile(caption){const f=document.getElementById('filein');f.value='';f.onchange=async()=>{const file=f.files[0];if(!file)return;
+  if(file.size>15*1024*1024){toast('Файл більший за 15 МБ — надішліть його в чат');return}
+  const b64=await new Promise(r=>{const fr=new FileReader();fr.onload=()=>r(String(fr.result).split(',')[1]);fr.readAsDataURL(file)});
+  document.getElementById('sheet').classList.remove('on');toast('📎 Надсилаю '+file.name+'…');
+  const res=await call('file',cur||'chat',{name:file.name,mime:file.type,b64,text:caption||'',user:userInfo()});if(res)showResult(res)};f.click()}
+function syncBack(){try{hist.length?TG.BackButton.show():TG.BackButton.hide()}catch(_){}}
+function render(res, bare){
+  const main=document.getElementById('main'); main.innerHTML=''; main.style.paddingBottom='';
+  const comp=document.getElementById('composer'); if(comp) comp.style.display='none';
+  const lines=(res.text||'').split('\n'); const title=lines.shift().replace(/<[^>]+>/g,'').trim();
+  let rest=lines.join('\n').replace(/^\n+/,''); let sub='';
+  const p=rest.split('\n\n'); if(p.length>1 && p[0].length<160 && !/<b>/.test(p[0])){sub=p.shift();rest=p.join('\n\n')}
+  const top=document.createElement('div');top.className='top';top.innerHTML='<h1></h1>';top.querySelector('h1').textContent=title||'OrionAI';
+  if(!bare){
+    const chat=document.createElement('button');chat.className='ic pill';chat.title='Продовжити цей екран у чаті з ботом';chat.textContent='↗ Чат';chat.onclick=toChat;
+    const imp=document.createElement('button');imp.className='ic'+(marking?' on':'');imp.title='Позначити для «Покращити»';imp.textContent='💡';imp.onclick=()=>{marking=!marking;document.body.classList.toggle('marking',marking);imp.classList.toggle('on',marking);if(marking)toast('💡 Торкніться того, що треба покращити')};
+    top.append(imp,chat)}
+  main.appendChild(top);
+  if(sub){const s=document.createElement('div');s.className='sub';s.innerHTML=sanitize(sub);main.appendChild(s)}
+  if(rest.trim()){const c=document.createElement('div');c.className='card';c.innerHTML=sanitize(rest.trim());c.onclick=()=>{if(marking)mark('текст екрана','',c.textContent)};main.appendChild(c)}
+  for(const n of res.notes||[]){const d=document.createElement('div');d.className='notes';d.innerHTML='<div></div>';d.firstChild.textContent=n;main.appendChild(d)}
+  let list=null;
+  for(const row of res.rows||[]){
+    const segment = row.length>1 && row.every(([t])=>t.length<=24);
+    if(segment){list=null;const g=document.createElement('div');g.className='seg';
+      for(const [t,d] of row){const b=document.createElement('button');const s=split(t);b.textContent=(t.startsWith('● ')?t.slice(2):t);if(t.startsWith('● '))b.className='sel';b.onclick=()=>press(t,d);g.appendChild(b)}
+      main.appendChild(g);continue}
+    for(const [t,d] of row){
+      if(!list){list=document.createElement('div');list.className='list';main.appendChild(list)}
+      const s=split(t);const b=document.createElement('button');b.className='cell'+(/^🗑|видалити/i.test(t)?' danger':'');
+      b.innerHTML='<span class="em"></span><span class="lb"></span>'+(s.badge?'<span class="badge"></span>':'')+'<span class="chev">›</span>';
+      b.querySelector('.em').textContent=s.icon||'•';b.querySelector('.lb').textContent=s.rest;if(s.badge)b.querySelector('.badge').textContent=s.badge;
+      b.onclick=()=>press(t,d);list.appendChild(b)}
+    if(row.length>1) list=null;
+  }
+  if(!(res.rows||[]).length && !rest.trim()){const e=document.createElement('div');e.className='empty';e.textContent='Тут поки порожньо';main.appendChild(e)}
+  if(res.toast) toast(res.toast);
+  if(res.awaiting) askInput(res.text);
+  tabs(); window.scrollTo(0,0);
+}
+function tabs(){const n=document.getElementById('tabs');n.innerHTML='';
+  const active=TABS.find(([d])=>cur&&(cur===d||cur.startsWith(d+':')))||TABS[4];
+  for(const tb of TABS){const b=document.createElement('button');b.className=tb===active?'on':'';b.innerHTML='<span>'+tb[1]+'</span>'+tb[2];
+    b.onclick=()=>{haptic();hist=[];cur=null;tb[0]==='chat'?openChat(false):open_(tb[0])};n.appendChild(b)}}
+function press(label, d){
+  if(marking){mark('кнопка «'+label+'»',d,'');return}
+  haptic();
+  if(d.startsWith('url:')){try{TG.openLink(d.slice(4))}catch(_){window.open(d.slice(4))}return}
+  if(d.startsWith('app:')){toast('Ви вже в застосунку');return}
+  if(d==='m:cancel'){cancelInput();return}
+  open_(d);
+}
+function askInput(text, mode){document.getElementById('sheetmode').value=mode||'text';document.getElementById('sheetq').innerHTML=sanitize((text||'').split('\n').slice(0,3).join('\n'));document.getElementById('sheett').value='';document.getElementById('sheet').classList.add('on');setTimeout(()=>document.getElementById('sheett').focus(),250)}
+async function sendInput(){const t=document.getElementById('sheett').value.trim();
+  if(document.getElementById('sheetmode').value==='mark'){document.getElementById('sheet').classList.remove('on');return saveMark(t)}
+  if(!t)return;document.getElementById('sheet').classList.remove('on');
+  const res=await call('text',cur,{text:t});if(!res)return;if(res.text){render(res)}else{for(const n of res.notes||[])toast(n);if(res.toast)toast(res.toast)}}
+async function cancelInput(){const m=document.getElementById('sheetmode').value;document.getElementById('sheet').classList.remove('on');if(m==='mark'){pending=null;return}await call('screen','m:cancel');if(hist.length){open_(hist.pop(),false)}}
+async function toChat(){haptic('medium');await call('tochat',(cur&&cur!=='chat')?cur:'m:home');toast('💬 Екран надіслано в чат');setTimeout(()=>{try{TG.close()}catch(_){}} ,350)}
+let pending=null;
+function mark(target, action, excerpt){
+  marking=false;document.body.classList.remove('marking');pending={target,action,excerpt:(excerpt||'').slice(0,300)};
+  askInput('<b>💡 Додати в «Покращити»</b>\n'+target.replace(/</g,'&lt;')+'\nЩо не так і що запропонувати? Можна залишити порожнім.','mark');
+  document.querySelectorAll('.ic').forEach(b=>b.classList.remove('on'));
+}
+async function saveMark(note){
+  if(!pending)return;const m=Object.assign({where:'app',screen:cur||'',note},pending);pending=null;
+  try{const r=await fetch(new URL('improve',API.replace(/app\/api$/,'')).href,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({initData:init,marks:[m]})});toast(r.ok?'💡 Додано в «Покращити»':'Не вдалося зберегти')}catch(_){toast('Не вдалося зберегти')}
+}
+if(TG){TG.ready();TG.expand();try{TG.BackButton.onClick(()=>{if(hist.length){const h=hist.pop();h==='chat'?openChat(false):open_(h,false)}})}catch(_){}}
+(function start(){
+  if(TG && TG.isVersionAtLeast && !TG.isVersionAtLeast('6.1')){
+    render({text:'<b>Цей Telegram не підтримує застосунок</b>\nУсе те саме доступне в чаті з ботом кнопками. Оновіть Telegram, щоб користуватись і застосунком.',rows:[]},true);return}
+  const first=HASH[(location.hash||'').slice(1)]||(TG&&TG.initDataUnsafe&&HASH[TG.initDataUnsafe.start_param])||'m:pl:news';
+  first==='chat'?openChat(false):open_(first,false);
+})();
+</script>
+</body>
+</html>

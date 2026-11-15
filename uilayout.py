@@ -155,7 +155,10 @@ class Layout:
         """Підписи кнопок меню внизу екрана."""
         labels = [self.label(chat, i) for i in self.in_place(chat, PLACE_KB)]
         cols = self.get_prefs(chat).get("kb_cols", 2)
-        return pairs(labels, cols) or [[self.label(chat, "st")]]
+        if labels:
+            return pairs(labels, cols)
+        keep = next((i for i in self.locked if i in self.items), None) or next(iter(self.items))  # хоч одна кнопка лишається
+        return [[self.label(chat, keep)]]
 
     def reply_routes(self, chat):
         """Підпис кнопки меню внизу -> дані (з урахуванням перейменувань)."""

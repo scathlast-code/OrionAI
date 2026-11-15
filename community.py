@@ -197,7 +197,6 @@ class Community:
 
     def log(self, cid, text):
         self.x("INSERT INTO cm_log(cid, t, text) VALUES (?,?,?)", (cid, time.time(), text))
-        self.x("DELETE FROM cm_log WHERE cid=? AND id NOT IN (SELECT id FROM cm_log WHERE cid=? ORDER BY id DESC LIMIT 200)", (cid, cid))
 
     def permit_ok(self, cid, uid, rule):
         r = self.q("SELECT until FROM cm_permits WHERE cid=? AND user_id=? AND rule IN (?, '*')", (cid, str(uid), rule))

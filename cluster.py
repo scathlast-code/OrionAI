@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sqlite3
 import tempfile
 import time
@@ -48,6 +49,7 @@ class Node:
         """prefix — для головного бота «MANAGER_»: його сервери задаються окремо (MANAGER_CLUSTER_NODES тощо)."""
         self.path = os.path.join(data_dir, fname)  # головний бот — свій файл (node-manager.json), бо тека /data може бути спільною
         self.db_path = db_path
+        self.extras = None  # fn() -> [(відносна назва, шлях)] додаткових баз (плагіни, UTM, статистика) — їдуть на резерв разом з основною
         self.tz = tz
         # кластер
         self.prefix = prefix
@@ -312,7 +314,61 @@ class Node:
         finally:
             os.remove(tmp)
         self.set("last_pull", time.time())
+        try:
+            await self.pull_extras(url)
+        except Exception:  # noqa: BLE001 — старіша версія на тому сервері або збій: основна база вже є
+            log.warning("кластер: додаткові бази не скопійовано", exc_info=True)
         return len(r.content)
+
+    def snapshot_extras(self):
+        """TAR зі знімками додаткових баз."""
+        import io
+        import tarfile
+        bio = io.BytesIO()
+        with tarfile.open(fileobj=bio, mode="w") as tf:
+            for rel, path in (self.extras() if self.extras else []):
+                fd, tmp = tempfile.mkstemp(suffix=".db")
+                os.close(fd)
+                try:
+                    with closing(sqlite3.connect(path)) as src, closing(sqlite3.connect(tmp)) as dst:
+                        src.backup(dst)
+                    tf.add(tmp, arcname=rel)
+                except (OSError, sqlite3.Error):
+                    continue
+                finally:
+                    os.remove(tmp)
+        return bio.getvalue()
+
+    async def pull_extras(self, url):
+        import io
+        import tarfile
+        async with httpx.AsyncClient(timeout=300) as c:
+            r = await c.get(f"{url}/cluster/extras", headers={"X-Cluster-Key": self.key, "X-Cluster-Node": self.name})
+        if r.status_code != 200:
+            return 0
+        base = os.path.dirname(os.path.abspath(self.db_path))
+        n = 0
+        with tarfile.open(fileobj=io.BytesIO(r.content), mode="r:") as tf:
+            for m in tf.getmembers():
+                parts = m.name.replace("\\", "/").split("/")
+                if not m.isfile() or m.name.startswith("/") or ".." in parts:
+                    continue
+                raw = tf.extractfile(m).read()
+                if raw[:16] != b"SQLite format 3\x00":
+                    continue
+                dest = os.path.join(base, *parts)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                fd, tmp = tempfile.mkstemp(suffix=".db")
+                os.close(fd)
+                try:
+                    with open(tmp, "wb") as f:
+                        f.write(raw)
+                    with closing(sqlite3.connect(tmp)) as src, closing(sqlite3.connect(dest)) as dst:
+                        src.backup(dst)
+                    n += 1
+                finally:
+                    os.remove(tmp)
+        return n
 
     def snapshot(self):
         fd, tmp = tempfile.mkstemp(suffix=".db")
@@ -450,6 +506,11 @@ class Node:
             self.pending.pop(request.headers.get("X-Cluster-Node", ""), None)  # цей резерв тепер має все
             return Response(data, media_type="application/octet-stream")
 
+        async def extras_(request):
+            if not ok(request):
+                return Response(status_code=403)
+            return Response(await asyncio.to_thread(self.snapshot_extras), media_type="application/x-tar")
+
         async def settings_(request):
             if not ok(request):
                 return Response(status_code=403)
@@ -493,7 +554,7 @@ class Node:
             self.note(f"інший сервер обрав активним «{name}»" if name else "знову автоматично за списком")
             return JSONResponse({"ok": True})
 
-        return [Route("/cluster/status", status), Route("/cluster/db", db), Route("/cluster/yield", yield_, methods=["POST"]),
+        return [Route("/cluster/status", status), Route("/cluster/db", db), Route("/cluster/extras", extras_), Route("/cluster/yield", yield_, methods=["POST"]),
                 Route("/cluster/prefer", prefer_, methods=["POST"]), Route("/cluster/activity", activity, methods=["POST"]),
                 Route("/cluster/settings", settings_, methods=["POST"])]
 
@@ -511,7 +572,7 @@ def cluster_screen(node, esc, tz, back="m:rm"):
                   f"<code>{p}CLUSTER_NODES=oracle=https://адреса-1,railway=https://адреса-2</code>",
                   f"<code>{p}CLUSTER_NAME=</code> назва саме цього сервера зі списку",
                   f"<code>{p}CLUSTER_KEY=</code> однаковий секрет (від 16 символів)",
-                  "Докладно — docs/10-rezervni-servery.md"]
+                  "Докладно — docs/21-rezervni-servery.md"]
         return "\n".join(lines), [[("« Режим роботи", back)]]
     sel = node.get("select") or "auto"
     pool = node.get("pool") or [n for n, _ in node.nodes]
@@ -557,3 +618,159 @@ async def cluster_route(node, a, arg):
         await node.prefer(arg)
         return f"Працюватиме «{arg}»" if arg != "-" else "Автоматично"
     return None
+
+
+# ---------------------------------------------------------------- 🔔 нагадування зайти в акаунт Oracle
+# Oracle може вважати покинутим акаунт, у якому довго нічого не відбувається; що саме рахується активністю, офіційно
+# не описано — тож найнадійніше раз на 2 тижні просто зайти в консоль чи застосунок.
+ORACLE_URL = "https://cloud.oracle.com/"
+ORACLE_APP = "https://apps.apple.com/app/id1534250806"
+
+
+def oracle_on(node, need=False):
+    v = node.get("oracle_remind")
+    if v is not None:
+        return bool(v)
+    return need or node.cost() == "free" or any("oracle" in n.lower() for n, _ in node.nodes)
+
+
+def oracle_due(node, now=None, need=False):
+    now = now or time.time()
+    if not oracle_on(node, need):
+        return False
+    nxt = node.get("oracle_next")
+    if not nxt:  # перше нагадування — через інтервал від увімкнення
+        node.set("oracle_next", now + int(node.get("oracle_every") or 14) * 86400)
+        return False
+    return now >= nxt
+
+
+def oracle_message(node):
+    every = int(node.get("oracle_every") or 14)
+    text = ("🔔 <b>Час зайти в Oracle Cloud</b>\n"
+            "Oracle може зупинити або закрити акаунт, у якому довго нічого не відбувається. Достатньо увійти й побути хвилину "
+            "(на iPhone — у застосунку Oracle Cloud Infrastructure). Заодно гляньте, чи немає листів від Oracle про «idle» сервер "
+            f"і чи дійсна картка в акаунті.\nНаступне нагадування — через {every} дн.")
+    rows = [[("🌐 Відкрити Oracle Cloud", "url:" + ORACLE_URL)], [("📱 Застосунок для iPhone", "url:" + ORACLE_APP)],
+            [("✅ Зайшов", "m:orok"), ("⏰ Нагадати завтра", "m:orlater")]]
+    return text, rows
+
+
+def oracle_route(node, a, arg):
+    """Дії кнопок нагадування. Повертає підказку."""
+    now = time.time()
+    if a in ("orok", "orlater", "orset"):
+        node.set("oracle_ts", now)  # спільна позначка: найновіша дія з будь-якого бота перемагає
+    if a == "orok":
+        node.set("oracle_last", now)
+        node.set("oracle_next", now + int(node.get("oracle_every") or 14) * 86400)
+        return "Дякую! Наступне нагадування — через " + str(int(node.get("oracle_every") or 14)) + " дн."
+    if a == "orlater":
+        node.set("oracle_next", now + 86400)
+        return "Нагадаю завтра"
+    if a == "orset":
+        if arg == "off":
+            node.set("oracle_remind", False)
+            return "Нагадування вимкнено"
+        node.set("oracle_remind", True)
+        node.set("oracle_every", int(arg))
+        node.set("oracle_next", now + int(arg) * 86400)
+        return f"Нагадуватиму раз на {arg} дн."
+    return None
+
+
+def oracle_rows(node, need=False):
+    on = oracle_on(node, need)
+    every = int(node.get("oracle_every") or 14)
+    return [[((("● " if on and every == d else "") + f"🔔 Oracle: {d} дн"), f"m:orset:{d}") for d in (7, 14, 21)] + [(("● " if not on else "") + "🔕", "m:orset:off")]]
+
+
+def oracle_line(node, tz, need=False):
+    from datetime import datetime as _dt
+    if not oracle_on(node, need):
+        return "🔕 Нагадування зайти в Oracle Cloud вимкнено."
+    nxt = node.get("oracle_next")
+    return (f"🔔 Нагадування зайти в Oracle Cloud: раз на {int(node.get('oracle_every') or 14)} дн"
+            + (f", наступне {_dt.fromtimestamp(nxt, tz).strftime('%d.%m')}" if nxt else ""))
+
+
+# ---------------------------------------------------------------- 🔗 корисні посилання (Railway, GitHub, Oracle)
+RAILWAY_URL = "https://railway.com/dashboard"
+RAILWAY_PLANS = "https://railway.com/workspace/plans"
+GITHUB_URL = "https://github.com/"
+GITHUB_APP = "https://apps.apple.com/app/id1477376905"
+
+
+def github_repo(node):
+    """Адреса репозиторію: задана в боті → змінна GITHUB_REPO → None. «owner/repo» розгортається в повну адресу."""
+    v = (node.get("github") or os.environ.get("GITHUB_REPO") or "").strip().rstrip("/")
+    if not v:
+        return None
+    if not v.startswith("http"):
+        v = "https://github.com/" + v.removeprefix("github.com/")
+    return v
+
+
+def github_set(node, text):
+    """Повертає (успіх, повідомлення). «-» — як у змінних сервера."""
+    t = (text or "").strip()
+    if t == "-":
+        node.set("github", None)
+        return True, "Репозиторій: " + (github_repo(node) or "не задано")
+    t = t.removeprefix("https://").removeprefix("http://").removeprefix("www.").removeprefix("github.com/").strip("/")
+    if t.endswith(".git"):
+        t = t[:-4]
+    parts = t.split("/")
+    ok = len(parts) >= 2 and all(re.fullmatch(r"[A-Za-z0-9_.-]+", x) for x in parts[:2])
+    if not ok:
+        return False, "Потрібно: <code>власник/назва</code> або адреса github.com/власник/назва"
+    node.set("github", "https://github.com/" + "/".join(parts[:2]))
+    return True, "Репозиторій: " + github_repo(node)
+
+
+def links_screen(node, esc, back="m:rm"):
+    repo = github_repo(node)
+    on_railway = bool(os.environ.get("RAILWAY_PROJECT_ID") or os.environ.get("RAILWAY_ENVIRONMENT"))
+    lines = ["🔗 <b>Корисні посилання</b>", "Railway відкривається в Safari (окремого застосунку немає), GitHub і Oracle мають застосунки для iPhone.", "",
+             "🚂 <b>Railway</b> — сервер бота" + (" (цей)" if on_railway else "") + ". Заходити для «активності» не потрібно: "
+             "Railway нічого не забирає через простій. Важливо інше:",
+             "• закінчився кредит — сервіси зупиняються, дані лишаються; на Free оживуть, коли нарахується новий $1;",
+             "• після пробного періоду (30 днів) томи з даними видаляються через 30 днів, якщо не перейти на Free чи Hobby "
+             "(перед цим приходить лист);",
+             "• на Free кожному сервісу потрібен Serverless (сон), інакше він не запуститься.",
+             "У «Plans» видно залишок кредиту й витрати.", "",
+             "🐙 <b>GitHub</b> — код бота. Активності теж не вимагає. Railway бере код звідти й оновлює бота після кожної зміни.",
+             "Репозиторій: " + (f"<code>{esc(repo)}</code>" if repo else "не задано (кнопка нижче відкриє головну GitHub)"), "",
+             "☁️ <b>Oracle Cloud</b> — безкоштовний сервер; там заходити раз на 2–3 тижні варто (є нагадування)."]
+    rows = [[("🚂 Railway: проєкти", "url:" + RAILWAY_URL), ("💰 Кредит і план", "url:" + RAILWAY_PLANS)],
+            [("🐙 " + ("Репозиторій" if repo else "GitHub"), "url:" + (repo or GITHUB_URL)), ("✏️ Репозиторій", "m:lnkgh")],
+            [("☁️ Oracle Cloud", "url:" + ORACLE_URL)],
+            [("📱 Застосунок GitHub", "url:" + GITHUB_APP), ("📱 Застосунок Oracle", "url:" + ORACLE_APP)],
+            [("« Режим роботи", back)]]
+    return "\n".join(lines), rows
+
+
+GITHUB_PROMPT = ("✏️ <b>Репозиторій GitHub</b>\nНадішліть <code>власник/назва</code> або адресу, наприклад "
+                 "<code>https://github.com/ivan/OrionAI</code>. Ні токенів, ні паролів не потрібно — лише адреса.\n«-» — як у змінній GITHUB_REPO.")
+
+
+# Нагадування надсилає лише головний бот; дочірні показують ті самі налаштування й кнопки. Стан (частота, коли наступне,
+# «✅ Зайшов») їздить разом із планами сну — тобто лише при змінах, — і найновіша дія з будь-якого бота стає спільною.
+ORACLE_FIELDS = ("oracle_remind", "oracle_every", "oracle_next", "oracle_last")
+
+
+def oracle_state(node):
+    st = {k: node.get(k) for k in ORACLE_FIELDS}
+    st["ts"] = node.get("oracle_ts") or 0
+    st["need"] = node.cost() == "free" or any("oracle" in n.lower() for n, _ in node.nodes)  # чи цей сервер сам на Oracle — головний нагадує, навіть якщо він на Railway
+    return st
+
+
+def oracle_merge(node, st):
+    """Застосувати стан з іншого бота, якщо він новіший. True — щось змінилось."""
+    if not isinstance(st, dict) or (st.get("ts") or 0) <= (node.get("oracle_ts") or 0):
+        return False
+    for k in ORACLE_FIELDS:
+        node.set(k, st.get(k))
+    node.set("oracle_ts", st["ts"])
+    return True
