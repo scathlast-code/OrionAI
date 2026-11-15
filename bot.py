@@ -2201,8 +2201,8 @@ def _plugin_bot():
 
 
 def miniapp_url():
-    """Адреса застосунку: свій /app на сервері бота (PUBLIC_URL), інакше ORION_MINIAPP_URL."""
-    base = env("PUBLIC_URL", "").rstrip("/")
+    """Адреса застосунку: свій /app на сервері бота (PUBLIC_URL або домен Railway), інакше ORION_MINIAPP_URL."""
+    base = ((globals().get("public_base") or (lambda: WEBHOOK_BASE))() or "").rstrip("/")  # PUBLIC_URL, адреса з меню «🔗 Зв'язки» або домен Railway
     if base.startswith("https://"):
         return base + "/app"
     other = env("ORION_MINIAPP_URL", "").rstrip("/")
