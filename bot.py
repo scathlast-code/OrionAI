@@ -5498,7 +5498,7 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
                 "• <b>Застосунок</b> — повний екран: вкладки, картки, поле введення, зручно для довгих списків.\n\n"
                 "Із чату в застосунок — синя кнопка ліворуч від поля вводу або «🧩 Відкрити в застосунку».\n"
                 "Із застосунку в чат — «💬 Продовжити в чаті»: бот надішле той самий екран сюди.\n\n"
-                + (f"Адреса застосунку: {esc(url)}" if url else "⚠️ Застосунку потрібна HTTPS-адреса бота: задайте PUBLIC_URL у .env (docs/03-server.md)."))
+                + (f"Адреса застосунку: {esc(url)}" if url else "⚠️ Застосунку потрібна HTTPS-адреса бота. Railway: сервіс → Settings → Networking → Generate Domain, потім Redeploy. Свій сервер: PUBLIC_URL у .env (docs/03-server.md)."))
         rows = []
         if url:
             rows.append([("🧩 Відкрити застосунок", "app:" + url)])
