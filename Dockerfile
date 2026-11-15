@@ -17,6 +17,6 @@ COPY . .
 # інакше дані зникатимуть при кожному оновленні. Рядок VOLUME тут навмисно відсутній: Railway його не приймає.
 ENV DB_PATH=/data/bot.db MANAGER_DB_PATH=/data/manager.db BOT_TZ=Europe/Kyiv TZ=Europe/Kyiv PYTHONUNBUFFERED=1
 RUN mkdir -p /data
-
+ENV PUBLIC_URL="https://orionai-production-30372f9d.up.railway.app"
 # На Railway запускаємо основний бот. manager.py можна винести в окремий service.
 CMD ["python", "bot.py"]
