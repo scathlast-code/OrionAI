@@ -185,7 +185,7 @@ def clean_rows(rows):
     """Прибирає чат-навігацію (◀️ 🏠 ▶️) і 💡 — у застосунку свої."""
     out = []
     for r in rows or []:
-        rr = [(t, d) for t, d in r if d and not d.startswith(("m:nav", "imp:", "ui:", "copy:")) and d not in ("m:home",)]
+        rr = [(t, d) for t, d in r if d and not d.startswith(("m:nav", "imp:", "ui:", "copy:", "app:")) and d not in ("m:home",)]
         if rr:
             out.append(rr)
     return out
@@ -293,6 +293,7 @@ async def run(bot_module, uid, op, data=None, text=None, user=None, file=None):
     text_out, rows = sink.screen or ("", [])
     replies = [t for t in (capbot.msgs.values() if capbot else []) if t and not t.startswith(("⏳", "🕒", "💭"))]
     return {"text": text_out, "rows": clean_rows(rows), "toast": sink.toast, "notes": sink.notes[-5:], "awaiting": uid in B.AWAIT,
+            "view": bool(op == "screen" and data and B.is_view(data)),
             "replies": [re.sub(r"<[^>]+>", "", t)[:6000] for t in replies[-5:]]}
 
 

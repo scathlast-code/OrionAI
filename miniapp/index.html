@@ -55,12 +55,12 @@ body.marking .cell,body.marking .seg button,body.marking .card{outline:1.5px das
 .empty{text-align:center;color:var(--hint);padding:50px 10px}
 .search{width:100%;border:0;border-radius:12px;background:var(--card);color:var(--txt);padding:11px 14px;font:inherit;margin:0 0 14px}
 .sec{color:var(--hint);font-size:13px;text-transform:uppercase;letter-spacing:.4px;margin:18px 4px 8px}
-.grid{display:grid;grid-template-columns:1fr;gap:8px;margin:0 0 6px}
-.tile{border:0;background:var(--card);color:var(--txt);border-radius:14px;padding:12px;display:flex;align-items:center;gap:10px;font:inherit;font-size:14.5px;text-align:left;cursor:pointer;min-height:54px}
-.tile .em{font-size:20px;flex:none}.tile .tx{flex:1;min-width:0}.tile small{display:block;color:var(--hint);font-size:12px;line-height:1.25;margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.tile .q{flex:none;align-self:flex-start;color:var(--hint);font-size:15px;padding:0 0 6px 6px}.tile:active{transform:scale(.97);background:color-mix(in srgb,var(--hint) 14%,var(--card))}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0 0 6px}
+.tile{position:relative;border:0;background:var(--card);color:var(--txt);border-radius:14px;padding:12px 22px 12px 12px;display:flex;align-items:center;gap:10px;font:inherit;font-size:14.5px;text-align:left;cursor:pointer;min-height:54px}
+.tile .em{font-size:20px;flex:none}.tile .tx{flex:1;min-width:0}.tile small{display:block;color:var(--hint);font-size:11.5px;line-height:1.2;margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.tile .q{position:absolute;top:4px;right:6px;color:var(--hint);font-size:13px;padding:2px 4px}.tile:active{transform:scale(.97);background:color-mix(in srgb,var(--hint) 14%,var(--card))}
 .info{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:0 0 4px}
 .info button{border:0;background:var(--card);color:var(--txt);border-radius:14px;padding:10px;font:inherit;text-align:left;cursor:pointer;min-width:0}
-.tile.pick{outline:2px solid var(--acc);outline-offset:-2px}.tile .num{flex:none;background:var(--acc);color:var(--acct);border-radius:50%;width:22px;height:22px;display:grid;place-items:center;font-size:12px;font-weight:700}
+.tile.pick{outline:2px solid var(--acc);outline-offset:-2px}.tile .num{position:absolute;top:6px;right:6px;background:var(--acc);color:var(--acct);border-radius:50%;width:22px;height:22px;display:grid;place-items:center;font-size:12px;font-weight:700}
 .edit{display:flex;gap:8px;margin:-6px 0 4px}.edit button{flex:1;border:0;border-radius:12px;padding:10px;font:inherit;font-size:14.5px;background:var(--card);color:var(--txt);cursor:pointer}.edit .pri{background:var(--acc);color:var(--acct);font-weight:650}
 .info small{display:block;color:var(--hint);font-size:12px}.info b{display:block;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 </style>
@@ -83,7 +83,8 @@ let editTabs = null;
 function setTabs(list){if(!Array.isArray(list))return;TABS=list.map(t=>{const sp=split(t.label);return [t.data,sp.icon||'•',sp.rest,t.key]});
   try{localStorage.setItem('orion_tabs',JSON.stringify(TABS))}catch(_){} tabs()}
 const HASH = {chat:'chat', menu:'menu', news:'m:pl:news', inbox:'m:pl:inb', stk:'m:pl:stk', lists:'m:pl:news:L', find:'m:pl:news:D'};
-let hist = [], cur = null, marking = false, busy = false, seq = 0, menuCache = null;
+let hist = [], cur = null, curView = true, curTitle = '', marking = false, busy = false, seq = 0, menuCache = null;
+const titleOf = t => ((t||'').split('\n').find(l=>/<b>/.test(l))||(t||'').split('\n')[0]||'').replace(/<[^>]+>/g,'').trim();
 
 function toast(t){const e=document.getElementById('toast');e.textContent=t;e.classList.add('on');clearTimeout(toast.t);toast.t=setTimeout(()=>e.classList.remove('on'),2600)}
 function haptic(k){try{TG.HapticFeedback.impactOccurred(k||'light')}catch(_){}}
@@ -108,13 +109,20 @@ async function call(op, data, extra){
     return await r.json()}catch(e){toast(e instanceof SyntaxError?'Некоректна відповідь сервера':'Сервер API недоступний');return null}finally{busy=false}}
 function loading(){const m=document.getElementById('main');m.innerHTML='<div class="skel"></div><div class="skel"></div><div class="skel"></div>';const c=document.getElementById('composer');if(c)c.style.display='none'}
 async function open_(data, push=true){
-  const my=++seq; if(push && cur && cur!==data) hist.push(cur); cur=data; tabs(); syncBack(); loading();
-  const res=await call('screen',data); if(my!==seq||!res) return;
-  if(!res.text){ if(res.toast) toast(res.toast); for(const n of res.notes||[]) toast(n); if(hist.length) back(); return }
+  if(data==='m:home'||data==='m:nav:home') return openMenu(push);
+  // «Назад» веде на попередній ЕКРАН, а не на попереднє налаштування: вибір на тому самому екрані історію не множить,
+  // а дії (перемикачі, вибір моделі) ніколи не повторюються при поверненні.
+  const my=++seq; const t=setTimeout(()=>{if(my===seq)loading()},350);
+  const res=await call('screen',data); clearTimeout(t); if(my!==seq||!res) return;
+  if(!res.text){ if(res.toast) toast(res.toast); for(const n of res.notes||[]) toast(n); return }
+  const title=titleOf(res.text), same=!!cur && title===curTitle;
+  if(!same){ if(push && cur && curView && cur!==data) hist.push(cur); cur=data; curView=!!res.view }
+  else if(res.view){ cur=data; curView=true }
+  curTitle=title; syncBack();
   render(res);
 }
 async function openChat(push=true){
-  const my=++seq; if(push && cur && cur!=='chat') hist.push(cur); cur='chat'; syncBack();
+  const my=++seq; if(push && cur && curView && cur!=='chat') hist.push(cur); cur='chat'; curView=true; curTitle='💬'; syncBack();
   const res=await call('history','chat'); if(my!==seq||!res) return; renderChat(res);
 }
 function renderChat(res, typing){
@@ -185,7 +193,7 @@ function render(res, bare){
   tabs(); window.scrollTo(0,0);
 }
 async function openMenu(push=true){
-  const my=++seq; if(push && cur && cur!=='menu') hist.push(cur); cur='menu'; syncBack();
+  const my=++seq; if(push && cur && curView && cur!=='menu') hist.push(cur); cur='menu'; curView=true; curTitle='☰'; syncBack();
   if(menuCache) renderMenu(menuCache); else {tabs();loading()}
   const res=await call('menu','m:home'); if(my!==seq||!res) return; menuCache=res; setTabs(res.tabs); renderMenu(res);
 }
@@ -222,12 +230,12 @@ function renderMenu(res){
     if(!n){const e=document.createElement('div');e.className='empty';e.textContent='Нічого не знайдено';body.appendChild(e)}};
   s.oninput=draw; draw(); tabs();
 }
-function back(){if(!hist.length)return;const h=hist.pop();h==='chat'?openChat(false):h==='menu'?openMenu(false):open_(h,false)}
+function back(){if(!hist.length)return;const h=hist.pop();curTitle='';h==='chat'?openChat(false):h==='menu'?openMenu(false):open_(h,false)}
 function tabs(){const n=document.getElementById('tabs');n.innerHTML='';
   const all=TABS.concat([MENU_TAB]);
   const active=all.find(([d])=>cur&&(cur===d||cur.startsWith(d+':')))||MENU_TAB;
   for(const tb of all){const b=document.createElement('button');b.className=tb===active?'on':'';b.innerHTML='<span>'+tb[1]+'</span>'+tb[2];
-    b.onclick=()=>{haptic();hist=[];cur=null;editTabs=null;tb[0]==='chat'?openChat(false):tb[0]==='menu'?openMenu(false):open_(tb[0],false)};n.appendChild(b)}}
+    b.onclick=()=>{haptic();hist=[];cur=null;curTitle='';curView=true;editTabs=null;tb[0]==='chat'?openChat(false):tb[0]==='menu'?openMenu(false):open_(tb[0],false)};n.appendChild(b)}}
 function press(label, d){
   if(marking){mark('кнопка «'+label+'»',d,'');return}
   haptic();
