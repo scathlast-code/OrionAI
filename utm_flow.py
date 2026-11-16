@@ -40,10 +40,58 @@ def clean_url(url: str) -> str:
     return m.group(0).rstrip(".,;") if m else u.strip("[]()<>\"'«» ")
 
 
+_TR = {"а": "a", "б": "b", "в": "v", "г": "h", "ґ": "g", "д": "d", "е": "e", "є": "ie", "ж": "zh", "з": "z", "и": "y", "і": "i", "ї": "i",
+       "й": "i", "к": "k", "л": "l", "м": "m", "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u", "ф": "f", "х": "kh",
+       "ц": "ts", "ч": "ch", "ш": "sh", "щ": "shch", "ь": "", "ю": "iu", "я": "ia", "ы": "y", "э": "e", "ё": "io", "ъ": ""}
+_TR_FIRST = {"є": "ye", "ї": "yi", "й": "y", "ю": "yu", "я": "ya"}  # на початку слова — за офіційною транслітерацією
+
+
+def translit(text: str) -> str:
+    """Українська → латиниця за офіційною транслітерацією (постанова КМУ №55): «Львів» → «lviv», «зграя» → «zghraia»."""
+    out, prev = [], ""
+    for ch in (text or "").lower().replace("’", "").replace("'", "").replace("ʼ", ""):
+        if ch == "г" and prev == "з":
+            out.append("gh")
+        elif ch in _TR:
+            out.append(_TR_FIRST.get(ch, _TR[ch]) if not prev.isalpha() else _TR[ch])
+        else:
+            out.append(ch)
+        prev = ch
+    return "".join(out)
+
+
 def clean_tag(tag: str) -> str:
-    """Тег без пробілів і службових символів: слова через «_», малими літерами."""
-    t = re.sub(r"[^\w\-]+", "_", (tag or "").strip().lower(), flags=re.UNICODE)
+    """Тег для посилання: кирилицю перекладаємо латиницею, пробіли й знаки — «_», малими літерами."""
+    t = re.sub(r"[^a-z0-9\-]+", "_", translit((tag or "").strip()))
     return re.sub(r"_+", "_", t).strip("_-")[:60]
+
+
+_STOP_UK = {"і", "й", "та", "в", "у", "на", "з", "із", "зі", "до", "про", "для", "як", "що", "чому", "хто", "це", "за", "від", "по", "а",
+            "але", "чи", "не", "його", "її", "їх", "цим", "ще", "вже", "при", "після", "під", "над", "через", "без", "між", "коли", "де",
+            "чим", "цей", "ця", "ці", "той", "та", "так", "бо", "або", "тому", "своїх", "свої", "свій", "які", "який", "яка", "яке", "ми", "ви"}
+
+
+def title_tags(title: str, limit: int = 3) -> list[str]:
+    """Кириличні варіанти тегу з заголовка статті: ключові слова через «_»."""
+    words = [w for w in re.findall(r"[а-щьюяєіїґʼ'’]+", (title or "").lower()) if len(w) > 2 and w not in _STOP_UK]
+    out: list[str] = []
+    for ws in (words[:1], words[:2], sorted(sorted(words, key=len, reverse=True)[:2], key=words.index)):
+        t = "_".join(w.replace("'", "").replace("’", "").replace("ʼ", "") for w in ws)
+        if t and t not in out:
+            out.append(t)
+    return out[:limit]
+
+
+def suggest_pairs(url: str, title: str = "", limit: int = 5) -> list[tuple[str, str]]:
+    """Варіанти тегу: [(як показати, що піде в посилання)]. Спершу кириличні з заголовка, потім латинські з адреси."""
+    out: list[tuple[str, str]] = []
+    for t in title_tags(title):
+        if clean_tag(t) and all(clean_tag(t) != v for _, v in out):
+            out.append((t, clean_tag(t)))
+    for t in suggest_tags(url, limit):
+        if all(t != v for _, v in out):
+            out.append((t, t))
+    return out[:limit]
 
 
 def suggest_tags(url: str, limit: int = 5) -> list[str]:

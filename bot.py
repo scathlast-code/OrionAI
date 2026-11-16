@@ -5388,10 +5388,12 @@ UTM_MENU = [[("➕ Додати посилання", "m:utmadd")], [("📈 Кл�
 
 def scr_utm(chat_id):
     text = ("🔗 <b>UTM-мітки GreenPost</b>\n"
-            "Натисніть <b>➕ Додати посилання</b> і вставте посилання на новину — запропоную теги, а після вибору дам одразу всі 9 міток: "
-            "Telegram (пост і сторіс), Tumblr, Facebook (пост, історії, Reels), Threads, Instagram сторіс, Twitter/X. "
-            "Кожна в окремому блоці: торкніться, щоб скопіювати.\n\n"
-            "<blockquote expandable>Те саме командами:\n<code>/utm посилання</code> — з вибором тегу\n"
+            "<blockquote expandable>ℹ️ Довідка\n"
+            "Натисніть <b>➕ Додати посилання</b> і вставте посилання на новину — запропоную теги (кирилицею й латиницею; кирилицю бот сам "
+            "перекладе латиницею для посилання), а після вибору дам одразу всі 9 міток: Telegram (пост і сторіс), Tumblr, "
+            "Facebook (пост, історії, Reels), Threads, Instagram сторіс, Twitter/X — кожна в окремому віконці з кнопкою «Скопіювати».\n"
+            "📚 Набори шаблонів тегів — ваші готові теги; їх можна додавати самому або взяти з наявних посилань Short.io.\n\n"
+            "Те саме командами:\n<code>/utm посилання</code> — з вибором тегу\n"
             "<code>/utm посилання тег</code> — одразу з вашим тегом\n"
             "<code>/utm посилання тег telegram</code> — лише один формат\n"
             "<code>/utm реєстр</code> — усі мітки за 3 дні за датами й тегами\n"
@@ -5401,20 +5403,53 @@ def scr_utm(chat_id):
             "<code>/utm clicks</code> — кліки Short.io (якщо задано SHORTIO_API_KEY)\n\n"
             "Будова: <code>посилання?utm_content=тег&amp;utm_medium=формат&amp;utm_campaign=news&amp;utm_source=платформа</code></blockquote>")
     rows = [list(r) for r in UTM_MENU]
+    rows.insert(1, [("📚 Набори шаблонів тегів", "m:tgs")])
     if os.getenv("SHORTIO_API_KEY"):
         cur = shortio_policy()
-        text += f"\n\n🔗 <b>Short.io:</b> {SIO_MODES[cur]}. Статистику бот лише читає; новий запис у Short.io з'являється тільки так, як обрано тут."
+        text += f"\n\n🔗 Short.io: {SIO_MODES[cur]}"
         rows.append([(("• " if cur == k else "") + v.split(" ", 1)[0] + " " + {"ask": "Питати", "all": "Усі", "off": "Вимкнути"}[k], f"m:utmsio:{k}")
                      for k, v in SIO_MODES.items()])
-    else:
-        text += "\n\n🔗 Short.io не підключено — короткі посилання робить сам бот. Підключити: змінна <code>SHORTIO_API_KEY</code> у Railway."
     return text, rows
 
 
-def scr_utm_tags(chat_id, url):
+TITLE_CACHE = {}
+COPY_CARDS = {}  # чат -> [{"title", "value", "full"}]: застосунок показує кожне посилання окремим віконцем із «Скопіювати»
+
+
+async def page_title(url):
+    """Заголовок статті (og:title або <title>) — з нього кириличні варіанти тегу."""
+    if url in TITLE_CACHE:
+        return TITLE_CACHE[url]
+    title = ""
+    try:
+        async with httpx.AsyncClient(timeout=6, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0 OrionAI"}) as c:
+            h = (await c.get(url)).text[:300000]
+        m = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)', h) or re.search(r"<title[^>]*>(.*?)</title>", h, re.S)
+        if m:
+            import html as _h
+            title = re.split(r"\s[|–—-]\s(?=[^|–—-]*$)", _h.unescape(m.group(1)).strip())[0]
+    except Exception:  # noqa: BLE001
+        pass
+    TITLE_CACHE[url] = title
+    return title
+
+
+def tag_sets():
+    try:
+        return json.loads(kv_get("utm_tag_sets") or "{}")
+    except ValueError:
+        return {}
+
+
+def tag_sets_save(d):
+    kv_set("utm_tag_sets", json.dumps(d, ensure_ascii=False))
+
+
+def scr_utm_tags(chat_id, url, title=""):
     """Узгодження тегу: пронумеровані варіанти + власний. Якщо посилання вже було за 3 дні — спершу питаю, що робити."""
     led = utm_ledger()
-    tags = UTM.suggest_tags(url)
+    pairs_ = UTM.suggest_pairs(url, title)
+    tags = [v for _, v in pairs_]
     _utm_state(chat_id, url=url, tags=tags)
     lines = ["🔗 <b>Тег для мітки</b> (utm_content)", f"<code>{esc(url)}</code>", ""]
     rows = []
@@ -5423,11 +5458,39 @@ def scr_utm_tags(chat_id, url):
         lines += [f"⚠️ Це посилання вже опрацьоване за останні 3 дні (тег <code>{esc(prev[0][2]) if prev else '—'}</code>). "
                   "Можна взяти готові мітки або зробити нові — повтор піде у статистику.", ""]
         rows.append([("📋 Показати готові", "m:utmold")])
-    lines.append("Оберіть номер або надішліть власний тег:")
-    for i, t in enumerate(tags, 1):
-        lines.append(f"{i}. <code>{esc(t)}</code>")
-        rows.append([(f"{i}. {t}"[:40], f"m:utmt:{i - 1}")])
-    rows.append([("✏️ Власний тег", "m:utmown")])
+    lines.append("Оберіть номер або надішліть власний тег — можна кирилицею, бот сам перекладе латиницею:")
+    for i, (show_, val) in enumerate(pairs_, 1):
+        lines.append(f"{i}. {esc(show_)}" + (f" → <code>{esc(val)}</code>" if show_ != val else ""))
+        rows.append([(f"{i}. {show_}"[:40], f"m:utmt:{i - 1}")])
+    rows.append([("✏️ Власний тег", "m:utmown"), ("📚 З набору шаблонів", "m:tgs:pick")])
+    return "\n".join(lines), rows
+
+
+def scr_tag_sets(chat_id, pick=False):
+    sets = tag_sets()
+    lines = ["📚 <b>Набори шаблонів тегів</b>",
+             ("Оберіть набір, а в ньому — тег для цього посилання." if pick else
+              "Готові теги, згруповані в набори. Додавайте свої або візьміть з наявних посилань Short.io (лише читання — там нічого не зміниться).")]
+    rows = [[(f"📚 {name} · {len(tags)}"[:44], f"m:tgo:{i}:{int(pick)}")] for i, (name, tags) in enumerate(sets.items())]
+    if not sets:
+        lines.append("\nНаборів ще немає.")
+    rows.append([("➕ Новий набір", "m:tgnew"), ("📥 Із Short.io", "m:tgimp")])
+    return "\n".join(lines), rows
+
+
+def scr_tag_set(chat_id, i, pick=False):
+    sets = tag_sets()
+    names = list(sets)
+    if i >= len(names):
+        return scr_tag_sets(chat_id, pick)
+    name, tags = names[i], sets[names[i]]
+    lines = [f"📚 <b>{esc(name)}</b>"] + [f"• {esc(t)}" + (f" → <code>{esc(UTM.clean_tag(t))}</code>" if UTM.clean_tag(t) != t else "") for t in tags[:60]]
+    st = _utm_state(chat_id)
+    rows = []
+    if pick and st.get("url"):
+        lines.insert(1, "Торкніться тегу — і я зроблю мітки:")
+        rows += pairs([(t[:30], f"m:tgu:{i}:{j}") for j, t in enumerate(tags[:40])])
+    rows += [[("➕ Додати теги", f"m:tgadd:{i}"), ("✏️ Назва", f"m:tgren:{i}")], [("🗑 Видалити набір", f"m:tgdel:{i}"), ("📚 Усі набори", f"m:tgs:{'pick' if pick else ''}")]]
     return "\n".join(lines), rows
 
 
@@ -5502,6 +5565,8 @@ async def short_links(items, tag):
 def short_base():
     """Адреса коротких посилань: власний домен (SHORT_DOMAIN) → домен/код; інакше домен бота → /r/код."""
     d = os.getenv("SHORT_DOMAIN", "").strip().rstrip("/")
+    if d and d.replace("https://", "").replace("http://", "").lower() == os.getenv("SHORTIO_DOMAIN", "").lower():
+        d = ""  # цей домен обслуговує Short.io — власні посилання на ньому не відкриються
     if d:
         return (d if d.startswith("http") else "https://" + d) + "/"
     return (public_base() + "/r/") if public_base() else ""
@@ -5641,6 +5706,38 @@ def sl_apply(code, field, text):
     return code, "✅ Збережено"
 
 
+async def tag_sets_from_shortio():
+    """Набори тегів із наявних посилань Short.io — лише читання: теги (мітки) посилань і їхні utm_content."""
+    if not os.getenv("SHORTIO_API_KEY"):
+        return "Потрібен SHORTIO_API_KEY"
+    from urllib.parse import parse_qs, urlsplit
+    from plugins.newsroom.shortio import ShortIO
+    did = await shortio_domain_id()
+    try:
+        raw = await ShortIO().request("GET", "https://api.short.io/api/links", params={"domain_id": did, "limit": 150})
+    except Exception as exc:  # noqa: BLE001
+        return f"Short.io: {str(exc)[:150]}"
+    items = raw.get("links", raw) if isinstance(raw, dict) else raw
+    by_set, every = {}, {}
+    for x in items or []:
+        if not isinstance(x, dict):
+            continue
+        content = (parse_qs(urlsplit(x.get("originalURL") or "").query).get("utm_content") or [""])[0]
+        if not content:
+            continue
+        every[content] = every.get(content, 0) + 1
+        for t in x.get("tags") or []:
+            by_set.setdefault(f"Short.io: {t}"[:40], []).append(content)
+    if not every:
+        return "У посиланнях Short.io не знайшов жодного utm_content"
+    sets = tag_sets()
+    sets["Short.io: усі теги"] = [k for k, _ in sorted(every.items(), key=lambda kv: -kv[1])][:100]
+    for name, tags in by_set.items():
+        sets[name] = list(dict.fromkeys(sets.get(name, []) + tags))[:100]
+    tag_sets_save(sets)
+    return f"📥 Набори з Short.io: {1 + len(by_set)}, тегів: {len(every)}"
+
+
 async def shortio_sync(force=False):
     """Підтягує статистику Short.io (кліки, країни, міста, браузери, системи, джерела) для посилань за 90 днів."""
     if not os.getenv("SHORTIO_API_KEY") or not os.getenv("SHORTIO_DOMAIN_ID"):
@@ -5718,6 +5815,8 @@ async def utm_output(update, chat_id, url, tag, reserve=False, only=None):
         kv_set("utm_hint", str(n))
         if n % 5 == 1:  # коротке періодичне нагадування
             blocks.append("ℹ️ Є ще резервні формати (YouTube, шапки профілів, коментарі) — кнопка нижче.")
+    COPY_CARDS[chat_id] = {"head": head, "cards": [{"title": f"{label} {'✅' if ok_ else '⚠️'}", "value": shorts.get(key) or link,
+                                                     "full": link if key in shorts else ""} for key, label, link, ok_ in res["items"]]}
     await _utm_blocks(update, head, blocks, rows)
 
 
@@ -6872,6 +6971,40 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         screen = ("✏️ <b>Адреса Ollama</b>\nНа тому ж сервері Oracle (docker compose): <code>http://ollama:11434</code>\n"
                   "Домашній ПК через Tailscale чи Cloudflare Tunnel: його адреса.\n«-» — як у змінній OLLAMA_URL.\nЗараз: <code>"
                   + esc(ollama_url() or "—") + "</code>", [CANCEL_ROW])
+    elif a in ("tgs", "tgo", "tgu", "tgnew", "tgimp", "tgadd", "tgren", "tgdel"):
+        sets, names = tag_sets(), list(tag_sets())
+        pick = (arg == "pick") or (len(parts) > 3 and parts[3] == "1")
+        idx = int(arg) if (arg or "").isdigit() else -1
+        if a == "tgs":
+            screen = scr_tag_sets(chat_id, pick)
+        elif a == "tgo":
+            screen = scr_tag_set(chat_id, idx, pick)
+        elif a == "tgu" and 0 <= idx < len(names):
+            st = _utm_state(chat_id)
+            try:
+                tag = sets[names[idx]][int(parts[3])]
+            except (IndexError, ValueError):
+                tag = ""
+            if st.get("url") and tag:
+                await utm_output(update, chat_id, st["url"], tag)
+            else:
+                toast = "Спершу натисніть «➕ Додати посилання»"
+        elif a == "tgnew":
+            ask_input(chat_id, "tgnew")
+            screen = ("➕ <b>Новий набір тегів</b>\nПерший рядок — назва набору, далі кожен тег з нового рядка (кирилицею чи латиницею). Наприклад:\n"
+                      "<code>Екологія\nзубри\nліси_карпат\nсміттєзвалище</code>", [CANCEL_ROW])
+        elif a == "tgadd" and 0 <= idx < len(names):
+            ask_input(chat_id, "tgadd", names[idx])
+            screen = (f"➕ Нові теги в набір «{esc(names[idx])}» — кожен з нового рядка або через кому.", [CANCEL_ROW])
+        elif a == "tgren" and 0 <= idx < len(names):
+            ask_input(chat_id, "tgren", names[idx])
+            screen = (f"✏️ Нова назва для набору «{esc(names[idx])}»:", [CANCEL_ROW])
+        elif a == "tgdel" and 0 <= idx < len(names):
+            sets.pop(names[idx], None)
+            tag_sets_save(sets)
+            toast, screen = "Набір видалено", scr_tag_sets(chat_id)
+        elif a == "tgimp":
+            toast, screen = await tag_sets_from_shortio(), scr_tag_sets(chat_id)
     elif a in ("sl", "sli", "sle", "slt", "sldel", "sldel2", "slqr", "slst", "slnew", "slcsv", "slimp", "slq"):
         ct = clicks()
         code = arg or ""
@@ -7522,6 +7655,23 @@ async def _handle_awaited(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text):
             return await reply("Не схоже на назву моделі. Приклад: qwen2.5:7b", reply_markup=kb([CANCEL_ROW]))
         asyncio.get_running_loop().create_task(ollama_pull_job(chat_id, name))
         return await show(update, *(await scr_ollama(chat_id)), edit=False)
+    if action in ("tgnew", "tgadd", "tgren"):
+        sets = tag_sets()
+        items = [x.strip() for x in re.split(r"[\n,;]+", text) if x.strip()]
+        if action == "tgnew":
+            if len(items) < 2:
+                ask_input(chat_id, "tgnew")
+                return await reply("Потрібно щонайменше два рядки: назва набору й хоча б один тег.", reply_markup=kb([CANCEL_ROW]))
+            sets[items[0][:40]] = list(dict.fromkeys(items[1:]))[:100]
+            name = items[0][:40]
+        elif action == "tgadd":
+            name = data
+            sets[name] = list(dict.fromkeys((sets.get(name) or []) + items))[:100]
+        else:
+            name = text.strip()[:40] or data
+            sets = {(name if k == data else k): v for k, v in sets.items()}
+        tag_sets_save(sets)
+        return await show(update, *scr_tag_set(chat_id, list(sets).index(name), bool(_utm_state(chat_id).get("url"))), edit=False)
     if action == "slnew":
         p2 = text.split()
         try:
@@ -7553,7 +7703,7 @@ async def _handle_awaited(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text):
                 return await utm_output(update, chat_id, url, parts[1])
             except ValueError as exc:
                 return await reply(str(exc))
-        return await show(update, *scr_utm_tags(chat_id, url), edit=False)
+        return await show(update, *scr_utm_tags(chat_id, url, await page_title(url)), edit=False)
     if action == "utmtag":
         tag = UTM.clean_tag(text)
         st = _utm_state(chat_id)
@@ -8743,7 +8893,7 @@ if TELEGRAM_TOKEN:
         if not url.startswith(('http://', 'https://')):
             return await update.effective_message.reply_text('Перше слово після /utm — посилання на новину (http… або https…). Приклад: /utm https://greenpost.ua/news/zubr')
         if len(args) == 1:
-            return await show(update, *scr_utm_tags(chat_id, url), edit=False)
+            return await show(update, *scr_utm_tags(chat_id, url, await page_title(url)), edit=False)
         fmt = args[2].lower() if len(args) > 2 else None
         try:
             if fmt in ('reserve', 'резервні', 'резерв'):

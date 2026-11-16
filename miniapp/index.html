@@ -76,6 +76,12 @@ body.marking .cell,body.marking .seg button,body.marking .card{outline:1.5px das
 .act.on{background:var(--acc);color:var(--acct)}.act.subact{background:none;font-size:12.5px;opacity:.6;padding:10px 4px 2px;pointer-events:none}.act.cancel{text-align:center;font-weight:600}
 .composer{flex-wrap:wrap;align-items:flex-end}.rq{flex-basis:100%;display:none;margin-bottom:2px;align-items:center;gap:8px;background:var(--card);border-left:3px solid var(--acc);border-radius:8px;padding:6px 8px;font-size:13px}
 .rq span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.rq button{border:0;background:none;color:var(--txt);font-size:15px}
+.cards{display:flex;flex-direction:column;gap:10px;margin:10px 0}.copycard{background:var(--card);border-radius:14px;padding:10px 12px;user-select:none;-webkit-user-select:none;transition:background .2s}
+.copycard.copied{background:color-mix(in srgb,var(--acc) 22%,var(--card))}.cc-h{display:flex;align-items:center;gap:8px}.cc-h b{flex:1;font-size:14px}
+.cc-b{border:0;border-radius:10px;padding:5px 9px;font:inherit;font-size:12px;background:color-mix(in srgb,var(--acc) 16%,transparent);color:var(--acc);cursor:pointer}
+.cc-v{font-family:ui-monospace,Menlo,monospace;font-size:14.5px;margin-top:6px;overflow-wrap:anywhere}.copycard details{margin-top:6px;font-size:12px;color:var(--hint)}
+.cc-f{font-family:ui-monospace,Menlo,monospace;overflow-wrap:anywhere;margin:4px 0}
+details{margin:2px 0}details summary{cursor:pointer;color:var(--hint);font-size:13.5px}blockquote{margin:6px 0;padding-left:10px;border-left:3px solid var(--sep)}
 </style>
 </head>
 <body>
@@ -103,8 +109,13 @@ function toast(t){const e=document.getElementById('toast');e.textContent=t;e.cla
 function haptic(k){try{TG.HapticFeedback.impactOccurred(k||'light')}catch(_){}}
 function sanitize(html){
   const d=document.createElement('div');d.innerHTML=html.replace(/\n/g,'<br>');
+  for(const q of [...d.querySelectorAll('blockquote')]){ // «згорнута» цитата Telegram → розкривний блок, перший рядок — заголовок
+    if(q.hasAttribute('expandable')){const det=document.createElement('details'),sum=document.createElement('summary');
+      while(q.firstChild&&!(q.firstChild.nodeType===1&&q.firstChild.tagName==='BR'))sum.appendChild(q.firstChild);if(q.firstChild)q.firstChild.remove();
+      if(!sum.textContent.trim())sum.textContent='Докладніше';det.append(sum,...q.childNodes);q.replaceWith(det)}
+    else{const b=document.createElement('blockquote');b.append(...q.childNodes);q.replaceWith(b)}}
   (function walk(n){for(const c of [...n.childNodes]){if(c.nodeType===1){const t=c.tagName.toLowerCase();
-    if(!['b','strong','i','em','u','s','code','pre','a','br'].includes(t)){c.replaceWith(...c.childNodes);continue}
+    if(!['b','strong','i','em','u','s','code','pre','a','br','details','summary','blockquote'].includes(t)){c.replaceWith(...c.childNodes);continue}
     for(const a of [...c.attributes]) if(!(t==='a'&&a.name==='href'&&/^https?:/.test(a.value))) c.removeAttribute(a.name);
     if(t==='a'){c.target='_blank';c.onclick=e=>{e.preventDefault();try{TG.openLink(c.href)}catch(_){window.open(c.href)}}}
     walk(c)}}})(d);return d.innerHTML}
@@ -306,6 +317,7 @@ function render(res, bare){
   main.appendChild(top);
   if(sub){const s=document.createElement('div');s.className='sub';s.innerHTML=sanitize(sub);main.appendChild(s)}
   if(res.sections&&res.sections.length) rest='';
+  if(res.cards&&res.cards.length){rest='';drawCards(main,res.cards)}
   if(rest.trim()){const c=document.createElement('div');c.className='card';c.innerHTML=sanitize(rest.trim());c.onclick=()=>{if(marking)mark('текст екрана','',c.textContent)};main.appendChild(c)}
   for(const n of res.notes||[]){const d=document.createElement('div');d.className='notes';d.innerHTML='<div></div>';d.firstChild.textContent=n;main.appendChild(d)}
   if(res.sections&&res.sections.length){drawSections(main,res);}
@@ -315,6 +327,22 @@ function render(res, bare){
   if(res.awaiting) askInput(res.text);
   tabs(); window.scrollTo(0,0); fitAll();
 }
+function copyText(t,el){const ok=()=>{haptic('light');toast('📋 Скопійовано');if(el){el.classList.add('copied');setTimeout(()=>el.classList.remove('copied'),900)}};
+  if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(ok,()=>legacy());else legacy();
+  function legacy(){const ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();
+    try{document.execCommand('copy');ok()}catch(_){toast('Не вдалося скопіювати')}ta.remove()}}
+function drawCards(main,cards){ // кожне посилання — окреме віконце: подвійний дотик або «Скопіювати»
+  const list=document.createElement('div');list.className='cards';
+  for(const c of cards){const box=document.createElement('div');box.className='copycard';
+    box.innerHTML='<div class="cc-h"><b></b><button class="cc-b">📋 Скопіювати</button></div><div class="cc-v"></div>';
+    box.querySelector('b').textContent=c.title;box.querySelector('.cc-v').textContent=c.value;
+    if(c.full){const det=document.createElement('details');det.innerHTML='<summary>Повне посилання</summary><div class="cc-f"></div>';
+      det.querySelector('.cc-f').textContent=c.full;const cb=document.createElement('button');cb.className='cc-b';cb.textContent='📋 Повне';
+      cb.onclick=e=>{e.stopPropagation();copyText(c.full,box)};det.appendChild(cb);box.appendChild(det)}
+    box.querySelector('.cc-h .cc-b').onclick=e=>{e.stopPropagation();copyText(c.value,box)};
+    let last=0;box.addEventListener('click',e=>{if(e.target.closest('details'))return;const n=Date.now();if(n-last<350){copyText(c.value,box);last=0}else last=n});
+    box.addEventListener('dblclick',e=>{e.preventDefault()});list.appendChild(box)}
+  main.appendChild(list)}
 async function openMenu(push=true){
   const my=++seq; if(push && cur && curView && cur!=='menu') hist.push(cur); cur='menu'; curView=true; curTitle='☰'; syncBack();
   if(menuCache) renderMenu(menuCache); else {tabs();loading()}
