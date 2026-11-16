@@ -969,9 +969,19 @@ def owner_id():
     return ALLOWED_USERS[0] if ALLOWED_USERS else 0
 
 
+def members_full():
+    """«Усім учасникам — усе»: схвалені учасники мають ті самі права, що й власник (типово так; вимикається в 👥 Доступі)."""
+    try:
+        return (kv_get("members_full") or "1") == "1"
+    except Exception:  # noqa: BLE001 — база ще не готова
+        return True
+
+
 def is_admin_id(chat_id):
-    """Власники бота — усі ID з ALLOWED_USERS (наприклад, основний і запасний акаунт)."""
-    return chat_id in ALLOWED_USERS
+    """Хто керує ботом: ID з ALLOWED_USERS, а в режимі «усім усе» — і кожен схвалений учасник."""
+    if chat_id in ALLOWED_USERS:
+        return True
+    return bool(chat_id) and members_full() and is_allowed_id(chat_id)
 
 
 def note_owner(chat_id=None):
@@ -2063,14 +2073,15 @@ async def deny(update: Update):
         user = update.effective_user
         member_upsert(user, "pending")
         who = esc(user.full_name) + (f" (@{esc(user.username)})" if user.username else "")
-        try:
-            await update.get_bot().send_message(
-                owner_id(), f"👥 <b>{who} просить доступ до бота й застосунку</b>\nID: <code>{user.id}</code>\n\n"
-                "Натисніть «✅ Дати доступ» — бот одразу запрацює для цієї людини й привітається з нею. Нічого більше від неї не потрібно.",
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb([[("✅ Дати доступ", f"m:accok:{user.id}"), ("❌ Відхилити", f"m:accno:{user.id}")]]))
-        except Exception:  # noqa: BLE001
-            log.warning("не вдалося повідомити власника про заявку %s", user.id)
+        for admin in admin_ids():  # власник і (у режимі «усім усе») кожен учасник може схвалити
+            try:
+                await update.get_bot().send_message(
+                    admin, f"👥 <b>{who} просить доступ до бота й застосунку</b>\nID: <code>{user.id}</code>\n\n"
+                    "Натисніть «✅ Дати доступ» — бот одразу запрацює для цієї людини й привітається з нею. Нічого більше від неї не потрібно.",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=kb([[("✅ Дати доступ", f"m:accok:{user.id}"), ("❌ Відхилити", f"m:accno:{user.id}")]]))
+            except Exception:  # noqa: BLE001
+                log.warning("не вдалося повідомити %s про заявку %s", admin, user.id)
         st = "pending"
         text = ("👋 Вітаю! Це приватний бот. Я надіслав власнику заявку на ваш доступ — щойно він схвалить, "
                 "бот одразу запрацює і я вам напишу. Нічого більше робити не потрібно.")
@@ -3285,8 +3296,20 @@ def scr_access():
         rows.append([(f"✅ {who}", f"m:accok:{m['user_id']}"), ("❌", f"m:accno:{m['user_id']}")])
     rows += [[(f"👤 {m['name']}", f"m:mem:{m['user_id']}")] for m in approved]
     rows += [[(f"🚫 Скасувати запрошення …{inv['code'][-4:]}", f"m:invx:{inv['code']}")] for inv in invites]
+    full = members_full()
+    lines.append("\n" + ("🔓 Учасники мають усі права, як власник: налаштування, ньюзрум, плагіни, схвалення інших."
+                          if full else "🔒 Керувати ботом і схвалювати інших може лише власник."))
+    rows.append([("🔒 Права лише власнику" if full else "🔓 Усім учасникам — усе", "m:accfull")])
     rows.append([("ℹ️", "help:g:access"), HOME])
     return "\n".join(lines), rows
+
+
+def admin_ids():
+    """Кому приходять заявки на доступ: власники, а в режимі «усім усе» — і всі учасники."""
+    ids = list(ALLOWED_USERS)
+    if members_full():
+        ids += [m["user_id"] for m in members_list("approved") if m["user_id"] not in ids]
+    return ids
 
 
 def scr_member(user_id):
@@ -6925,7 +6948,7 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         tid = create_planned_task(chat_id, old["history_text"], old.get("dialog_id"), old.get("folder_id"))
         screen = scr_when(tid)
     # спільний доступ (лише власник)
-    elif (a in ("acc", "inv", "invx", "accok", "accno", "accrm", "mem", "mdl", "mdv", "mdc", "addmem", "prex", "backup", "mview") or a.startswith("bk")) and not is_admin_id(chat_id):
+    elif (a in ("acc", "inv", "invx", "accok", "accno", "accrm", "accfull", "mem", "mdl", "mdv", "mdc", "addmem", "prex", "backup", "mview") or a.startswith("bk")) and not is_admin_id(chat_id):
         toast = "Лише для власника бота"
         screen = scr_home(chat_id)
     elif a == "acc":
@@ -6943,6 +6966,9 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         invite_revoke(arg)
         toast = "Запрошення скасовано"
         screen = scr_access()
+    elif a == "accfull":
+        kv_set("members_full", "0" if members_full() else "1")
+        toast, screen = ("Усім учасникам — усі права" if members_full() else "Права лише власнику"), scr_access()
     elif a in ("accok", "accno", "accrm"):
         uid = int(arg)
         member_set(uid, {"accok": "approved", "accno": "blocked", "accrm": "removed"}[a])
