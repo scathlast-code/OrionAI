@@ -83,8 +83,10 @@ class _Message:
         self.entities, self.caption_entities = [], []
 
     async def reply_text(self, text, **kw):
-        if kw.get("reply_markup") is not None and getattr(kw["reply_markup"], "inline_keyboard", None) and self.sink.screen is None:
-            self.sink.screen = (text, _rows(kw["reply_markup"]))
+        rows = _rows(kw["reply_markup"]) if kw.get("reply_markup") is not None and getattr(kw["reply_markup"], "inline_keyboard", None) else []
+        service = all(d.startswith(("m:stop:", "view:", "stop:")) for r in rows for _, d in r)  # «Думаю…»/«Зупинити», «Чистий текст» — не окремий екран
+        if rows and not service and self.sink.screen is None:
+            self.sink.screen = (text, rows)
         else:
             self.sink.notes.append(re.sub(r"<[^>]+>", "", text)[:2000])
         return _Sent(self.sink.capbot, 0, text) if getattr(self.sink, "capbot", None) else None
@@ -134,8 +136,10 @@ class _CaptureBot:
             return await self.real.send_message(chat_id, text, **kw)
         self.n += 1
         self.msgs[self.n] = text
-        if kw.get("reply_markup") is not None and getattr(kw["reply_markup"], "inline_keyboard", None) and self.sink.screen is None:
-            self.sink.screen = (text, _rows(kw["reply_markup"]))
+        rows = _rows(kw["reply_markup"]) if kw.get("reply_markup") is not None and getattr(kw["reply_markup"], "inline_keyboard", None) else []
+        service = all(d.startswith(("m:stop:", "view:", "stop:")) for r in rows for _, d in r)  # «Думаю…»/«Зупинити», «Чистий текст» — не окремий екран
+        if rows and not service and self.sink.screen is None:
+            self.sink.screen = (text, rows)
         return _Sent(self, self.n, text)
 
     async def edit_message_text(self, text, chat_id=None, message_id=None, **kw):

@@ -1656,7 +1656,11 @@ async def _ask_llm(history, user_content, preferred=None, fallback=True, exclude
     else:
         order = ([preferred] if preferred in PROVIDERS else []) + [p for p in AUTO_ORDER if p != preferred]
     order = [p for p in order if p not in exclude] or order
-    pu = paused_until(preferred) if preferred in PROVIDERS else None
+    st = STICKY.get(CHAT.get())
+    if st and st["until"] > time.time() and fallback and st["ok"] in order:
+        # модель щойно не відповіла, а інша відповіла — наступні 10 хв питаємо одразу ту, що працює, без повторних спроб «мовчуна»
+        order = [st["ok"]] + [p for p in order if p != st["ok"] and p not in st["bad"]] + [p for p in order if p in st["bad"] and p != st["ok"]]
+    pu = paused_until(preferred) if preferred in PROVIDERS and not (st and st["until"] > time.time() and preferred in st["bad"]) else None
     if pu and 0 < pu - time.time() <= 15:  # хвилинний ліміт закінчиться за секунди — краще трохи зачекати на обрану модель
         progress_stage(f"⏳ {PROVIDERS[preferred]['title']}: ліміт за хвилину, чекаю {int(pu - time.time()) + 1} с…", 1, 3)
         await asyncio.sleep(pu - time.time() + 0.5)
@@ -1689,6 +1693,12 @@ async def _ask_llm(history, user_content, preferred=None, fallback=True, exclude
             continue
         mark_ok(pid)
         LIVE.pop(CHAT.get(), None)
+        failed = {a[0] for a in attempts if a[0] != pid and a[1].get("kind") != "paused"}
+        if CHAT.get():
+            if failed:
+                STICKY[CHAT.get()] = {"ok": pid, "bad": failed, "until": time.time() + STICKY_FOR}
+            elif k == 1 and STICKY.get(CHAT.get(), {}).get("ok") != pid:
+                STICKY.pop(CHAT.get(), None)
         attempts = [a for a in attempts if a[0] != pid]
         partial = any(w.startswith("✂️") for w in warnings)
         journal_update(jid, status="partial" if partial else "done", provider=pid, result=text[:8000],
@@ -3667,8 +3677,8 @@ async def complete_task(bot, task, text, pid, attempts, warnings, deferred=False
                 f"🚀 Запуск {datetime.fromtimestamp(st, TZ).strftime('%H:%M')} · 🏁 Завершено {datetime.fromtimestamp(fin, TZ).strftime('%H:%M')} · ⏱ {took_s}\n"
                 f"💬 Розмова: {d['title'] if d else '—'}\n\n")
     show_footer = prefs(task["chat_id"])["footer"] or attempts or warnings
-    tail = ("\n\n" + footer(pid, attempts, warnings)) if show_footer else ""
-    await send_long(bot, task["chat_id"], head + text + tail)
+    tail = footer(pid, attempts, warnings) if show_footer else ""
+    await send_long(bot, task["chat_id"], text, head=head, foot=tail)
     await send_media(bot, task["chat_id"], MEDIA.get())
 
 
@@ -3966,6 +3976,8 @@ class Progress:
 
 
 LIVE = {}  # chat -> яка модель зараз думає: для «Думаю…» у застосунку
+STICKY = {}  # chat -> {"ok": модель, що відповіла замість мовчуна, "bad": {мовчуни}, "until": до коли}
+STICKY_FOR = float(env("STICKY_MINUTES", "10")) * 60
 
 
 def live_info(chat_id):
@@ -7454,14 +7466,14 @@ async def _answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE, content, histo
     parallel = bool(busy_elsewhere(chat_id, did))
     show_footer = prefs(chat_id)["footer"] or attempts or warnings
     head = f"💬 <b>{esc(dialog_name(did))}</b>\n" if (away or parallel) else ""
-    body = text + (("\n\n" + footer(pid, attempts, warnings)) if show_footer else "")
-    if head:
-        body = f"💬 «{dialog_name(did)}» · {PROVIDERS.get(pid, {}).get('title', pid)}\n\n" + body
+    foot = footer(pid, attempts, warnings) if show_footer else ""
+    top = f"💬 «{dialog_name(did)}» · {PROVIDERS.get(pid, {}).get('title', pid)}\n\n" if head else ""
+    body = text
     if jid and any(w.startswith("✂️") for w in warnings):
-        await send_long(ctx.bot, chat_id, body)
+        await send_long(ctx.bot, chat_id, body, head=top, foot=foot)
         await ctx.bot.send_message(chat_id, "✂️ Відповідь обірвалася.", reply_markup=kb([[("▶️ Продовжити · 🔁 Авто", f"m:jrun:{jid}:auto")], [("📒 Інша модель…", f"m:j:{jid}")]]))
     else:
-        await send_long(ctx.bot, chat_id, body)
+        await send_long(ctx.bot, chat_id, body, head=top, foot=foot)
     await send_media(ctx.bot, chat_id, MEDIA.get())
     if away or (parallel and outcome != "done") or (time.time() - started > 60 and outcome == "done" and away):
         await finish_note(ctx.bot, chat_id, did, outcome, jid=jid, pid=pid, q=history_text)
