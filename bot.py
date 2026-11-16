@@ -2048,8 +2048,7 @@ async def push_invite(bot, key):
     if key.isdigit():
         uid = int(key)
     else:
-        name = key.lstrip("@").lower()
-        uid = next((int(i) for i, u in seen_users().items() if u and u == name), None)
+        uid = None  # за @username бот людину не шукає: про незнайомих він нічого не зберігає
     if not uid or member_status(uid) == "blocked":
         return False
     try:
@@ -2061,7 +2060,6 @@ async def push_invite(bot, key):
 
 
 async def deny(update: Update):
-    seen_note(update.effective_user)
     if preinvite_match(update.effective_user) and member_status(update.effective_user.id) != "blocked":
         markup = kb([[("✅ Згоден(-на)", "cons:yes"), ("❌ Не згоден(-на)", "cons:no")]])
         text = INVITE_TEXT
@@ -2072,15 +2070,18 @@ async def deny(update: Update):
     if st in (None, "removed") and owner_id() and update.effective_user.id != owner_id():
         # Хто натиснув «Старт» — одразу заявка власнику з кнопкою «Дати доступ». Після схвалення бот просто починає працювати.
         user = update.effective_user
-        member_upsert(user, "pending")
-        who = esc(user.full_name) + (f" (@{esc(user.username)})" if user.username else "")
+        with closing(db()) as con, con:  # про незнайомого зберігаємо лише ID і статус заявки — без імені
+            con.execute("INSERT INTO members(user_id, name, username, status, created) VALUES (?,?,?,?,?) "
+                        "ON CONFLICT(user_id) DO UPDATE SET status='pending'", (user.id, "", "", "pending", time.time()))
+        who = f'<a href="tg://user?id={user.id}">{esc(user.full_name)}</a>' + (f" (@{esc(user.username)})" if user.username else "")
         for admin in admin_ids():  # власник і (у режимі «усім усе») кожен учасник може схвалити
             try:
                 await update.get_bot().send_message(
                     admin, f"👥 <b>{who} просить доступ до бота й застосунку</b>\nID: <code>{user.id}</code>\n\n"
                     "Натисніть «✅ Дати доступ» — бот одразу запрацює для цієї людини й привітається з нею. Нічого більше від неї не потрібно.",
                     parse_mode=ParseMode.HTML,
-                    reply_markup=kb([[("✅ Дати доступ", f"m:accok:{user.id}"), ("❌ Відхилити", f"m:accno:{user.id}")]]))
+                    reply_markup=kb([[("✅ Дати доступ", f"m:accok:{user.id}"), ("❌ Відхилити", f"m:accno:{user.id}")],
+                                     *([[("↗ Відкрити акаунт", f"url:https://t.me/{user.username}")]] if user.username else [])]))
             except Exception:  # noqa: BLE001
                 log.warning("не вдалося повідомити %s про заявку %s", admin, user.id)
         st = "pending"
@@ -3293,7 +3294,7 @@ def scr_access():
     rows = [[("🔗 Одноразове запрошення", "m:inv:1"), ("♾ На 7 днів", "m:inv:0")], [("➕ Додати за @ім'ям чи ID", "m:addmem")]]
     rows += [[(f"🚫 Скасувати додавання {x['key']}", f"m:prex:{x['key']}")] for x in pre]
     for m in pending:
-        who = m["name"] + (f" @{m['username']}" if m["username"] else "")
+        who = (m["name"] or f"ID {m['user_id']}") + (f" @{m['username']}" if m["username"] else "")
         rows.append([(f"✅ {who}", f"m:accok:{m['user_id']}"), ("❌", f"m:accno:{m['user_id']}")])
     rows += [[(f"👤 {m['name']}", f"m:mem:{m['user_id']}")] for m in approved]
     rows += [[(f"🚫 Скасувати запрошення …{inv['code'][-4:]}", f"m:invx:{inv['code']}")] for inv in invites]
@@ -5135,11 +5136,26 @@ def punish_rows(uid):
             [("✅ Розбанити", f"m:bpn:{uid}:unban")] if st == "blocked" else [("🚫 Забанити в боті", f"m:bpn:{uid}:ban")]]
 
 
+def forget_strangers():
+    """Про людей без доступу бот не зберігає нічого, крім ID (потрібен, щоб відповісти чи заблокувати)."""
+    kv_set("seen_users", None)
+    with closing(db()) as con, con:
+        con.execute("UPDATE members SET name='', username='' WHERE status!='approved'")
+    inb = PLUGINS.get("inb")
+    if inb:
+        inb.forget_strangers(is_allowed_id)
+    JOURNAL.keep_only(is_allowed_id)
+
+
 async def log_activity(update: Update, ctx):
     """🧾 Кожна дія в боті — у журнал (секретні введення приховуються)."""
     u = update.effective_user
-    if not u:
-        return
+    if not u or not is_allowed_id(u.id):
+        return  # незнайомих не записуємо
+    mrow = member_get(u.id)
+    if mrow and not mrow.get("name"):
+        with closing(db()) as con, con:
+            con.execute("UPDATE members SET name=?, username=? WHERE user_id=?", (u.full_name, u.username or "", u.id))
     q = update.callback_query
     if q:
         return JOURNAL.add(u.id, "кнопка", q.data or "")
@@ -9948,6 +9964,7 @@ async def main():
             log.info("кластер: «%s» %s", NODE.name, "активний" if NODE.active else "у резерві")
         await apply_receiving()
         BACKGROUND.add(asyncio.create_task(task_worker()))
+        forget_strangers()
         _register_state()
         n_state = RSTATE.load()
         if n_state:

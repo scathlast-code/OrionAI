@@ -34,6 +34,22 @@ DEFAULTS = {"who": "all", "greeting": "👋 Вітаю! Напишіть пов�
 WHO = {"all": "пишуть усі", "members": "лише учасники бота", "closed": "ніхто (закрито)"}
 
 
+def mention(uid, name, username=""):
+    """Ім'я, яке відкриває профіль людини (tg://user — працює й без @username) + @username, якщо є."""
+    if uid and int(uid) > 0:
+        out = f'<a href="tg://user?id={int(uid)}">{esc(name or uid)}</a>'
+    elif username:
+        out = f'<a href="https://t.me/{esc(username)}">{esc(name)}</a>'
+    else:
+        out = esc(name or uid)
+    return out + (f" @{esc(username)}" if username else "")
+
+
+def profile_row(cb, uid, username=""):
+    """«↗ Відкрити акаунт» — для людей з @username; без нього сторінку відкриває дотик до імені в тексті."""
+    return [("↗ Відкрити акаунт", f"url:https://t.me/{username}")] if username else []
+
+
 def kind_of(m):
     for k in ("photo", "video", "voice", "video_note", "audio", "document", "sticker", "animation", "location", "contact", "poll"):
         if getattr(m, k, None):
@@ -207,10 +223,11 @@ class Plugin(Base):
         with closing(self.db()) as con, con:
             con.execute("INSERT INTO people(user,name,username,first,last,count,unread) VALUES(?,?,?,?,?,1,1) "
                         "ON CONFLICT(user) DO UPDATE SET name=excluded.name, last=excluded.last, count=count+1, unread=unread+1",
-                        (uid, name, (u.username if u else "") or "", now, now))
+                        (uid, name if uid < 0 or self.host.is_allowed(uid) else "", "", now, now))
         link = (f"https://t.me/{c.username}/{m.message_id}" if c.username
                 else f"https://t.me/c/{str(c.id).removeprefix('-100')}/{m.message_id}")
-        head = (f"{what} · <b>{esc(c.title or '')}</b>\n👤 {esc(name)}" + (f" @{esc(u.username)}" if u and u.username else "")
+        uname = (u.username if u else getattr(sender, "username", "")) or ""
+        head = (f"{what} · <b>{esc(c.title or '')}</b>\n👤 {mention(uid, name, uname)} · <code>{uid}</code>"
                 + (f"\n↪️ до допису: «{esc(about)}»" if about else "")
                 + ("\n<i>Відповідь — reply на повідомлення нижче: бот відповість прямо в коментарях.</i>" if c.type != "channel" else ""))
         rows = [[("🔗 Відкрити", "url:" + link)]]
@@ -218,6 +235,8 @@ class Plugin(Base):
             rows[0].insert(0, ("↩️ Відповісти там", self.cb("rc", c.id, m.message_id)))
             rows.append([("🔇 Мут 1 год", self.cb("mu", c.id, uid, 3600)), ("🔇 Мут 1 добу", self.cb("mu", c.id, uid, 86400))])
             rows.append([("🚫 Забанити", self.cb("ban", c.id, uid)), ("🗑 Видалити коментар", self.cb("del", c.id, m.message_id))])
+        if uname:
+            rows.append(profile_row(self.cb, uid, uname))
         rows.append([("✅ Прочитано", self.cb("ok", uid))])
         for owner in self.host.admins():
             try:
@@ -226,7 +245,8 @@ class Plugin(Base):
                                                     disable_notification=self.get("silent") == "1")
                 with closing(self.db()) as con, con:
                     con.execute("INSERT INTO msgs(user,at,dir,kind,text,src_msg,owner_chat,owner_msg,src_chat) VALUES(?,?,?,?,?,?,?,?,?)",
-                                (uid, now, "in", kind_of(m), (m.text or m.caption or "")[:4000], m.message_id, owner, copied.message_id, c.id))
+                                (uid, now, "in", kind_of(m), (m.text or m.caption or "")[:4000] if self.host.is_allowed(uid) else "",
+                                 m.message_id, owner, copied.message_id, c.id))
             except Exception:  # noqa: BLE001
                 log.exception("inbox: chat deliver failed")
 
@@ -298,6 +318,14 @@ class Plugin(Base):
         rows.append([("« Канали й коментарі", self.cb("chs"))])
         return "\n".join(lines), rows
 
+    def forget_strangers(self, allowed):
+        """Про людей без доступу лишаємо тільки ID і зв'язок «яке повідомлення кому» — без імен і текстів."""
+        with closing(self.db()) as con, con:
+            for (uid,) in con.execute("SELECT user FROM people").fetchall():
+                if uid > 0 and not allowed(uid):
+                    con.execute("UPDATE people SET name='', username='', note='' WHERE user=?", (uid,))
+                    con.execute("UPDATE msgs SET text='' WHERE user=?", (uid,))
+
     def chats_screen(self):
         cs = self.chats()
         lines = ["📣 <b>Канали й коментарі</b>",
@@ -323,22 +351,26 @@ class Plugin(Base):
         now = time.time()
         k = kind_of(msg)
         text = msg.text or msg.caption or ""
+        known = self.host.is_allowed(user.id)  # про незнайомих зберігаємо лише ID — ім'я й текст бачите тільки в сповіщенні
+        sname, suser, stext = (user.full_name, user.username or "", text) if known else ("", "", "")
         with closing(self.db()) as con, con:
             con.execute("INSERT INTO people(user,name,username,first,last,count,unread) VALUES(?,?,?,?,?,1,1) "
                         "ON CONFLICT(user) DO UPDATE SET name=excluded.name, username=excluded.username, last=excluded.last, "
-                        "count=count+1, unread=unread+1", (user.id, user.full_name, user.username or "", now, now))
+                        "count=count+1, unread=unread+1", (user.id, sname, suser, now, now))
             n = con.execute("SELECT count FROM people WHERE user=?", (user.id,)).fetchone()[0]
         fwd = getattr(msg, "forward_origin", None)
         fsrc = ""
         if fwd is not None:
             ch = getattr(fwd, "chat", None) or getattr(fwd, "sender_chat", None)
             fsrc = (ch.title if ch else getattr(getattr(fwd, "sender_user", None), "full_name", "") or getattr(fwd, "sender_user_name", "")) or "?"
-        head = (f"📮 <b>{esc(user.full_name)}</b>" + (f" @{esc(user.username)}" if user.username else "") + f" · <code>{user.id}</code>"
+        head = (f"📮 <b>{mention(user.id, user.full_name, user.username or '')}</b> · <code>{user.id}</code>"
                 + (" · учасник" if member else "") + f" · {n}-е" + (f"\n↪️ переслано з «{esc(fsrc)}»" if fsrc else "")
                 + "\n<i>Відповідь — просто reply на повідомлення нижче.</i>")
         rows = [[("↩️ Відповісти", self.cb("r", user.id)), ("📰 У ньюзрум", self.cb("n", user.id, msg.message_id))],
                 [("🔇 Мут 1 год", f"m:bpn:{user.id}:mute:3600"), ("🔇 Мут 1 добу", f"m:bpn:{user.id}:mute:86400")],
                 [("🚫 Забанити в боті", f"m:bpn:{user.id}:ban"), ("✅ Прочитано", self.cb("ok", user.id))]]
+        if user.username:
+            rows.append(profile_row(self.cb, user.id, user.username))
         silent = self.get("silent") == "1"
         bot = ctx.bot
         for owner in self.host.admins():
@@ -347,7 +379,7 @@ class Plugin(Base):
                 copied = await bot.copy_message(owner, msg.chat_id, msg.message_id, reply_markup=self._kb(rows), disable_notification=silent)
                 with closing(self.db()) as con, con:
                     con.execute("INSERT INTO msgs(user,at,dir,kind,text,src_msg,owner_chat,owner_msg) VALUES(?,?,?,?,?,?,?,?)",
-                                (user.id, now, "in", k, text[:4000], msg.message_id, owner, copied.message_id))
+                                (user.id, now, "in", k, stext[:4000], msg.message_id, owner, copied.message_id))
             except Exception:  # noqa: BLE001
                 log.exception("inbox deliver to owner failed")
         if self.get("ack") == "1":
@@ -399,7 +431,7 @@ class Plugin(Base):
         rows = []
         for p in ps:
             mark = f"🔵{p['unread']} " if p["unread"] else ""
-            rows.append([(f"{mark}{p['name'][:26]} · {p['count']}", self.cb("t", p["user"]))])
+            rows.append([(f"{mark}{(p['name'] or 'ID ' + str(p['user']))[:26]} · {p['count']}", self.cb("t", p["user"]))])
         if not ps:
             lines.append("\nПоки ніхто не писав. Поділіться посиланням на бота — t.me/ваш_бот.")
         rows.append([("⚙️ Налаштування скриньки", self.cb("set")), ("🚫 Заблоковані", self.cb("bl"))])
@@ -413,7 +445,7 @@ class Plugin(Base):
             ms = [dict(r) for r in con.execute("SELECT * FROM msgs WHERE user=? AND (dir='out' OR owner_chat=?) ORDER BY id DESC LIMIT 12",
                                                (int(uid), self.host.admins()[0] if self.host.admins() else 0))][::-1]
             con.execute("UPDATE people SET unread=0 WHERE user=?", (int(uid),))
-        lines = [f"📮 <b>{esc(p['name'])}</b>" + (f" @{esc(p['username'])}" if p["username"] else "") + f" · <code>{p['user']}</code>",
+        lines = [f"📮 <b>{mention(p['user'], p['name'] or 'Відкрити акаунт', p['username'])}</b> · <code>{p['user']}</code>",
                  f"Повідомлень: {p['count']} · перше: {time.strftime('%d.%m.%Y', time.localtime(p['first']))}" + (" · 🚫 заблоковано" if p["blocked"] else ""), ""]
         for m in ms:
             who = "👤" if m["dir"] == "in" else "↩️ ви"
