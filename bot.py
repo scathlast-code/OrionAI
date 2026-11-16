@@ -8068,9 +8068,14 @@ async def canva_callback(request):
 
 @mcp.custom_route("/", methods=["GET"])
 async def health(request):
-    from starlette.responses import PlainTextResponse
+    """Головна сторінка: «Бот працює.»; відкрита як Mini App (адреса без /app у BotFather) — сама переходить у застосунок."""
+    from starlette.responses import HTMLResponse
 
-    return PlainTextResponse("Бот працює.")
+    return HTMLResponse(
+        "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
+        "<script>if(/tgWebApp/.test(location.hash+location.search))"
+        "location.replace('/app'+location.search+location.hash)</script>"
+        "<pre>Бот працює.</pre>")
 
 
 # ---------------------------------------------------------------- запуск
