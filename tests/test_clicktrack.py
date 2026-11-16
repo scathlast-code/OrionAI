@@ -36,3 +36,22 @@ def test_network_detection():
     assert C.network_of("facebook", "Instagram", "") == "Instagram"
     assert C.network_of("twitter", "", "t.co") == "Twitter/X"
     assert C.parse_ua("Mozilla/5.0 (Windows NT 10.0) Chrome/120")[:2] == ("Комп'ютер", "Windows")
+
+
+def test_shortio_write_needs_permission(monkeypatch):
+    import plugins.newsroom.shortio as S
+    sio = S.ShortIO(key="k", domain="greenpost.s.gy")
+    calls = []
+
+    async def req(*a, **k):
+        calls.append(a)
+        return {"shortURL": "https://greenpost.s.gy/a", "idString": "1"}
+    sio.request = req
+    for policy, approved, ok in (("ask", False, False), ("ask", True, True), ("off", True, False), ("all", False, True)):
+        monkeypatch.setattr(S, "WRITE_POLICY", lambda p=policy: p)
+        before = len(calls)
+        try:
+            asyncio.run(sio.shorten("https://greenpost.ua/x", approved=approved))
+        except S.ShortIOError:
+            pass
+        assert (len(calls) > before) == ok, policy

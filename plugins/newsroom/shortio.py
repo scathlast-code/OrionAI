@@ -9,6 +9,11 @@ API = 'https://api.short.io'
 STATS = 'https://api-v2.short.io'
 
 class ShortIOError(RuntimeError): pass
+class ShortIONeedsApproval(ShortIOError): pass
+
+# Хто дозволяє писати в Short.io: "ask" — лише після вашого дозволу на кожен запис (типово), "all" — усі, "off" — нічого.
+# Бот підміняє цю функцію своєю (налаштування в меню UTM). Читання статистики — не запис, на нього правило не діє.
+WRITE_POLICY = lambda: os.getenv('SHORTIO_WRITE', 'ask')  # noqa: E731
 
 class ShortIO:
     def __init__(self, key=None, domain=None, domain_id=None, transport=None):
@@ -26,7 +31,11 @@ class ShortIO:
                 return res.json()
         except (httpx.HTTPError, ValueError) as exc:
             raise ShortIOError('Помилка API Short.io: перевірте доступ, ключ, ліміти та налаштування домену') from exc
-    async def shorten(self, full_url):
+    async def shorten(self, full_url, approved=False):
+        """Створює запис у Short.io. Без approved=True працює лише в режимі «дозволити всі»."""
+        policy=WRITE_POLICY()
+        if policy=='off': raise ShortIOError('Записи в Short.io вимкнено')
+        if policy!='all' and not approved: raise ShortIONeedsApproval('Потрібен ваш дозвіл на запис у Short.io')
         parsed=urlsplit(full_url)
         if parsed.scheme not in ('http','https') or not parsed.netloc: raise ValueError('Некоректне посилання')
         data=await self.request('POST',API+'/links',json={'originalURL':full_url,'domain':self.domain,'allowDuplicates':False})
@@ -81,11 +90,11 @@ class ShortIORegistry:
         with sqlite3.connect(self.path) as db:
             return db.execute('SELECT full_url,short_url,link_id,platform,tag FROM shortio_links ORDER BY id DESC LIMIT ?', (limit,)).fetchall()
 
-async def create_pair(ledger,registry,provider,url,tag,platform):
+async def create_pair(ledger,registry,provider,url,tag,platform,approved=True):
     """Only record a completed pair after provider success; existing ledger remains intact."""
     from .utm import build_url
     full=build_url(url,tag,platform)
-    short=await provider.shorten(full)
+    short=await provider.shorten(full,approved=approved)
     _,duplicate=ledger.create(url,tag,platform)
     registry.save(full,short['short_url'],short['link_id'],platform,tag)
     return {'full_url':full,'short_url':short['short_url'],'link_id':short['link_id'],'duplicate':duplicate}

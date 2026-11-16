@@ -5400,7 +5400,15 @@ def scr_utm(chat_id):
             "<code>/utm резервні</code> — YouTube, шапки профілів, коментарі\n"
             "<code>/utm clicks</code> — кліки Short.io (якщо задано SHORTIO_API_KEY)\n\n"
             "Будова: <code>посилання?utm_content=тег&amp;utm_medium=формат&amp;utm_campaign=news&amp;utm_source=платформа</code></blockquote>")
-    return text, [list(r) for r in UTM_MENU]
+    rows = [list(r) for r in UTM_MENU]
+    if os.getenv("SHORTIO_API_KEY"):
+        cur = shortio_policy()
+        text += f"\n\n🔗 <b>Short.io:</b> {SIO_MODES[cur]}. Статистику бот лише читає; новий запис у Short.io з'являється тільки так, як обрано тут."
+        rows.append([(("• " if cur == k else "") + v.split(" ", 1)[0] + " " + {"ask": "Питати", "all": "Усі", "off": "Вимкнути"}[k], f"m:utmsio:{k}")
+                     for k, v in SIO_MODES.items()])
+    else:
+        text += "\n\n🔗 Short.io не підключено — короткі посилання робить сам бот. Підключити: змінна <code>SHORTIO_API_KEY</code> у Railway."
+    return text, rows
 
 
 def scr_utm_tags(chat_id, url):
@@ -5439,6 +5447,11 @@ def scr_utm_reserve(chat_id):
 
 
 _CT = None
+try:
+    import plugins.newsroom.shortio as _sio_mod
+    _sio_mod.WRITE_POLICY = lambda: shortio_policy()
+except Exception:  # noqa: BLE001
+    pass
 
 
 def clicks():
@@ -5450,12 +5463,22 @@ def clicks():
     return _CT
 
 
+SIO_MODES = {"ask": "🙋 Питати про кожен запис", "all": "✅ Дозволити всі", "off": "⛔ Не писати в Short.io"}
+
+
+def shortio_policy():
+    """Режим запису в Short.io: ask (типово) — лише з вашого дозволу на кожен запис; all — усі; off — жодних."""
+    v = kv_get("shortio_write") or os.getenv("SHORTIO_WRITE", "ask")
+    return v if v in SIO_MODES else "ask"
+
+
 async def short_links(items, tag):
-    """Короткі посилання для міток: Short.io (якщо є SHORTIO_API_KEY), інакше — власні на домені бота. {key: коротке}."""
+    """Короткі посилання для міток. Власні (/r/… на домені бота) — завжди; у Short.io — лише в режимі «✅ Дозволити всі».
+    У режимі «🙋 Питати» під мітками з'являються кнопки, щоб дозволити запис для кожної окремо. {key: коротке}."""
     import clicktrack
     ct, out = clicks(), {}
     sio = None
-    if os.getenv("SHORTIO_API_KEY"):
+    if os.getenv("SHORTIO_API_KEY") and shortio_policy() == "all":
         try:
             from plugins.newsroom.shortio import ShortIO
             sio = ShortIO()
@@ -5465,7 +5488,7 @@ async def short_links(items, tag):
         base = clicktrack.base_of(link)
         if sio:
             try:
-                r = await sio.shorten(link)
+                r = await sio.shorten(link, approved=True)
                 ct.add_external(link, base, key, tag, r["short_url"], r["link_id"])
                 out[key] = r["short_url"]
                 continue
@@ -5543,6 +5566,11 @@ async def utm_output(update, chat_id, url, tag, reserve=False, only=None):
               + (f"<pre>{esc(shorts[key])}</pre>\n<blockquote expandable>Повне: <code>{esc(link)}</code></blockquote>" if key in shorts else f"<pre>{esc(link)}</pre>")
               for key, label, link, ok_ in res["items"]]
     rows = [[("📈 Кліки й переходи", "m:utmclk"), ("📋 Реєстр за 3 дні", "m:utmreg")], [("🗂 Резервні формати", "m:utmres")]]
+    if os.getenv("SHORTIO_API_KEY") and shortio_policy() == "ask":  # 🙋 запис у Short.io — лише з вашого дозволу на кожен
+        _utm_state(chat_id, sio_items=[[k, lbl, link] for k, lbl, link, _ in res["items"]])
+        head += "🙋 У Short.io нічого не записано. Дозвольте запис для потрібних міток кнопками нижче.\n"
+        rows = pairs([(f"➕ Short.io: {lbl}"[:40], f"m:utmsx:{i}") for i, (_, lbl, _l, _o) in enumerate(res["items"])]) \
+            + [[(f"✅ Записати всі {len(res['items'])} у Short.io", "m:utmsx:all")]] + rows
     if not reserve and not only:
         n = int(kv_get("utm_hint") or 0) + 1
         kv_set("utm_hint", str(n))
@@ -6702,12 +6730,38 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         screen = ("✏️ <b>Адреса Ollama</b>\nНа тому ж сервері Oracle (docker compose): <code>http://ollama:11434</code>\n"
                   "Домашній ПК через Tailscale чи Cloudflare Tunnel: його адреса.\n«-» — як у змінній OLLAMA_URL.\nЗараз: <code>"
                   + esc(ollama_url() or "—") + "</code>", [CANCEL_ROW])
-    elif a in ("utmt", "utmown", "utmold", "utmres", "utmrs", "utmreg", "utmst", "utmx", "utmd", "utm", "utmadd", "utmclk", "utmclx", "utmsync"):
+    elif a in ("utmt", "utmown", "utmold", "utmres", "utmrs", "utmreg", "utmst", "utmx", "utmd", "utm", "utmadd", "utmclk", "utmclx", "utmsync", "utmsio", "utmsx"):
         st = _utm_state(chat_id)
         if a == "utm":
             screen = scr_utm(chat_id)
         elif a == "utmclk":
             screen = await scr_utm_clicks(chat_id, int(arg) if (arg or "").isdigit() else 30)
+        elif a == "utmsio" and arg in SIO_MODES:
+            kv_set("shortio_write", arg)
+            toast = SIO_MODES[arg]
+            screen = scr_utm(chat_id)
+        elif a == "utmsx":
+            items = st.get("sio_items") or []
+            pick = items if arg == "all" else ([items[int(arg)]] if (arg or "").isdigit() and int(arg) < len(items) else [])
+            if not pick or not os.getenv("SHORTIO_API_KEY"):
+                toast = "Список застарів — зробіть мітки ще раз"
+            elif shortio_policy() == "off":
+                toast = "Записи в Short.io вимкнено (меню UTM → Short.io)"
+            else:
+                import clicktrack
+                from plugins.newsroom.shortio import ShortIO
+                if q:
+                    await q.answer("Записую в Short.io…")
+                lines, sio = [], ShortIO()
+                for key, lbl, link in pick:
+                    try:
+                        r = await sio.shorten(link, approved=True)  # ви натиснули кнопку — це і є дозвіл на цей запис
+                        clicks().add_external(link, clicktrack.base_of(link), key, st.get("tag") or "", r["short_url"], r["link_id"])
+                        lines.append(f"<b>{esc(lbl)}</b> ✅ Short.io\n<pre>{esc(r['short_url'])}</pre>")
+                    except Exception as exc:  # noqa: BLE001
+                        lines.append(f"<b>{esc(lbl)}</b> ⚠️ {esc(str(exc)[:150])}")
+                await update.effective_chat.send_message("🔗 <b>Записано в Short.io</b>\n" + "\n".join(lines), parse_mode=ParseMode.HTML,
+                                                         disable_web_page_preview=True)
         elif a == "utmsync":
             toast = (await shortio_sync(force=True))[:190] or "Оновлено"
             screen = await scr_utm_clicks(chat_id)
