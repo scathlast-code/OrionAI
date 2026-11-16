@@ -206,6 +206,7 @@ def menu(B, uid):
     import explain
     from uilayout import PLACE_HOME
     L = B.L
+    B._migrate_compact_menu(uid)
 
     def items(place, path):
         own, subs = [], []
@@ -287,12 +288,14 @@ async def run(bot_module, uid, op, data=None, text=None, user=None, file=None):
                 sink.notes.append("Тут текст не очікувався. Відкрийте розділ і натисніть потрібну дію.")
         else:
             upd = _Update(uid, sink, tbot, data=data, user=user)
-            await B.route(upd, _Ctx(tbot), data or "m:home", edit=True, record=False)
+            await (B.open_data if (data or "").startswith("help:") else B.route)(upd, _Ctx(tbot), data or "m:home", edit=True, record=False)
     finally:
         CAPTURE.reset(token)
     text_out, rows = sink.screen or ("", [])
     replies = [t for t in (capbot.msgs.values() if capbot else []) if t and not t.startswith(("⏳", "🕒", "💭"))]
-    return {"text": text_out, "rows": clean_rows(rows), "toast": sink.toast, "notes": sink.notes[-5:], "awaiting": uid in B.AWAIT,
+    import button_hints
+    rows = clean_rows(rows)
+    return {"text": text_out, "rows": rows, "hints": button_hints.for_rows(rows), "toast": sink.toast, "notes": sink.notes[-5:], "awaiting": uid in B.AWAIT,
             "view": bool(op == "screen" and data and B.is_view(data)),
             "replies": [re.sub(r"<[^>]+>", "", t)[:6000] for t in replies[-5:]]}
 

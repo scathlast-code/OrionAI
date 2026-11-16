@@ -526,7 +526,7 @@ MODEL_HELP["openrouter"] = """<b>OpenRouter</b>
 3. На сервері задайте <code>OPENROUTER_API_KEY=ваш_ключ</code> і перезапустіть бота.
 
 <b>Як змінити модель</b>
-За замовчуванням <code>openai/gpt-oss-20b:free</code>. Інша: <code>OPENROUTER_MODEL=назва</code>. Безкоштовні шукайте на openrouter.ai/models з фільтром ціни 0. Назва обов'язково має закінчуватися на <code>:free</code>, інакше запит буде платним.
+За замовчуванням <code>openrouter/free</code> — OpenRouter сам обирає безкоштовну модель, що зараз працює. Конкретна: <code>OPENROUTER_MODEL=назва</code>. Безкоштовні шукайте на openrouter.ai/models з фільтром ціни 0. Назва обов'язково має закінчуватися на <code>:free</code>, інакше запит буде платним.
 
 <b>Типові проблеми</b>
 • «Денний ліміт» — 50 запитів вичерпано, оновиться наступного дня.
