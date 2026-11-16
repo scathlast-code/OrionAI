@@ -47,6 +47,7 @@ body.marking .cell,body.marking .seg button,body.marking .card{outline:1.5px das
 .bub{max-width:86%;padding:9px 12px;border-radius:16px;margin:6px 0;white-space:pre-wrap;overflow-wrap:anywhere;font-size:15px}
 .arow{display:flex;gap:8px;align-items:flex-end;margin:6px 0}.arow .bub{margin:0}
 .ava{flex:none;width:30px;height:30px;border-radius:50%;display:grid;place-items:center;color:#fff;font-size:14px;font-weight:700}
+.mbar{display:flex;gap:6px;overflow-x:auto;margin:-4px 0 12px;padding-bottom:2px}.mbar button{flex:none;border:0;border-radius:16px;padding:6px 12px;background:var(--card);color:var(--txt);font:inherit;font-size:13.5px}.mbar button.on{background:var(--acc);color:var(--acct);font-weight:600}
 .switch{text-align:center;margin:10px 0}.switch span{display:inline-block;font-size:12px;color:var(--hint);background:var(--card);border-radius:12px;padding:4px 10px}
 .bub.user{margin-left:auto;background:var(--acc);color:var(--acct);border-bottom-right-radius:5px}
 .bub.assistant{background:var(--card);border-bottom-left-radius:5px}.bub b{font-weight:650}.bub a{color:var(--acc)}.bub pre{white-space:pre-wrap;background:color-mix(in srgb,var(--hint) 14%,transparent);padding:8px;border-radius:8px;font-size:13px}.bub small{display:block;opacity:.65;font-size:11.5px;margin-top:3px}
@@ -149,6 +150,11 @@ function renderChat(res, typing){
       row.append(av,b);main.appendChild(row)}
     else main.appendChild(b)}
   if(!(res.messages||[]).length){const e=document.createElement('div');e.className='empty';e.textContent='Почніть розмову — напишіть питання, перешліть текст новини або надішліть файл 📎';main.appendChild(e)}
+  if(res.models&&res.models.length>1){ // хто відповідає — перемикання прямо в розмові
+    const bar=document.createElement('div');bar.className='mbar';
+    for(const m of res.models){const b=document.createElement('button');b.textContent=m.title;if(m.on)b.className='on';
+      b.onclick=async()=>{haptic();await call('screen',m.id==='auto'?'m:mmode:all':'m:pick:'+m.id);toast('Відповідає: '+m.title);const h=await call('history','chat');if(h)renderChat(h)};bar.appendChild(b)}
+    main.insertBefore(bar,main.children[2]||null)}
   if(typing){const t=document.createElement('div');t.className='typing';t.id='typing';t.textContent='Думаю над відповіддю…';main.appendChild(t)}
   main.style.paddingBottom='160px';
   let c=document.getElementById('composer');
@@ -168,7 +174,7 @@ function showResult(res){
   for(const n of res.notes||[]) if(!(res.replies||[]).length) toast(n);
   openChat(false);
 }
-const AVATARS={gemini:['✦','#4285F4','Gemini'],openrouter:['⇄','#6E56CF','OpenRouter'],groq:['⚡','#F55036','Groq'],mistral:['M','#FA520F','Mistral'],
+const AVATARS={gemini:['✦','#4285F4','Gemini'],openrouter:['⇄','#7B4FD8','OpenRouter'],groq:['⚡','#F57C00','Groq'],mistral:['M','#D32F2F','Mistral'],
   nvidia:['N','#76B900','NVIDIA'],ollama_cloud:['🦙','#333','Ollama Cloud'],ollama_local:['🦙','#555','Моя Ollama'],cloudflare:['☁','#F38020','Cloudflare'],cohere:['C','#39594D','Cohere']};
 function avatar(p){const a=AVATARS[p];if(a)return {icon:a[0],color:a[1],name:a[2]};let h=0;for(const c of (p||'?'))h=(h*31+c.charCodeAt(0))%360;
   return {icon:((p||'?')[0]||'?').toUpperCase(),color:'hsl('+h+',55%,45%)',name:p||'ШІ'}}

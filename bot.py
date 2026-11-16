@@ -1693,6 +1693,8 @@ async def _ask_llm(history, user_content, preferred=None, fallback=True, exclude
     _now = now()
     today_line = (f"\nЗараз {_now.strftime('%d.%m.%Y, %H:%M')} за Києвом ({['понеділок','вівторок','середа','четвер','пʼятниця','субота','неділя'][_now.weekday()]}). "
                   "Коли просять дізнатися щось актуальне — одразу шукай інструментами (web_search, weather), не перепитуй дозволу. "
+                  f"У боті кілька моделей ({', '.join(v['title'] for v in PROVIDERS.values())}); якщо користувач звертається до іншої моделі на ім'я, "
+                  "бот сам передає їй запит — не кажи, що не можеш перемкнутися, просто відповідай по суті. "
                   "Оформлюй відповідь охайно й наочно (Markdown): на початку короткий рядок-заголовок з доречним емодзі, "
                   "ключові цифри й назви **жирним**, переліки — списками з емодзі чи «•», дані по днях/пунктах — окремими рядками, "
                   "посилання — [назва](url), наприкінці джерело. Коротке привітання чи проста відповідь — без зайвого оформлення.")
@@ -7424,10 +7426,34 @@ async def send_media(bot, chat_id, items):
                 await bot.send_message(chat_id, f"{cap}: {data}", link_preview_options=NO_PREVIEW)
 
 
+BADGE = {"gemini": "🔵", "openrouter": "🟣", "groq": "🟠", "mistral": "🔴", "nvidia": "🟢", "ollama_cloud": "⚫", "ollama_local": "🟤",
+         "cloudflare": "🟡", "cohere": "⚪"}  # «аватар» моделі в чаті Telegram (у застосунку — кружечки тих самих кольорів)
+NAMES = {"gemini": r"джеміні|джемені|гемін[іи]|gemini", "openrouter": r"опен ?роутер|openrouter", "groq": r"грок|groq",
+         "mistral": r"містрал[ья]?|mistral", "nvidia": r"нвідіа|nvidia", "cohere": r"кохер|cohere", "cloudflare": r"клаудфлер|cloudflare",
+         "ollama_local": r"ollama|оллама|олама"}
+
+
+def addressed_model(text):
+    """«хай Gemini знайде…», «@gemini …», «спитай OpenRouter…» → (pid, назавжди?) або (None, False).
+    «перемкнись на Gemini» / «відповідай Gemini» — назавжди; звертання — лише це повідомлення."""
+    t = (text or "").lower()[:200]
+    for pid, rx in NAMES.items():
+        if pid not in PROVIDERS:
+            continue
+        if re.search(rf"(перемкн\w*|переключ\w*|постав\w*|обер\w*|хочу)\s+(на\s+)?({rx})|відповіда\w*\s+(лише\s+|тільки\s+)?({rx})", t):
+            return pid, True
+        lead = r"^\s*(?:(?:а|і|й|ну|то|тепер|давай|ок)[,\s]+)?"
+        if re.search(rf"{lead}@?({rx})\b|{lead}(хай|нехай|спитай|запитай|попроси|дай|нехай)\s+({rx})|{lead}({rx})\s*[,:]", t):
+            return pid, False
+    if re.search(r"(перемкн\w*|переключ\w*|постав\w*)\s+(на\s+)?(авто|будь-яку)", t):
+        return "auto", True
+    return None, False
+
+
 def footer(pid, attempts, warnings):
     real = ACTUAL_BY_PID.get(pid) or PROVIDERS[pid]["model"]  # модель, що справді відповіла (може бути запасна)
     main = PROVIDERS[pid]["model"]
-    lines = [f"🤖 Відповіла: {PROVIDERS[pid]['title']} · {real}"]
+    lines = [f"{BADGE.get(pid, '🤖')} Відповіла: {PROVIDERS[pid]['title']} · {real}"]
     if real != main:  # відповіла запасна модель того самого сервісу — один рядок, чому
         why = (f"денний ліміт вичерпано, оновиться о {hhmm(GEM_OUT[main])}" if GEM_OUT.get(main, 0) > time.time() else "перевантажена")
         lines.append(f"⚡ Основна {main} — {why}, тому відповіла запасна {real}")
@@ -7919,6 +7945,18 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await handle_awaited(update, ctx, msg.text.strip())
     choice = get_choice(chat_id)
     preferred = None if choice == "auto" else choice
+    want, forever = addressed_model(msg.text or msg.caption or "")
+    if want and forever:  # «перемкнись на Gemini» — змінюємо модель для всіх наступних повідомлень
+        if want == "auto":
+            set_choice(chat_id, "auto")
+            set_pref(chat_id, "model_mode", "all")
+        else:
+            set_choice(chat_id, want)
+            set_pref(chat_id, "model_mode", "one")
+        await msg.reply_text(f"{BADGE.get(want, '🔁')} Тепер відповідає: {choice_label(want)}" + ("" if want == "auto" else " (якщо вона не зможе — підстрахує інша)"))
+        preferred = None if want == "auto" else want
+    elif want and want != "auto":  # «хай Gemini…», «@openrouter …» — лише це повідомлення
+        preferred = want
     if msg.photo:
         caption = msg.caption or "Що на цьому фото?"
         file = await msg.photo[-1].get_file()
