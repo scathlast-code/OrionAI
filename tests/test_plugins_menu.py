@@ -34,6 +34,6 @@ def test_menu_migration_adds_plugins_category(tmp_path):
     assert out.returncode == 0, out.stderr[-2000:]
     res = json.loads(out.stdout.strip().splitlines()[-1])
     assert res["order"][:2] == ["g:work", "g:plugins"]
-    assert res["places"] == {"g:plugins": "home", "news": "g:plugins", "stk": "g:plugins", "plg": "g:settings"}
+    assert res["places"] == {"g:plugins": "home", "news": "g:plugins", "stk": "g:plugins", "plg": "off"}  # плагіни тепер усередині «🧭 Вигляд»
     assert res["view"] == [True, True, False]
     assert res["group"] == "📰 Медіа"

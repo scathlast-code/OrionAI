@@ -89,7 +89,7 @@ MCP_SECRET = env("MCP_SECRET", "")
 DB_PATH = env("DB_PATH", "data/bot.db")
 HISTORY_LIMIT = int(env("HISTORY_LIMIT", "30"))
 MAX_TOKENS = int(env("MAX_TOKENS", "2000"))
-REQUEST_TIMEOUT = float(env("REQUEST_TIMEOUT", "90"))
+REQUEST_TIMEOUT = float(env("REQUEST_TIMEOUT", "45"))  # довше — краще одразу спитати іншу модель
 OLLAMA_TIMEOUT = float(env("OLLAMA_TIMEOUT", "300"))  # своя модель на процесорі думає довше за хмарні
 PORT = int(env("PORT", "8000"))
 TZ = ZoneInfo(env("BOT_TZ", "Europe/Kyiv"))
@@ -125,7 +125,7 @@ CATALOG = {
         "title": "Gemini",
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
         "key_env": "GEMINI_API_KEY",
-        "model": "gemini-2.5-flash",
+        "model": "gemini-flash-latest",  # завжди актуальна стабільна Flash (2.5-flash часто «перевантажена»)
         "free": True,
         "site": "aistudio.google.com",
         "models_url": "ai.google.dev/gemini-api/docs/models",
@@ -175,7 +175,7 @@ CATALOG = {
         "title": "OpenRouter",
         "base_url": "https://openrouter.ai/api/v1",
         "key_env": "OPENROUTER_API_KEY",
-        "model": "openai/gpt-oss-20b:free",
+        "model": "openrouter/free",  # OpenRouter сам обирає безкоштовну модель, що зараз працює (окремі :free зникають щомісяця)
         "free": True,
         "site": "openrouter.ai",
         "models_url": "openrouter.ai/models",
@@ -1167,7 +1167,7 @@ def classify(status, body, headers):
             return "rate_minute", retry or 60
         return "rate", retry or 120
     if status >= 500:
-        return "overloaded", retry or 60
+        return "overloaded", retry or 15
     return "bad_request", None
 
 
@@ -1332,9 +1332,24 @@ def has_images(messages):
     return any(isinstance(m.get("content"), list) for m in messages)
 
 
+NO_REASONING = set()  # моделі, які не приймають reasoning_effort — більше не надсилаємо
+
+
+def reasoning_for(p):
+    """Скільки моделі «думати» перед відповіддю. Менше — відповідь за 1–3 с замість 30+.
+    {ID}_REASONING: none | minimal | low | medium | high | off (не надсилати). Gemini за замовчуванням — low."""
+    if p["id"] in NO_REASONING:
+        return None
+    v = env(f"{p['id'].upper()}_REASONING", "low" if p["id"] == "gemini" else "off").strip().lower()
+    return None if v in ("", "off", "default") else v
+
+
 async def post_chat(client, p, messages, use_tools):
     o = OPTS.get() or {}
     body = {"model": p["model"], "messages": messages, "max_tokens": o.get("max_tokens", MAX_TOKENS)}
+    effort = reasoning_for(p)
+    if effort:
+        body["reasoning_effort"] = effort
     if "temperature" in o:
         body["temperature"] = o["temperature"]
     if use_tools:
@@ -1346,11 +1361,14 @@ async def post_chat(client, p, messages, use_tools):
         )
     except httpx.TimeoutException:
         count_request(p["id"], error=True)
-        raise ProviderError("timeout", f"не відповів за {int(OLLAMA_TIMEOUT if p['id'] == 'ollama_local' else REQUEST_TIMEOUT)} с", 120)
+        raise ProviderError("timeout", f"не відповів за {int(OLLAMA_TIMEOUT if p['id'] == 'ollama_local' else REQUEST_TIMEOUT)} с", 15)  # коротка пауза: наступне повідомлення вже знову спробує
     except httpx.HTTPError as e:
         count_request(p["id"], error=True)
         raise ProviderError("network", str(e) or type(e).__name__, 300 if p["id"] == "ollama_local" else 120)
     save_ratelimit(p["id"], r.headers)
+    if r.status_code == 400 and effort and "reasoning" in r.text.lower():  # модель не приймає цей рівень — без нього
+        NO_REASONING.add(p["id"])
+        return await post_chat(client, p, messages, use_tools)
     if r.status_code >= 400:
         count_request(p["id"], error=True)
         kind, cooldown = classify(r.status_code, r.text, r.headers)
@@ -1624,6 +1642,10 @@ async def _ask_llm(history, user_content, preferred=None, fallback=True, exclude
     else:
         order = ([preferred] if preferred in PROVIDERS else []) + [p for p in AUTO_ORDER if p != preferred]
     order = [p for p in order if p not in exclude] or order
+    pu = paused_until(preferred) if preferred in PROVIDERS else None
+    if pu and 0 < pu - time.time() <= 15:  # хвилинний ліміт закінчиться за секунди — краще трохи зачекати на обрану модель
+        progress_stage(f"⏳ {PROVIDERS[preferred]['title']}: ліміт за хвилину, чекаю {int(pu - time.time()) + 1} с…", 1, 3)
+        await asyncio.sleep(pu - time.time() + 0.5)
     if not order:
         raise RuntimeError("Не підключено жодної моделі: додайте хоча б один ключ (наприклад, GEMINI_API_KEY). Довідка: /help")
     ready = [p for p in order if not paused_until(p)]
@@ -1633,8 +1655,14 @@ async def _ask_llm(history, user_content, preferred=None, fallback=True, exclude
     cands = ready + (paused if fallback else [])
     for k, pid in enumerate(cands, 1):
         prev = [a for a in attempts if a[1].get("kind") != "paused"]
+        limit = int(OLLAMA_TIMEOUT if pid == "ollama_local" else REQUEST_TIMEOUT)
         progress_stage((f"↪️ {PROVIDERS[prev[-1][0]]['title']} не відповіла ({ERR_SHORT.get(prev[-1][1]['kind'], prev[-1][1]['kind'])}) — " if prev else "")
-                       + f"🤖 {PROVIDERS[pid]['title']} думає…" + (f" (спроба {k} з {len(cands)})" if k > 1 else ""), 2, 3)
+                       + f"🤖 {PROVIDERS[pid]['title']} думає… (чекаю до {limit} с"
+                       + (", далі — інша модель)" if k < len(cands) else ")") + (f" · спроба {k} з {len(cands)}" if k > 1 else ""), 2, 3)
+        if CHAT.get():
+            LIVE[CHAT.get()] = {"title": PROVIDERS[pid]["title"], "model": PROVIDERS[pid]["model"], "t0": time.time(),
+                                "limit": limit, "try": k, "of": len(cands),
+                                "prev": (PROVIDERS[prev[-1][0]]["title"] + " — " + ERR_SHORT.get(prev[-1][1]["kind"], prev[-1][1]["kind"])) if prev else ""}
         try:
             text, warnings = await ask_provider(PROVIDERS[pid], messages)
         except ProviderError as e:
@@ -1646,12 +1674,14 @@ async def _ask_llm(history, user_content, preferred=None, fallback=True, exclude
             await maybe_alert(pid, info, fails)
             continue
         mark_ok(pid)
+        LIVE.pop(CHAT.get(), None)
         attempts = [a for a in attempts if a[0] != pid]
         partial = any(w.startswith("✂️") for w in warnings)
         journal_update(jid, status="partial" if partial else "done", provider=pid, result=text[:8000],
                        attempts="\n".join(attempt_line(p, i) for p, i in attempts) or None)
         LAST_JOURNAL.set(jid)
         return text, pid, attempts, warnings + low_limit_warnings(pid)
+    LIVE.pop(CHAT.get(), None)
     journal_update(jid, status="failed", attempts="\n".join(attempt_line(p, i) for p, i in attempts))
     LAST_JOURNAL.set(jid)
     raise Unavailable(attempts)
@@ -2044,23 +2074,23 @@ CM = Community(db, lambda: [owner_id()] if owner_id() else [], tz=TZ, ai=cm_ai, 
 ITEMS = {
     "dl": ("💬 Розмови", "m:dl"),
     "tl": ("⏰ Завдання", "m:tl"),
-    "cr": ("🎨 Створити", "m:cr"),
+    "cr": ("🎨 Створення", "m:hub:cr"),
     "menu": ("☰ Меню", "m:home"),
-    "md": ("🤖 Моделі", "m:md"),
+    "md": ("🤖 Моделі", "m:hub:md"),
     "qask": ("❓ Спитати модель", "m:qask"),
-    "st": ("🎛 Поведінка", "m:st"),
-    "help": ("📖 Довідка", "help:main"),
+    "st": ("🎛 Поведінка", "m:hub:st"),
+    "help": ("❓ Допомога", "m:hub:help"),
     "voice": ("🎙 Голос", "m:voice"),
     "nt": ("📝 Нотатки", "m:nt"),
-    "pins": ("📌 Закріплені", "m:pins"),
+    "pins": ("🗂 Сховище", "m:hub:pins"),
     "arc": ("🗄 Архів", "m:box:archived"),
     "trash": ("🗑 Кошик", "m:box:trash"),
     "acc": ("👥 Доступ", "m:acc"),
     "backup": ("💾 Копії", "m:backup"),
-    "btns": ("🧭 Меню й кнопки", "m:btn"),
+    "btns": ("🧭 Вигляд", "m:hub:btns"),
     "lib": ("🖼 Мої медіа", "m:lib"),
-    "svc": ("🧩 Інтеграції", "m:svc"),
-    "diag": ("🩺 Стан бота", "m:diag"),
+    "svc": ("🔗 Зв'язки", "m:hub:svc"),
+    "diag": ("🖥 Сервер", "m:hub:diag"),
     "jrn": ("📒 Журнал", "m:jl"),
     "comm": ("🏘 Спільноти", "m:cm"),
     "prio": ("🏆 Пріоритети", "m:pr"),
@@ -2080,25 +2110,23 @@ ITEMS = {
 }
 DEFAULT_GROUPS = {
     "work": "💬 Робота",
-    "create": "🎨 Створення",
-    "ai": "🤖 Моделі та ШІ",
-    "services": "🔗 Сервіси",
+    "ai": "🤖 ШІ й створення",
     "settings": "⚙️ Налаштування",
     "plugins": "📰 Медіа",
 }
 DEFAULT_LAYOUT = [
-    ["g:work", "home"], ["g:plugins", "home"], ["g:create", "home"], ["g:ai", "home"],
-    ["g:services", "home"], ["g:settings", "home"],
-    ["dl", "g:work"], ["tl", "g:work"], ["nt", "g:work"], ["pins", "g:work"],
-    ["arc", "g:work"], ["jrn", "g:work"],
-    ["cr", "g:create"], ["lib", "g:create"], ["voice", "g:create"],
-    ["md", "g:ai"], ["qask", "g:ai"], ["prio", "g:ai"], ["partners", "g:ai"], ["ollama", "g:ai"],
-    ["svc", "g:services"], ["comm", "g:services"],
-    ["st", "g:settings"], ["acc", "g:settings"], ["backup", "g:settings"],
-    ["btns", "g:settings"], ["runmode", "g:settings"], ["links", "g:settings"], ["diag", "g:settings"], ["trash", "g:settings"],
-    ["help", "g:settings"], ["menu", "off"],
-    ["news", "g:plugins"], ["utm", "g:plugins"], ["stk", "g:plugins"], ["plg", "g:settings"], ["sbx", "g:settings"], ["imp", "g:settings"], ["inbox", "g:work"], ["hubm", "g:services"], ["app", "g:settings"],
+    ["g:work", "home"], ["g:plugins", "home"], ["g:ai", "home"], ["g:settings", "home"],
+    ["dl", "g:work"], ["tl", "g:work"], ["nt", "g:work"], ["pins", "g:work"], ["inbox", "g:work"],
+    ["news", "g:plugins"], ["utm", "g:plugins"], ["stk", "g:plugins"],
+    ["md", "g:ai"], ["cr", "g:ai"],
+    ["st", "g:settings"], ["acc", "g:settings"], ["backup", "g:settings"], ["svc", "g:settings"],
+    ["btns", "g:settings"], ["diag", "g:settings"], ["help", "g:settings"],
+    # вкладки об'єднаних розділів: окремо в меню не стоять, але відкриваються з розділу-«хаба» (і їх можна повернути в меню в «🧭 Вигляд»)
+    ["arc", "off"], ["trash", "off"], ["jrn", "off"], ["qask", "off"], ["prio", "off"], ["partners", "off"], ["ollama", "off"],
+    ["lib", "off"], ["voice", "off"], ["comm", "off"], ["hubm", "off"], ["app", "off"], ["plg", "off"],
+    ["runmode", "off"], ["links", "off"], ["sbx", "off"], ["imp", "off"], ["menu", "off"],
 ]
+
 L = Layout(ITEMS, DEFAULT_LAYOUT, DEFAULT_GROUPS, lambda c: prefs(c), lambda c, k, v: set_pref(c, k, v),
            locked={"st"}, admin_items={"acc", "backup", "svc", "comm", "runmode", "links", "ollama", "news", "hubm"}, is_admin=lambda c: is_admin_id(c), use_kb=False)
 
@@ -2174,6 +2202,17 @@ def _migrate_compact_menu(chat_id):
             labels.pop("plg")
             set_pref(chat_id, "labels", labels)
         set_pref(chat_id, "media_menu_v6", True)
+        p = prefs(chat_id)
+    if not p.get("merged_menu_v7"):
+        # Об'єднане меню (33 → 17 пунктів): старі розділи стали вкладками. Попереднє меню зберігаємо — його можна повернути.
+        set_pref(chat_id, "menu_before_v7", {"groups": p.get("groups"), "layout": p.get("layout"), "labels": p.get("labels")})
+        labels = {k: v for k, v in (p.get("labels") or {}).items() if k not in HUBS and k not in ("diag",)}
+        set_pref(chat_id, "groups", dict(DEFAULT_GROUPS))
+        set_pref(chat_id, "layout", [list(x) for x in DEFAULT_LAYOUT])
+        set_pref(chat_id, "labels", labels)
+        set_pref(chat_id, "no_start_group_v6", True)
+        set_pref(chat_id, "merged_menu_v7", True)
+        p = prefs(chat_id)
 
 
 def layout(chat_id):
@@ -2331,6 +2370,18 @@ async def show(update: Update, text, rows, edit=True, nav=True):
     chat = update.effective_chat.id
     rows = fold_rows(chat, rows)
     rows = L.decorate(chat, rows, nav=nav, current=L.current(chat))
+    if not HUB_BUILDING.get():
+        hc = prefs(chat).get("hub_ctx")
+        sd = SCREEN.get() or ""
+        if hc and hc.get("key") in HUBS and not sd.startswith("m:hub:"):
+            if not is_view(sd) and _title_key(text) in hc.get("titles", []):
+                # дія всередині об'єднаного розділу (перемикач, вибір) — лишаємось на ньому, а не на старому окремому екрані
+                text, rows = await scr_hub(chat, hc["key"])
+                SCREEN.set(f"m:hub:{hc['key']}")
+            elif is_view(sd):
+                set_pref(chat, "hub_ctx", None)
+    if SCREEN.get() == "m:btn" and prefs(chat).get("menu_before_v7"):
+        rows = [list(r) for r in rows] + [[("↩️ Меню, як було до об'єднання", "m:menuold")]]
     wk = why_key(SCREEN.get())
     if wk and not any(d.startswith("m:why:") for r in rows for _, d in r):  # «❔ Що це» — пояснення розділу
         rows = [list(r) for r in rows] or [[]]
@@ -2656,7 +2707,7 @@ MODEL_MODES = [("all", "🔁 Авто: усі"), ("pool", "🎯 Авто: обр
 MODEL_MODE_HINT = {
     "all": "Бот сам бере першу модель, що працює, і перемикається на наступну, коли та впирається в ліміт чи збоїть.",
     "pool": "Бот перемикається лише між позначеними ☑️ моделями. Торкніться моделі, щоб додати її або прибрати.",
-    "one": "Відповідає лише обрана модель. Якщо вона не може — бот скаже про це й запропонує іншу. Торкніться моделі, щоб обрати.",
+    "one": "Відповідає обрана модель. Якщо вона на паузі чи збоїть — одразу відповідає інша, і під відповіддю видно чому. «🔒 Лише вона» — без підміни. Торкніться моделі, щоб обрати.",
 }
 
 
@@ -2685,6 +2736,9 @@ def scr_models(chat_id):
         return "● " if (mode == "one" and p == cur) else ""
     rows += pairs([(mark(p) + f"{provider_icon(p)} {PROVIDERS[p]['title']}"
                     + (f" · {left(paused_until(p))}" if paused_until(p) else ""), f"m:pick:{p}") for p in PROVIDERS])
+    if mode == "one":
+        strict = prefs(chat_id).get("strict_model", False)
+        rows.append([(("🔒 Лише вона: так" if strict else "🔓 Лише вона: ні — підміняти, якщо не може"), "m:mstrict")])
     rows.append([("🩺 Перевірити моделі", "m:mdtest"), ("📊 Ліміти", "m:lim"), ("ℹ️", "help:models")])
     if is_admin_id(chat_id):
         rows.append([("🧩 Мої моделі · " + str(len(custom_rows())), "m:cpl"), ("➕ Додати модель", "m:cpnew")])
@@ -3894,6 +3948,16 @@ class Progress:
             await self.bot.send_message(self.chat_id, f"🛑 Зупинено через {sec} с: {self.title}.\nЗапит лишився в 📒 Журналі — його можна виконати знову.")
             return True  # зупинку обробили — далі не пробрасываємо
         return False
+
+
+LIVE = {}  # chat -> яка модель зараз думає: для «Думаю…» у застосунку
+
+
+def live_info(chat_id):
+    v = LIVE.get(chat_id)
+    if not v:
+        return None
+    return {**v, "sec": int(time.time() - v["t0"])}
 
 
 def progress_stage(text, step=None, of=None):
@@ -5544,7 +5608,7 @@ async def finish_wizard(update, ctx, chat_id):
 
 EDITOR_ACTIONS = {"btn", "bi", "bmv", "bup", "bdn", "bset", "lren", "lunren", "bgnew", "bgdel", "brl", "brldel", "breset"}
 VIEW_ACTIONS = {"appm", "sbx", "imp", "home", "dl", "d", "f", "tl", "t", "md", "lim", "st", "nt", "cr", "canva", "pins", "box", "it", "acc",
-                "mem", "mdl", "mdv", "btn", "bi", "brl", "voice", "cpl", "cp", "bk", "fr", "svc", "sv", "svls", "diag", "jl", "j", "bks", "bkt", "bkls", "bkrs", "bkfmt", "bkscope", "lib", "mi", "note", "bl", "pr", "pri", "backup", "qask", "rm", "rw", "cl", "why", "mdtest"}
+                "mem", "mdl", "mdv", "btn", "bi", "brl", "voice", "cpl", "cp", "bk", "fr", "svc", "sv", "svls", "diag", "jl", "j", "bks", "bkt", "bkls", "bkrs", "bkfmt", "bkscope", "lib", "mi", "note", "bl", "pr", "pri", "backup", "qask", "rm", "rw", "cl", "why", "mdtest", "hub"}
 
 
 def is_view(data):
@@ -5562,12 +5626,120 @@ def is_view(data):
 SCREEN = contextvars.ContextVar("screen", default="")
 
 
+# ---------------------------------------------------------------- об'єднані розділи
+# Один екран збирає кілька колишніх розділів: коротко найважливіше з кожного й їхні кнопки прямо тут.
+# (заголовок частини, екран-джерело, скільки рядків тексту показати, кнопки: "all" — усі, "open" — одна «відкрити»)
+HUBS = {
+    "pins": ("🗂 Сховище", "Усе відкладене в одному місці: закріплене, архів і кошик.", [
+        ("📌 Закріплене", "m:pins", 6, "all"),
+        ("🗄 Архів — прибране з очей", "m:box:archived", 2, "all"),
+        ("🗑 Кошик — 30 днів до видалення", "m:box:trash", 2, "all"),
+    ]),
+    "md": ("🤖 Моделі", "Хто відповідає, чи всі моделі працюють, черговість і своя модель.", [
+        ("🤖 Хто відповідає", "m:md", 6, "all"),
+        ("🩺 Стан моделей", "m:mdtest:show", 30, "all"),
+        ("❓ Спитати одну модель", "m:qask", 1, "all"),
+        ("🏆 Черговість запитів", "m:pr", 1, "open"),
+        ("🤝 Інші боти й ШІ", "m:pr:b", 0, "open"),
+        ("🦙 Своя модель Ollama", "m:ol", 2, "open"),
+    ]),
+    "cr": ("🎨 Створення", "Картинки, слайдшоу, музика й дизайн — і все, що вже створено.", [
+        ("🎨 Створити", "m:cr", 3, "all"),
+        ("🖼 Мої медіа", "m:lib", 1, "open"),
+    ]),
+    "st": ("🎛 Поведінка", "Як ШІ відповідає: пам'ять, стиль, довжина — і голос.", [
+        ("🧠 Відповіді", "m:st", 40, "all"),
+        ("🎙 Голос", "m:voice", 6, "all"),
+    ]),
+    "svc": ("🔗 Зв'язки", "Куди бот надсилає записи, де працює і з якими ботами.", [
+        ("🧩 Сервіси для завдань і нотаток", "m:svc", 14, "all"),
+        ("🏘 Групи й канали", "m:cm", 2, "all"),
+        ("🧭 Мої боти", "m:pl:hub", 3, "open"),
+    ]),
+    "btns": ("🧭 Вигляд", "Як виглядає бот: меню, застосунок і модулі.", [
+        ("🧭 Меню й кнопки", "m:btn", 1, "open"),
+        ("📱 Чат і застосунок", "m:appm", 3, "all"),
+        ("🔌 Модулі (плагіни)", "m:pl", 14, "all"),
+    ]),
+    "diag": ("🖥 Сервер", "Стан бота, режим роботи сервера, журнал і корисні посилання.", [
+        ("🩺 Стан", "m:diag", 9, "open"),
+        ("⚡ Режим роботи", "m:rm", 2, "all"),
+        ("📒 Журнал запитів", "m:jl", 1, "open"),
+        ("🔗 Посилання", "m:lnk", 0, "all"),
+    ]),
+    "help": ("❓ Допомога", "Довідка, безпечна пісочниця й список того, що покращити.", [
+        ("📖 Довідка: усі теми з прикладами", "help:main", 0, "open"),
+        ("🧪 Пісочниця", "m:sbx", 2, "all"),
+        ("💡 Покращити", "m:imp", 2, "all"),
+    ]),
+}
+HUB_BUILDING = contextvars.ContextVar("hub_building", default=False)
+
+
+def _title_key(text):
+    t = re.sub(r"<[^>]+>", "", (text or "").split("\n")[0])
+    return re.sub(r"[\d·()]+", "", t).strip()
+
+
+def _cut_html(body, n):
+    """Перші n непорожніх рядків тексту; якщо обрізали посеред тегів — без тегів."""
+    lines = [l for l in body.split("\n")]
+    out, k = [], 0
+    for l in lines:
+        if k >= n:
+            break
+        out.append(l)
+        k += 1 if l.strip() else 0
+    t = "\n".join(out).strip()
+    if t.count("<b>") != t.count("</b>") or t.count("<i>") != t.count("</i>") or t.count("<code>") != t.count("</code>"):
+        t = re.sub(r"<[^>]+>", "", t)
+    return t + ("…" if k >= n and len(lines) > len(out) else "")
+
+
+async def scr_hub(chat_id, key):
+    """Об'єднаний розділ: короткий підсумок кожної частини + її кнопки на одному екрані."""
+    import miniapp
+    title, intro, parts = HUBS[key]
+    blocks, rows, seen, titles = [], [], {f"m:hub:{key}"}, []
+    tok = HUB_BUILDING.set(True)
+    try:
+        for head, data, nlines, mode in parts:
+            r = await miniapp.run(sys.modules[__name__], chat_id, "screen", data)
+            text = r.get("text") or ""
+            titles.append(_title_key(text))
+            body = "\n".join(text.split("\n")[1:]).strip()
+            seen.add(data.replace(":show", ""))
+            blocks.append(f"<b>{head}</b>" + (("\n" + _cut_html(body, nlines)) if body and nlines else ""))
+            if mode == "open":
+                rows.append([(f"{head} ›", data)])
+                continue
+            part = []
+            for row in r.get("rows") or []:
+                rr = [(t, d) for t, d in row if d not in seen and not d.startswith(("m:why", "help:g", "m:hub:"))
+                      and not t.startswith(("«", "◀️", "ℹ️", "▶️ Відкрити")) and t.strip() not in ("ℹ️",)]
+                seen.update(d for _, d in rr)
+                if rr:
+                    part.append(rr)
+            if part:
+                rows.append([(f"— {head} —", "m:noop")])
+                rows += part
+    finally:
+        HUB_BUILDING.reset(tok)
+    set_pref(chat_id, "hub_ctx", {"key": key, "titles": [t for t in titles if t]})
+    text = f"<b>{title}</b>\n<i>{intro}</i>\n\n" + "\n\n".join(blocks)
+    if len(text) > 4000:
+        text = text[:3990] + "…"
+    return text, rows[:90]
+
+
 def why_key(data):
     """Ключ пояснення (explain.E) для екрана розділу меню, якщо воно є."""
     import explain
     for k, (_, target) in ITEMS.items():
         if target == data and k in explain.E:
             return k
+    if data.startswith("m:hub:") and data[6:] in explain.E:
+        return data[6:]
     if data.startswith("m:grp:") and "g:" + data[6:] in explain.E:
         return "g:" + data[6:]
     return None
@@ -5618,6 +5790,15 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         AWAIT.pop(chat_id, None)
         screen = scr_home(chat_id)
     elif a == "home":
+        screen = scr_home(chat_id)
+    elif a == "hub" and arg in HUBS:
+        screen = await scr_hub(chat_id, arg)
+    elif a == "menuold":  # повернути меню, як було до об'єднання розділів (вкладки в об'єднаних розділах лишаються)
+        old = prefs(chat_id).get("menu_before_v7") or {}
+        for k in ("groups", "layout", "labels"):
+            if old.get(k) is not None:
+                set_pref(chat_id, k, old[k])
+        toast = "Меню повернуто, як було до об'єднання"
         screen = scr_home(chat_id)
     elif a == "why" and arg:
         import explain
@@ -5871,6 +6052,10 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
     # моделі, ліміти, налаштування
     elif a == "md":
         screen = scr_models(chat_id)
+    elif a == "mstrict":
+        set_pref(chat_id, "strict_model", not prefs(chat_id).get("strict_model", False))
+        toast = "Лише обрана модель" if prefs(chat_id)["strict_model"] else "Якщо обрана не може — відповість інша"
+        screen = scr_models(chat_id)
     elif a == "mmode":  # 🔁 усі · 🎯 обрані · ✋ одна
         if arg in ("all", "pool"):
             set_choice(chat_id, "auto")
@@ -5897,7 +6082,7 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
                 toast += f" (зараз на паузі до {hhmm(paused_until(arg))})"
         screen = scr_models(chat_id)
     elif a == "mdtest":  # 🩺 перевірка: кожній моделі — коротке питання, і пояснення, якщо не відповіла
-        if arg == "go" or not kv_get("mdtest"):
+        if arg == "go" or (arg != "show" and not kv_get("mdtest")):
             if q:
                 try:
                     await q.answer("Перевіряю моделі… до 30 секунд")
@@ -7223,7 +7408,9 @@ async def _answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE, content, histo
     msg_id = save_message(chat_id, "user", history_text, dialog_id=did)
     try:
         text, pid, attempts, warnings = await ask_llm(
-            load_history(chat_id, before_id=msg_id, dialog_id=did), content, preferred, fallback=preferred is None
+            load_history(chat_id, before_id=msg_id, dialog_id=did), content, preferred,
+            # обрана модель не може (пауза, ліміт, збій) — відповідає інша, а під відповіддю видно, чому; «🔒 Лише вона» — без підміни
+            fallback=preferred is None or not prefs(chat_id).get("strict_model", False)
         )
     except RuntimeError as e:
         set_msg(msg_id, in_context=0)
@@ -8374,6 +8561,8 @@ async def main():
                 rows = L.decorate(uid, res["rows"], nav=True, current=data)
                 await tg_app.bot.send_message(uid, res["text"][:4096], parse_mode=ParseMode.HTML, reply_markup=kb(rows), link_preview_options=NO_PREVIEW)
             return _Resp(json.dumps({"ok": True}), media_type="application/json")
+        if op == "progress":  # «Думаю…» у застосунку: яка модель, скільки думає й скільки їй відведено
+            return _Resp(json.dumps(live_info(uid) or {}, ensure_ascii=False), media_type="application/json")
         if op == "tabs":  # ☰ → «✏️ Панель унизу»: які кнопки показувати внизу застосунку
             res = _mini.save_tabs(sys.modules[__name__], uid, body.get("tabs"))
             return _Resp(json.dumps(res, ensure_ascii=False), media_type="application/json")
