@@ -201,11 +201,37 @@ def history(B, uid, limit=40):
     return {"dialog": title, "messages": [{"role": r["role"], "text": r["text"][:6000], "provider": r["provider"] or "", "ts": r["ts"]} for r in rows[::-1]]}
 
 
+def menu(B, uid):
+    """Меню для застосунку: усі розділи одразу розгорнуті (без ▼/▲ і зайвих запитів), з тими ж назвами й порядком, що в чаті."""
+    from uilayout import PLACE_HOME
+    L = B.L
+
+    def items(place, path):
+        own, subs = [], []
+        for i in L.in_place(uid, place):
+            if i.startswith("g:"):
+                subs += items(i, path + [L.label(uid, i)])
+            elif i not in ("menu", "app"):
+                own.append({"label": L.label(uid, i), "data": L.target(i)})
+        return ([{"title": " › ".join(path), "items": own}] if own else []) + subs
+
+    sections = items(PLACE_HOME, [])
+    if sections and not sections[0]["title"]:
+        sections[0]["title"] = "Швидкий доступ"
+    d = B.dialog_get(B.current_dialog(uid))
+    info = [("💬", "Розмова", d["title"], "m:dl"),
+            ("🤖", "Відповідає", B.choice_label(B.get_choice(uid)), "m:md"),
+            ("⏰", "Завдань", str(len(B.tasks_open(chat_id=uid))), "m:tl")]
+    return {"menu": True, "info": [{"icon": a, "label": b, "value": c, "data": e} for a, b, c, e in info], "sections": sections}
+
+
 async def run(bot_module, uid, op, data=None, text=None, user=None, file=None):
     """op: screen | text | say | file | history. -> {"text", "rows", "toast", "notes", "awaiting", "replies"}"""
     B = bot_module
     if op == "history":
         return history(B, uid)
+    if op == "menu":
+        return menu(B, uid)
     sink = _Sink()
     token = CAPTURE.set(sink)
     tbot = B.tg_app.bot if B.tg_app else None

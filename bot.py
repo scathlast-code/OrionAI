@@ -8190,7 +8190,7 @@ async def main():
                 rows = L.decorate(uid, res["rows"], nav=True, current=data)
                 await tg_app.bot.send_message(uid, res["text"][:4096], parse_mode=ParseMode.HTML, reply_markup=kb(rows), link_preview_options=NO_PREVIEW)
             return _Resp(json.dumps({"ok": True}), media_type="application/json")
-        if op in ("say", "file", "history"):
+        if op in ("say", "file", "history", "menu"):
             f = None
             if op == "file":
                 raw = base64.b64decode(str(body.get("b64") or ""), validate=False)
