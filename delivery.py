@@ -19,7 +19,40 @@ def split_paragraphs(text,limit=MAX_CHARS):
     if part: result.append(part)
     return result or ['']
 
-async def send(bot,chat_id,text,**kw):
+def _u16(s):
+    return len(s.encode('utf-16-le'))//2
+
+
+def _tech_entities(payload, head, foot):
+    """Технічний текст (хто відповів, спроби, заголовок завдання) — у сірій цитаті курсивом, щоб відповідь ШІ не губилася."""
+    from telegram import MessageEntity
+    ents=[]
+    if head:
+        h=head.rstrip('\n')
+        ents+=[MessageEntity(MessageEntity.BLOCKQUOTE,0,_u16(h)),MessageEntity(MessageEntity.ITALIC,0,_u16(h))]
+    if foot:
+        off=_u16(payload)-_u16(foot)
+        kind=MessageEntity.EXPANDABLE_BLOCKQUOTE if foot.count('\n')>=2 else MessageEntity.BLOCKQUOTE
+        ents+=[MessageEntity(kind,off,_u16(foot)),MessageEntity(MessageEntity.ITALIC,off,_u16(foot))]
+    return ents
+
+
+async def send(bot,chat_id,text,head='',foot='',**kw):
+    """head/foot — технічні рядки над і під відповіддю ШІ: показуються окремо, у цитаті."""
+    if head or foot:
+        if 'parse_mode' in kw or len(split_paragraphs(head+text+('\n\n'+foot if foot else '')))>1:
+            text=head+text+('\n\n'+foot if foot else '')   # довге або HTML — як раніше, одним текстом
+        else:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            payload=head+text+('\n\n'+foot if foot else '')
+            local_kw=dict(kw)
+            local_kw.setdefault('reply_markup',InlineKeyboardMarkup([[InlineKeyboardButton('🧹 Чистий текст',callback_data='view:toggle')]]))
+            try:
+                sent=await bot.send_message(chat_id,payload,entities=_tech_entities(payload,head,foot),**local_kw)
+            except Exception:  # noqa: BLE001 — старий клієнт чи незнайомий тип цитати: просто текст
+                sent=await bot.send_message(chat_id,payload,**local_kw)
+            cleanview.store(os.getenv('DB_PATH','/data/bot.db'),chat_id,sent.message_id,payload)
+            return
     chunks=split_paragraphs(text)
     if len(chunks)>3:
         from telegram import InputFile
