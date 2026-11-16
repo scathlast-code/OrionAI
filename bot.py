@@ -5497,7 +5497,7 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
                 "• <b>Чат</b> — швидкі дії кнопками під повідомленнями.\n"
                 "• <b>Застосунок</b> — повний екран: вкладки, картки, поле введення, зручно для довгих списків.\n\n"
                 "Із чату в застосунок — синя кнопка ліворуч від поля вводу або «🧩 Відкрити в застосунку».\n"
-                "Із застосунку в чат — «💬 Продовжити в чаті»: бот надішле той самий екран сюди.\n\n"
+                "Із застосунку в чат — «↗ Чат-бот»: бот надішле той самий екран сюди.\n\n"
                 + (f"Адреса застосунку: {esc(url)}" if url else "⚠️ Застосунку потрібна HTTPS-адреса бота. Railway: сервіс → Settings → Networking → Generate Domain, потім Redeploy. Свій сервер: PUBLIC_URL у .env (docs/03-server.md)."))
         rows = []
         if url:
@@ -8190,7 +8190,7 @@ async def main():
                 rows = L.decorate(uid, res["rows"], nav=True, current=data)
                 await tg_app.bot.send_message(uid, res["text"][:4096], parse_mode=ParseMode.HTML, reply_markup=kb(rows), link_preview_options=NO_PREVIEW)
             return _Resp(json.dumps({"ok": True}), media_type="application/json")
-        if op in ("say", "file", "history"):
+        if op in ("say", "file", "history", "menu"):
             f = None
             if op == "file":
                 raw = base64.b64decode(str(body.get("b64") or ""), validate=False)

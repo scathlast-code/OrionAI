@@ -53,6 +53,14 @@ body.marking .cell,body.marking .seg button,body.marking .card{outline:1.5px das
 .composer .send{background:var(--acc);color:var(--acct)}
 .typing{color:var(--hint);font-size:13px;margin:6px 2px}
 .empty{text-align:center;color:var(--hint);padding:50px 10px}
+.search{width:100%;border:0;border-radius:12px;background:var(--card);color:var(--txt);padding:11px 14px;font:inherit;margin:0 0 14px}
+.sec{color:var(--hint);font-size:13px;text-transform:uppercase;letter-spacing:.4px;margin:18px 4px 8px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;margin:0 0 6px}
+.tile{border:0;background:var(--card);color:var(--txt);border-radius:14px;padding:12px;display:flex;align-items:center;gap:10px;font:inherit;font-size:14.5px;text-align:left;cursor:pointer;min-height:54px}
+.tile .em{font-size:20px;flex:none}.tile:active{transform:scale(.97);background:color-mix(in srgb,var(--hint) 14%,var(--card))}
+.info{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:0 0 4px}
+.info button{border:0;background:var(--card);color:var(--txt);border-radius:14px;padding:10px;font:inherit;text-align:left;cursor:pointer;min-width:0}
+.info small{display:block;color:var(--hint);font-size:12px}.info b{display:block;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 </style>
 </head>
 <body>
@@ -66,9 +74,9 @@ body.marking .cell,body.marking .seg button,body.marking .card{outline:1.5px das
 const TG = window.Telegram && Telegram.WebApp;
 const init = TG && TG.initData;
 const API = new URL('app/api', location.href.replace(/app\/?(#.*)?$/, '')).href;
-const TABS = [['chat','💬','Розмова'],['m:pl:news','📰','Ньюзрум'],['m:pl:inb','📮','Скринька'],['m:pl:stk','🧷','Стікери'],['m:home','☰','Меню']];
-const HASH = {chat:'chat', menu:'m:home', news:'m:pl:news', inbox:'m:pl:inb', stk:'m:pl:stk', lists:'m:pl:news:L', find:'m:pl:news:D'};
-let hist = [], cur = null, marking = false, busy = false;
+const TABS = [['chat','💬','Розмова'],['m:pl:news','📰','Ньюзрум'],['m:pl:inb','📮','Скринька'],['m:pl:stk','🧷','Стікери'],['menu','☰','Меню']];
+const HASH = {chat:'chat', menu:'menu', news:'m:pl:news', inbox:'m:pl:inb', stk:'m:pl:stk', lists:'m:pl:news:L', find:'m:pl:news:D'};
+let hist = [], cur = null, marking = false, busy = false, seq = 0, menuCache = null;
 
 function toast(t){const e=document.getElementById('toast');e.textContent=t;e.classList.add('on');clearTimeout(toast.t);toast.t=setTimeout(()=>e.classList.remove('on'),2600)}
 function haptic(k){try{TG.HapticFeedback.impactOccurred(k||'light')}catch(_){}}
@@ -91,19 +99,21 @@ async function call(op, data, extra){
     if(r.status===403){render({text:'<b>Немає доступу</b>\nЦей застосунок відкривається лише для учасників бота.',rows:[]},true);return null}
     if(!r.ok){toast('Помилка API: HTTP '+r.status);return null}
     return await r.json()}catch(e){toast(e instanceof SyntaxError?'Некоректна відповідь сервера':'Сервер API недоступний');return null}finally{busy=false}}
+function loading(){const m=document.getElementById('main');m.innerHTML='<div class="skel"></div><div class="skel"></div><div class="skel"></div>';const c=document.getElementById('composer');if(c)c.style.display='none'}
 async function open_(data, push=true){
-  if(busy) return; const res=await call('screen',data); if(!res) return;
-  if(!res.text){ if(res.toast) toast(res.toast); for(const n of res.notes||[]) toast(n); return }
-  if(push && cur && cur!==data) hist.push(cur); cur=data; render(res); syncBack();
+  const my=++seq; if(push && cur && cur!==data) hist.push(cur); cur=data; tabs(); syncBack(); loading();
+  const res=await call('screen',data); if(my!==seq||!res) return;
+  if(!res.text){ if(res.toast) toast(res.toast); for(const n of res.notes||[]) toast(n); if(hist.length) back(); return }
+  render(res);
 }
 async function openChat(push=true){
-  if(push && cur && cur!=='chat') hist.push(cur); cur='chat'; syncBack();
-  const res=await call('history','chat'); if(!res) return; renderChat(res);
+  const my=++seq; if(push && cur && cur!=='chat') hist.push(cur); cur='chat'; syncBack();
+  const res=await call('history','chat'); if(my!==seq||!res) return; renderChat(res);
 }
 function renderChat(res, typing){
   const main=document.getElementById('main'); main.innerHTML='';
   const top=document.createElement('div');top.className='top';top.innerHTML='<h1></h1>';top.querySelector('h1').textContent='💬 '+(res.dialog||'Розмова');
-  const chat=document.createElement('button');chat.className='ic pill';chat.textContent='↗ Чат';chat.title='Продовжити в чаті з ботом';chat.onclick=toChat;top.appendChild(chat);main.appendChild(top);
+  const chat=document.createElement('button');chat.className='ic pill';chat.textContent='↗ Чат-бот';chat.title='Продовжити в чаті з ботом';chat.onclick=toChat;top.appendChild(chat);main.appendChild(top);
   const sub=document.createElement('div');sub.className='sub';sub.textContent='Та сама розмова, що й у чаті з ботом: пишіть тут або там — історія спільна.';main.appendChild(sub);
   for(const m of res.messages||[]){const b=document.createElement('div');b.className='bub '+(m.role==='user'?'user':'assistant');b.textContent=m.text;
     if(m.provider){const sm=document.createElement('small');sm.textContent=m.provider;b.appendChild(sm)}main.appendChild(b)}
@@ -140,7 +150,7 @@ function render(res, bare){
   const p=rest.split('\n\n'); if(p.length>1 && p[0].length<160 && !/<b>/.test(p[0])){sub=p.shift();rest=p.join('\n\n')}
   const top=document.createElement('div');top.className='top';top.innerHTML='<h1></h1>';top.querySelector('h1').textContent=title||'OrionAI';
   if(!bare){
-    const chat=document.createElement('button');chat.className='ic pill';chat.title='Продовжити цей екран у чаті з ботом';chat.textContent='↗ Чат';chat.onclick=toChat;
+    const chat=document.createElement('button');chat.className='ic pill';chat.title='Продовжити цей екран у чаті з ботом';chat.textContent='↗ Чат-бот';chat.onclick=toChat;
     const imp=document.createElement('button');imp.className='ic'+(marking?' on':'');imp.title='Позначити для «Покращити»';imp.textContent='💡';imp.onclick=()=>{marking=!marking;document.body.classList.toggle('marking',marking);imp.classList.toggle('on',marking);if(marking)toast('💡 Торкніться того, що треба покращити')};
     top.append(imp,chat)}
   main.appendChild(top);
@@ -154,6 +164,7 @@ function render(res, bare){
       for(const [t,d] of row){const b=document.createElement('button');const s=split(t);b.textContent=(t.startsWith('● ')?t.slice(2):t);if(t.startsWith('● '))b.className='sel';b.onclick=()=>press(t,d);g.appendChild(b)}
       main.appendChild(g);continue}
     for(const [t,d] of row){
+      if(/^(◀️|⬅️|🔙)\s*Назад$/.test(t)) continue;
       if(!list){list=document.createElement('div');list.className='list';main.appendChild(list)}
       const s=split(t);const b=document.createElement('button');b.className='cell'+(/^🗑|видалити/i.test(t)?' danger':'');
       b.innerHTML='<span class="em"></span><span class="lb"></span>'+(s.badge?'<span class="badge"></span>':'')+'<span class="chev">›</span>';
@@ -166,16 +177,43 @@ function render(res, bare){
   if(res.awaiting) askInput(res.text);
   tabs(); window.scrollTo(0,0);
 }
+async function openMenu(push=true){
+  const my=++seq; if(push && cur && cur!=='menu') hist.push(cur); cur='menu'; syncBack();
+  if(menuCache) renderMenu(menuCache); else {tabs();loading()}
+  const res=await call('menu','m:home'); if(my!==seq||!res) return; menuCache=res; renderMenu(res);
+}
+function renderMenu(res){
+  const main=document.getElementById('main'); const q=(document.getElementById('msearch')||{}).value||'';
+  main.innerHTML=''; main.style.paddingBottom=''; const comp=document.getElementById('composer'); if(comp) comp.style.display='none';
+  const top=document.createElement('div');top.className='top';top.innerHTML='<h1>☰ Меню</h1>';main.appendChild(top);
+  const info=document.createElement('div');info.className='info';
+  for(const it of res.info||[]){const b=document.createElement('button');b.innerHTML='<small></small><b></b>';b.querySelector('small').textContent=it.icon+' '+it.label;b.querySelector('b').textContent=it.value;b.onclick=()=>press(it.label,it.data);info.appendChild(b)}
+  main.appendChild(info);
+  const s=document.createElement('input');s.id='msearch';s.className='search';s.placeholder='🔍 Пошук розділу';s.value=q;s.style.marginTop='14px';main.appendChild(s);
+  const body=document.createElement('div');main.appendChild(body);
+  const draw=()=>{body.innerHTML='';const f=s.value.trim().toLowerCase();let n=0;
+    for(const sec of res.sections||[]){const its=sec.items.filter(i=>!f||i.label.toLowerCase().includes(f)||sec.title.toLowerCase().includes(f));if(!its.length)continue;
+      const h=document.createElement('div');h.className='sec';h.textContent=sec.title;body.appendChild(h);
+      const g=document.createElement('div');g.className='grid';
+      for(const it of its){n++;const sp=split(it.label);const b=document.createElement('button');b.className='tile';b.innerHTML='<span class="em"></span><span></span>';
+        b.children[0].textContent=sp.icon||'•';b.children[1].textContent=sp.rest;b.onclick=()=>press(it.label,it.data);g.appendChild(b)}
+      body.appendChild(g)}
+    if(!n){const e=document.createElement('div');e.className='empty';e.textContent='Нічого не знайдено';body.appendChild(e)}};
+  s.oninput=draw; draw(); tabs();
+}
+function back(){if(!hist.length)return;const h=hist.pop();h==='chat'?openChat(false):h==='menu'?openMenu(false):open_(h,false)}
 function tabs(){const n=document.getElementById('tabs');n.innerHTML='';
   const active=TABS.find(([d])=>cur&&(cur===d||cur.startsWith(d+':')))||TABS[4];
   for(const tb of TABS){const b=document.createElement('button');b.className=tb===active?'on':'';b.innerHTML='<span>'+tb[1]+'</span>'+tb[2];
-    b.onclick=()=>{haptic();hist=[];cur=null;tb[0]==='chat'?openChat(false):open_(tb[0])};n.appendChild(b)}}
+    b.onclick=()=>{haptic();hist=[];cur=null;tb[0]==='chat'?openChat(false):tb[0]==='menu'?openMenu(false):open_(tb[0],false)};n.appendChild(b)}}
 function press(label, d){
   if(marking){mark('кнопка «'+label+'»',d,'');return}
   haptic();
   if(d.startsWith('url:')){try{TG.openLink(d.slice(4))}catch(_){window.open(d.slice(4))}return}
   if(d.startsWith('app:')){toast('Ви вже в застосунку');return}
   if(d==='m:cancel'){cancelInput();return}
+  if(d==='m:home'){openMenu();return}
+  if(!/^(m:|help:)/.test(d)){toast('Це доступно в чаті з ботом');return}
   open_(d);
 }
 function askInput(text, mode){document.getElementById('sheetmode').value=mode||'text';document.getElementById('sheetq').innerHTML=sanitize((text||'').split('\n').slice(0,3).join('\n'));document.getElementById('sheett').value='';document.getElementById('sheet').classList.add('on');setTimeout(()=>document.getElementById('sheett').focus(),250)}
@@ -183,7 +221,7 @@ async function sendInput(){const t=document.getElementById('sheett').value.trim(
   if(document.getElementById('sheetmode').value==='mark'){document.getElementById('sheet').classList.remove('on');return saveMark(t)}
   if(!t)return;document.getElementById('sheet').classList.remove('on');
   const res=await call('text',cur,{text:t});if(!res)return;if(res.text){render(res)}else{for(const n of res.notes||[])toast(n);if(res.toast)toast(res.toast)}}
-async function cancelInput(){const m=document.getElementById('sheetmode').value;document.getElementById('sheet').classList.remove('on');if(m==='mark'){pending=null;return}await call('screen','m:cancel');if(hist.length){open_(hist.pop(),false)}}
+async function cancelInput(){const m=document.getElementById('sheetmode').value;document.getElementById('sheet').classList.remove('on');if(m==='mark'){pending=null;return}await call('screen','m:cancel');back()}
 async function toChat(){haptic('medium');await call('tochat',(cur&&cur!=='chat')?cur:'m:home');toast('💬 Екран надіслано в чат');setTimeout(()=>{try{TG.close()}catch(_){}} ,350)}
 let pending=null;
 function mark(target, action, excerpt){
@@ -196,12 +234,12 @@ async function saveMark(note){
   try{const r=await fetch(new URL('improve',API.replace(/app\/api$/,'')).href,{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({initData:init,marks:[m]})});toast(r.ok?'💡 Додано в «Покращити»':'Не вдалося зберегти')}catch(_){toast('Не вдалося зберегти')}
 }
-if(TG){TG.ready();TG.expand();try{TG.BackButton.onClick(()=>{if(hist.length){const h=hist.pop();h==='chat'?openChat(false):open_(h,false)}})}catch(_){}}
+if(TG){TG.ready();TG.expand();try{TG.BackButton.onClick(back)}catch(_){}}
 (function start(){
   if(TG && TG.isVersionAtLeast && !TG.isVersionAtLeast('6.1')){
     render({text:'<b>Цей Telegram не підтримує застосунок</b>\nУсе те саме доступне в чаті з ботом кнопками. Оновіть Telegram, щоб користуватись і застосунком.',rows:[]},true);return}
   const first=HASH[(location.hash||'').slice(1)]||(TG&&TG.initDataUnsafe&&HASH[TG.initDataUnsafe.start_param])||'m:pl:news';
-  first==='chat'?openChat(false):open_(first,false);
+  first==='chat'?openChat(false):first==='menu'?openMenu(false):open_(first,false);
 })();
 </script>
 </body>
