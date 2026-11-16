@@ -299,7 +299,12 @@ async def run(bot_module, uid, op, data=None, text=None, user=None, file=None):
     replies = [t for t in (capbot.msgs.values() if capbot else []) if t and not t.startswith(("⏳", "🕒", "💭"))]
     import button_hints
     rows = clean_rows(rows)
-    return {"text": text_out, "rows": rows, "hints": button_hints.for_rows(rows), "toast": sink.toast, "notes": sink.notes[-5:], "awaiting": uid in B.AWAIT,
+    secs = getattr(B, "HUB_LAST", {}).pop(uid, None) if op == "screen" else None
+    if secs:  # об'єднаний розділ — частинами, щоб кожну можна було згорнути
+        for sec in secs:
+            sec["rows"] = clean_rows([[(t, d) for t, d in r if d != "m:noop"] for r in sec["rows"]])
+            sec["hints"] = button_hints.for_rows(sec["rows"])
+    return {"text": text_out, "rows": rows, "hints": button_hints.for_rows(rows), "sections": secs or None, "toast": sink.toast, "notes": sink.notes[-5:], "awaiting": uid in B.AWAIT,
             "view": bool(op == "screen" and data and B.is_view(data)),
             "replies": [re.sub(r"<[^>]+>", "", t)[:6000] for t in replies[-5:]]}
 

@@ -5703,6 +5703,7 @@ HUBS = {
     ]),
 }
 HUB_BUILDING = contextvars.ContextVar("hub_building", default=False)
+HUB_LAST = {}  # chat -> частини останнього об'єднаного екрана (для застосунку: кожна згортається окремо)
 
 
 def _title_key(text):
@@ -5729,7 +5730,7 @@ async def scr_hub(chat_id, key):
     """Об'єднаний розділ: короткий підсумок кожної частини + її кнопки на одному екрані."""
     import miniapp
     title, intro, parts = HUBS[key]
-    blocks, rows, seen, titles = [], [], {f"m:hub:{key}"}, []
+    blocks, rows, seen, titles, secs = [], [], {f"m:hub:{key}"}, [], []
     tok = HUB_BUILDING.set(True)
     try:
         for head, data, nlines, mode in parts:
@@ -5738,9 +5739,11 @@ async def scr_hub(chat_id, key):
             titles.append(_title_key(text))
             body = "\n".join(text.split("\n")[1:]).strip()
             seen.add(data.replace(":show", ""))
-            blocks.append(f"<b>{head}</b>" + (("\n" + _cut_html(body, nlines)) if body and nlines else ""))
+            short = _cut_html(body, nlines) if body and nlines else ""
+            blocks.append(f"<b>{head}</b>" + (("\n" + short) if short else ""))
             if mode == "open":
                 rows.append([(f"{head} ›", data)])
+                secs.append({"head": head, "body": short, "rows": [[("Відкрити повністю ›", data)]]})
                 continue
             part = []
             for row in r.get("rows") or []:
@@ -5749,12 +5752,14 @@ async def scr_hub(chat_id, key):
                 seen.update(d for _, d in rr)
                 if rr:
                     part.append(rr)
+            secs.append({"head": head, "body": short, "rows": part})
             if part:
                 rows.append([(f"— {head} —", "m:noop")])
                 rows += part
     finally:
         HUB_BUILDING.reset(tok)
     set_pref(chat_id, "hub_ctx", {"key": key, "titles": [t for t in titles if t]})
+    HUB_LAST[chat_id] = secs
     text = f"<b>{title}</b>\n<i>{intro}</i>\n\n" + "\n\n".join(blocks)
     if len(text) > 4000:
         text = text[:3990] + "…"
@@ -7468,6 +7473,9 @@ async def _answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE, content, histo
     head = f"💬 <b>{esc(dialog_name(did))}</b>\n" if (away or parallel) else ""
     foot = footer(pid, attempts, warnings) if show_footer else ""
     top = f"💬 «{dialog_name(did)}» · {PROVIDERS.get(pid, {}).get('title', pid)}\n\n" if head else ""
+    skipped = [PROVIDERS[p]["title"] for p, i in attempts if p in PROVIDERS and p != pid]
+    if skipped:  # відповідає не та модель, що мала б — кажемо про це одразу, над відповіддю
+        top += f"↪️ Відповідає {PROVIDERS.get(pid, {}).get('title', pid)} — {', '.join(skipped)} не відповіла\n\n"
     body = text
     if jid and any(w.startswith("✂️") for w in warnings):
         await send_long(ctx.bot, chat_id, body, head=top, foot=foot)
