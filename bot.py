@@ -1994,7 +1994,23 @@ async def deny(update: Update):
             await update.callback_query.answer()
         return await update.effective_chat.send_message(text, reply_markup=markup)
     st = member_status(update.effective_user.id)
-    if st == "pending":
+    if st in (None, "removed") and owner_id() and update.effective_user.id != owner_id():
+        # Хто натиснув «Старт» — одразу заявка власнику з кнопкою «Дати доступ». Після схвалення бот просто починає працювати.
+        user = update.effective_user
+        member_upsert(user, "pending")
+        who = esc(user.full_name) + (f" (@{esc(user.username)})" if user.username else "")
+        try:
+            await update.get_bot().send_message(
+                owner_id(), f"👥 <b>Хтось хоче користуватися ботом</b>\n{who}\nID: <code>{user.id}</code>\n\n"
+                "Натисніть «✅ Дати доступ» — бот одразу запрацює для цієї людини й привітається з нею. Нічого більше від неї не потрібно.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb([[("✅ Дати доступ", f"m:accok:{user.id}"), ("❌ Відхилити", f"m:accno:{user.id}")]]))
+        except Exception:  # noqa: BLE001
+            log.warning("не вдалося повідомити власника про заявку %s", user.id)
+        st = "pending"
+        text = ("👋 Вітаю! Це приватний бот. Я надіслав власнику заявку на ваш доступ — щойно він схвалить, "
+                "бот одразу запрацює і я вам напишу. Нічого більше робити не потрібно.")
+    elif st == "pending":
         text = "⏳ Ваш запит на доступ ще розглядається. Щойно власник підтвердить, бот напише."
     elif st == "blocked":
         text = "Доступ до бота закрито."
@@ -4268,6 +4284,68 @@ def scr_journal_item(chat_id, jid):
     return "\n".join(lines), rows
 
 
+CROSS_RE = re.compile(
+    r"(?:з|із|зі|у|в|по|для)\s+(?:сусідн\w*|інш\w*|ус\w*|вс\w*)\s+(?:чат\w*|розмов\w*)|"
+    r"(?:по|з|із|в|у)\s+(?:всьому|усьому|цілому|всього|усього|цілого)\s+проєкт\w*|(?:з|із)\s+(?:цієї\s+)?теки", re.I)
+
+
+def cross_scope(text):
+    """«бери з сусідніх чатів» / «по всьому проєкту» — розмови тієї ж теки; «з усіх чатів» — усі розмови. Без таких слів — нічого."""
+    m = CROSS_RE.search(text or "")
+    if not m:
+        return None
+    return "all" if re.search(r"\b(?:ус|вс)\w*\s+(?:чат|розмов)", m.group(0), re.I) else "folder"
+
+
+def cross_context(chat_id, did, scope, budget=12000):
+    """Короткий зміст інших розмов — лише коли ви про це попросили. Підсумок розмови, а якщо його немає — останні репліки."""
+    d = dialog_get(did) or {}
+    others = [x for x in dialogs_list(chat_id, folder_id="any" if scope == "all" else d.get("folder_id"), limit=40) if x["id"] != did]
+    if scope == "folder" and not d.get("folder_id"):
+        others = [x for x in dialogs_list(chat_id, limit=40) if x["id"] != did]
+    parts, used = [], 0
+    for x in others:
+        summary, _ = summary_get(x["id"])
+        with closing(db()) as con:
+            rows = con.execute("SELECT role, text, provider FROM messages WHERE dialog_id=? AND in_context=1 AND pending=0 ORDER BY id DESC LIMIT 12",
+                               (x["id"],)).fetchall()[::-1]
+        body = (f"Підсумок: {summary[:1500]}\n" if summary else "") + "\n".join(
+            f"{'Користувач' if r['role'] == 'user' else (PROVIDERS.get(r['provider'] or '') or CATALOG.get(r['provider'] or '') or {}).get('title', 'ШІ')}: {r['text'][:400]}" for r in rows)
+        chunk = f"### Розмова «{x['title']}»\n{body}"
+        if used + len(chunk) > budget:
+            break
+        parts.append(chunk)
+        used += len(chunk)
+    if not parts:
+        return ""
+    where = "усіх ваших розмов" if scope == "all" else "сусідніх розмов цієї теки (проєкту)"
+    return (f"Користувач дозволив узяти до уваги зміст {where}. Ось вони:\n\n" + "\n\n".join(parts)
+            + "\n\n---\nКінець вмісту інших розмов. Відповідай у поточній розмові.\n\n")
+
+
+def quote_note(quote):
+    return f"Користувач відповідає на це повідомлення:\n«{quote[:1500]}»\n\n" if quote else ""
+
+
+def dialog_branch(chat_id, src_did, upto_id=None, title=None):
+    """🌿 Гілка: нова розмова в тій самій теці з копією історії до потрібного повідомлення включно."""
+    src = dialog_get(src_did) or {}
+    new = dialog_create(chat_id, (title or ("🌿 " + (src.get("title") or "Розмова")))[:60], src.get("folder_id"))
+    with closing(db()) as con, con:
+        rows = con.execute("SELECT role, text, source, provider, ts FROM messages WHERE dialog_id=? AND in_context=1 AND pending=0 AND id<=? ORDER BY id",
+                           (src_did, upto_id or 2**62)).fetchall()[-200:]
+        con.executemany("INSERT INTO messages(chat_id, role, text, source, provider, ts, dialog_id) VALUES (?,?,?,?,?,?,?)",
+                        [(chat_id, r["role"], r["text"], r["source"], r["provider"], r["ts"], new) for r in rows])
+        s, _ = (con.execute("SELECT summary, summary_upto FROM dialogs WHERE id=?", (src_did,)).fetchone() or (None, 0))
+        if s:
+            con.execute("UPDATE dialogs SET summary=?, summary_upto=0 WHERE id=?", (s, new))
+    return new
+
+
+APP_REPLY = {}  # чат -> цитата повідомлення, на яке відповідають у застосунку
+BRANCH_RE = re.compile(r"^\s*(?:🌿|(?:нова\s+)?гілка\b|(?:у|в)\s+нов(?:ий|у)\s+(?:чат|розмову)\b)[\s:,.—-]*", re.I)
+
+
 def summary_get(dialog_id):
     with closing(db()) as con:
         r = con.execute("SELECT summary, summary_upto FROM dialogs WHERE id=?", (dialog_id,)).fetchone()
@@ -5304,14 +5382,16 @@ def _utm_state(chat_id, **kw):
     return st
 
 
-UTM_MENU = [[("📋 Реєстр за 3 дні", "m:utmreg"), ("📊 Статистика", "m:utmst")],
+UTM_MENU = [[("➕ Додати посилання", "m:utmadd")], [("📈 Кліки й переходи", "m:utmclk")], [("📋 Реєстр за 3 дні", "m:utmreg"), ("📊 Створені мітки", "m:utmst")],
             [("📗 Excel", "m:utmx"), ("📘 Word", "m:utmd")], [("🗂 Резервні формати", "m:utmres")]]
 
 
 def scr_utm(chat_id):
     text = ("🔗 <b>UTM-мітки GreenPost</b>\n"
-            "Надішліть <code>/utm посилання</code> — запропоную теги, а після вибору дам одразу всі 9 міток: Telegram (пост і сторіс), "
-            "Tumblr, Facebook (пост, історії, Reels), Threads, Instagram сторіс, Twitter/X. Кожна в окремому блоці: торкніться, щоб скопіювати.\n\n"
+            "Натисніть <b>➕ Додати посилання</b> і вставте посилання на новину — запропоную теги, а після вибору дам одразу всі 9 міток: "
+            "Telegram (пост і сторіс), Tumblr, Facebook (пост, історії, Reels), Threads, Instagram сторіс, Twitter/X. "
+            "Кожна в окремому блоці: торкніться, щоб скопіювати.\n\n"
+            "<blockquote expandable>Те саме командами:\n<code>/utm посилання</code> — з вибором тегу\n"
             "<code>/utm посилання тег</code> — одразу з вашим тегом\n"
             "<code>/utm посилання тег telegram</code> — лише один формат\n"
             "<code>/utm реєстр</code> — усі мітки за 3 дні за датами й тегами\n"
@@ -5319,7 +5399,7 @@ def scr_utm(chat_id):
             "<code>/utm excel</code> · <code>/utm word</code> — файли зі статистикою\n"
             "<code>/utm резервні</code> — YouTube, шапки профілів, коментарі\n"
             "<code>/utm clicks</code> — кліки Short.io (якщо задано SHORTIO_API_KEY)\n\n"
-            "Будова: <code>посилання?utm_content=тег&amp;utm_medium=формат&amp;utm_campaign=news&amp;utm_source=платформа</code>")
+            "Будова: <code>посилання?utm_content=тег&amp;utm_medium=формат&amp;utm_campaign=news&amp;utm_source=платформа</code></blockquote>")
     return text, [list(r) for r in UTM_MENU]
 
 
@@ -5358,8 +5438,83 @@ def scr_utm_reserve(chat_id):
     return "\n".join(lines), rows
 
 
+_CT = None
+
+
+def clicks():
+    """📈 Облік переходів за UTM-посиланнями (власні короткі посилання /r/… і Short.io)."""
+    global _CT
+    if _CT is None:
+        import clicktrack
+        _CT = clicktrack.Tracker(__import__("datadir").path("greenpost_clicks.sqlite3", "ORION_CLICKS_DB"))
+    return _CT
+
+
+async def short_links(items, tag):
+    """Короткі посилання для міток: Short.io (якщо є SHORTIO_API_KEY), інакше — власні на домені бота. {key: коротке}."""
+    import clicktrack
+    ct, out = clicks(), {}
+    sio = None
+    if os.getenv("SHORTIO_API_KEY"):
+        try:
+            from plugins.newsroom.shortio import ShortIO
+            sio = ShortIO()
+        except Exception:  # noqa: BLE001
+            sio = None
+    for key, _label, link, _ok in items:
+        base = clicktrack.base_of(link)
+        if sio:
+            try:
+                r = await sio.shorten(link)
+                ct.add_external(link, base, key, tag, r["short_url"], r["link_id"])
+                out[key] = r["short_url"]
+                continue
+            except Exception as exc:  # noqa: BLE001 — Short.io недоступний: даємо власне посилання
+                log.info("Short.io: %s", exc)
+        if public_base():
+            out[key] = f"{public_base()}/r/{ct.link_for(link, base, key, tag)}"
+    return out
+
+
+async def shortio_sync(force=False):
+    """Підтягує статистику Short.io (кліки, країни, міста, браузери, системи, джерела) для посилань за 90 днів."""
+    if not os.getenv("SHORTIO_API_KEY") or not os.getenv("SHORTIO_DOMAIN_ID"):
+        return "Short.io не підключено (потрібні SHORTIO_API_KEY і SHORTIO_DOMAIN_ID)."
+    last = float(kv_get("shortio_sync") or 0)
+    if not force and time.time() - last < 1800:
+        return ""
+    kv_set("shortio_sync", str(time.time()))
+    from plugins.newsroom.shortio import ShortIO
+    try:
+        sio = ShortIO()
+    except Exception as exc:  # noqa: BLE001
+        return str(exc)
+    ct, n = clicks(), 0
+    for link in ct.external_links()[:80]:
+        try:
+            st = await sio.link_stats(link["ext_id"])
+        except Exception as exc:  # noqa: BLE001
+            return f"Short.io: {exc}"
+        for dim, counts in st.items():
+            ct.save_external(link["code"], dim, counts)
+        n += 1
+    return f"Short.io: оновлено {n} посилань."
+
+
+async def scr_utm_clicks(chat_id, days=30):
+    import clicktrack
+    note = await shortio_sync()
+    rep = clicks().report(days=days or None)
+    text = clicktrack.report_html(rep, esc, UTM.LABELS)
+    if note and "оновлено" not in note and os.getenv("SHORTIO_API_KEY"):
+        text += f"\n\n<i>{esc(note)}</i>"
+    per = [(("• " if (days or 0) == d else "") + lbl, f"m:utmclk:{d}") for d, lbl in ((7, "7 днів"), (30, "30 днів"), (90, "90 днів"), (0, "Увесь час"))]
+    return text[:4000], [per[:2], per[2:], [("📗 Excel кліків", f"m:utmclx:{days}"), ("🔄 Оновити Short.io", "m:utmsync")],
+                         [("➕ Додати посилання", "m:utmadd")]]
+
+
 def scr_utm_stats():
-    return "📊 <b>Статистика UTM-міток</b> (зберігається назавжди)\n<pre>" + esc(UTM.stats_text(UTM.stats(utm_ledger(), TZ))) + "</pre>", \
+    return "📊 <b>Скільки міток створено</b> (зберігається назавжди)\n<pre>" + esc(UTM.stats_text(UTM.stats(utm_ledger(), TZ))) + "</pre>", \
         [[("📗 Excel", "m:utmx"), ("📘 Word", "m:utmd")], [("📋 Реєстр за 3 дні", "m:utmreg")]]
 
 
@@ -5381,8 +5536,13 @@ async def utm_output(update, chat_id, url, tag, reserve=False, only=None):
     _utm_state(chat_id, url=res["url"], tag=res["tag"])
     head = (f"🔗 <b>UTM-мітки</b> · тег <code>{esc(res['tag'])}</code>" + (" · резервні формати" if reserve else "")
             + ("\n⚠️ Посилання вже опрацьовували за останні 3 дні — зараховано як повтор." if res["duplicate"] else "") + "\n")
-    blocks = [f"<b>{esc(label)}</b> {'✅' if ok_ else '⚠️ не пройшла перевірку'}\n<pre>{esc(link)}</pre>" for _, label, link, ok_ in res["items"]]
-    rows = [[("📋 Реєстр за 3 дні", "m:utmreg"), ("🗂 Резервні формати", "m:utmres")]]
+    shorts = await short_links(res["items"], res["tag"])
+    if shorts:
+        head += "📈 Публікуйте <b>короткі</b> посилання — тоді кожен клік з будь-якої соцмережі потрапить у «Кліки й переходи».\n"
+    blocks = [f"<b>{esc(label)}</b> {'✅' if ok_ else '⚠️ не пройшла перевірку'}\n"
+              + (f"<pre>{esc(shorts[key])}</pre>\n<blockquote expandable>Повне: <code>{esc(link)}</code></blockquote>" if key in shorts else f"<pre>{esc(link)}</pre>")
+              for key, label, link, ok_ in res["items"]]
+    rows = [[("📈 Кліки й переходи", "m:utmclk"), ("📋 Реєстр за 3 дні", "m:utmreg")], [("🗂 Резервні формати", "m:utmres")]]
     if not reserve and not only:
         n = int(kv_get("utm_hint") or 0) + 1
         kv_set("utm_hint", str(n))
@@ -6384,11 +6544,11 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         uid = int(arg)
         member_set(uid, {"accok": "approved", "accno": "blocked", "accrm": "removed"}[a])
         if a == "accok":
-            toast = "✅ Доступ надано"
+            toast = "✅ Доступ надано — людина вже отримала привітання"
             try:
                 await ctx.bot.send_message(
                     uid,
-                    "✅ Власник підтвердив ваш доступ. Ласкаво просимо!",
+                    "🎉 Власник схвалив вашу заявку — бот уже працює для вас!\nПишіть будь-яке питання або користуйтеся меню нижче.",
                     reply_markup=menu_kb(uid),
                 )
                 t, r = scr_home(uid)
@@ -6542,10 +6702,27 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         screen = ("✏️ <b>Адреса Ollama</b>\nНа тому ж сервері Oracle (docker compose): <code>http://ollama:11434</code>\n"
                   "Домашній ПК через Tailscale чи Cloudflare Tunnel: його адреса.\n«-» — як у змінній OLLAMA_URL.\nЗараз: <code>"
                   + esc(ollama_url() or "—") + "</code>", [CANCEL_ROW])
-    elif a in ("utmt", "utmown", "utmold", "utmres", "utmrs", "utmreg", "utmst", "utmx", "utmd", "utm"):
+    elif a in ("utmt", "utmown", "utmold", "utmres", "utmrs", "utmreg", "utmst", "utmx", "utmd", "utm", "utmadd", "utmclk", "utmclx", "utmsync"):
         st = _utm_state(chat_id)
         if a == "utm":
             screen = scr_utm(chat_id)
+        elif a == "utmclk":
+            screen = await scr_utm_clicks(chat_id, int(arg) if (arg or "").isdigit() else 30)
+        elif a == "utmsync":
+            toast = (await shortio_sync(force=True))[:190] or "Оновлено"
+            screen = await scr_utm_clicks(chat_id)
+        elif a == "utmclx":
+            import clicktrack
+            if q:
+                await q.answer("Готую файл…")
+            d = int(arg) if (arg or "").isdigit() else 30
+            data = await asyncio.to_thread(clicktrack.export_xlsx, clicks().report(days=d or None), UTM.LABELS)
+            await update.effective_chat.send_document(InputFile(io.BytesIO(data), filename=f"GreenPost-clicks-{datetime.now(TZ):%Y-%m-%d}.xlsx"),
+                                                      caption="📗 Кліки за UTM: огляд, по днях, соцмережі, теги, статті, країни, міста, пристрої, системи, браузери.")
+        elif a == "utmadd":
+            ask_input(chat_id, "utmurl")
+            screen = ("🔗 <b>Вставте посилання на новину</b>\n\nМожна одразу з тегом через пробіл: <code>https://greenpost.ua/news/… zubr_lviv</code>. "
+                      "Без тегу — запропоную варіанти на вибір.", [CANCEL_ROW])
         elif a == "utmst":
             screen = scr_utm_stats()
         elif a == "utmres":
@@ -7094,6 +7271,18 @@ async def _handle_awaited(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text):
             return await reply("Не схоже на назву моделі. Приклад: qwen2.5:7b", reply_markup=kb([CANCEL_ROW]))
         asyncio.get_running_loop().create_task(ollama_pull_job(chat_id, name))
         return await show(update, *(await scr_ollama(chat_id)), edit=False)
+    if action == "utmurl":
+        parts = text.split()
+        url = UTM.clean_url(parts[0]) if parts else ""
+        if not url.startswith(("http://", "https://")):
+            ask_input(chat_id, "utmurl")
+            return await reply("Це не схоже на посилання. Вставте адресу новини, що починається з https://", reply_markup=kb([CANCEL_ROW]))
+        if len(parts) > 1:
+            try:
+                return await utm_output(update, chat_id, url, parts[1])
+            except ValueError as exc:
+                return await reply(str(exc))
+        return await show(update, *scr_utm_tags(chat_id, url), edit=False)
     if action == "utmtag":
         tag = UTM.clean_tag(text)
         st = _utm_state(chat_id)
@@ -8017,7 +8206,26 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ]
         await answer(update, ctx, content, f"[фото] {caption}", preferred)
     else:
-        await answer(update, ctx, msg.text, msg.text, preferred)
+        text = msg.text
+        quote = APP_REPLY.pop(chat_id, None)
+        r = msg.reply_to_message
+        if quote is None and r is not None and (r.text or r.caption):
+            quote = (r.text or r.caption)
+        if quote and BRANCH_RE.match(text):  # «🌿 …» у відповідь на повідомлення — продовжити з нього в новій розмові
+            text = BRANCH_RE.sub("", text, count=1).strip() or "Продовжимо звідси."
+            did = current_dialog(chat_id)
+            new = dialog_create(chat_id, "🌿 " + short_q(quote.replace("\n", " "), 40), (dialog_get(did) or {}).get("folder_id"))
+            save_message(chat_id, "assistant", quote, dialog_id=new)
+            await msg.reply_text(f"🌿 Нова гілка «{dialog_name(new)}» — продовжую в ній. Попередня розмова лишилась як була.")
+        content = text
+        scope = cross_scope(text)
+        if scope:
+            note = cross_context(chat_id, current_dialog(chat_id), scope)
+            content = (note or "Інших розмов поки немає.\n\n") + content
+        if quote:
+            content = quote_note(quote) + content
+            text = f"↩️ «{short_q(quote.replace(chr(10), ' '), 120)}»\n{text}"
+        await answer(update, ctx, content, text, preferred)
 
 
 async def notify_chat(chat_id, text):
@@ -8821,6 +9029,10 @@ async def main():
         if op == "tabs":  # ☰ → «✏️ Панель унизу»: які кнопки показувати внизу застосунку
             res = _mini.save_tabs(sys.modules[__name__], uid, body.get("tabs"))
             return _Resp(json.dumps(res, ensure_ascii=False), media_type="application/json")
+        if op == "chats":  # 💬 перемикач розмов і тек у застосунку
+            return _Resp(json.dumps(_mini.chats(sys.modules[__name__], uid), ensure_ascii=False), media_type="application/json")
+        if op == "chat":
+            return _Resp(json.dumps(_mini.chat_action(sys.modules[__name__], uid, body), ensure_ascii=False), media_type="application/json")
         if op in ("say", "file", "history", "menu"):
             f = None
             if op == "file":
@@ -8836,6 +9048,20 @@ async def main():
                               text=str(body.get("text") or "")[:4000] if op == "text" else None)
         return _Resp(json.dumps(res, ensure_ascii=False), media_type="application/json")
 
+    async def _short_redirect(request):  # 📈 коротке посилання мітки: записати клік і перекинути на статтю
+        from starlette.responses import RedirectResponse
+        code = request.path_params.get("code", "")[:16]
+        target = clicks().target(code)
+        if not target:
+            return _Resp("Посилання не знайдено", status_code=404)
+        h = request.headers
+        ip = (h.get("x-forwarded-for") or h.get("x-real-ip") or (request.client.host if request.client else "")).split(",")[0].strip()
+        if request.method == "GET":
+            BACKGROUND.add(asyncio.get_running_loop().create_task(
+                clicks().record(code, ip, h.get("user-agent", ""), h.get("referer", ""), h.get("accept-language", ""))))
+        return RedirectResponse(target, status_code=302, headers={"Cache-Control": "no-store"})
+
+    app.router.routes.insert(0, _Route("/r/{code}", _short_redirect, methods=["GET", "HEAD"]))
     app.router.routes.insert(0, _Route("/app", _app_page, methods=["GET"]))
     app.router.routes.insert(0, _Route("/app/api", _app_api, methods=["POST"]))
     app.router.routes.insert(0, _Route("/sandbox", _sandbox_page, methods=["GET"]))
