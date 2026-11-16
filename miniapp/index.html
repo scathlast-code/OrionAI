@@ -111,7 +111,7 @@ async function call(op, data, extra){
   if(!init){render({text:'<b>Відкрийте з Telegram</b>\nЗастосунок працює всередині бота: синя кнопка ліворуч від поля вводу або ⚙️ → 📱 Чат і застосунок.',rows:[]},true);return null}
   busy=true;
   try{const r=await fetch(API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({initData:init,op,data},extra||{}))});
-    if(r.status===403){render({text:'<b>Немає доступу</b>\nЦей застосунок відкривається лише для учасників бота.',rows:[]},true);return null}
+    if(r.status===403){render({text:'<b>Немає доступу</b>\nЦей застосунок відкривається лише для учасників бота.\nЯкщо вас запросили — поверніться в чат із ботом і натисніть «✅ Згоден(-на)», потім відкрийте застосунок знову.',rows:[]},true);return null}
     if(!r.ok){toast('Помилка API: HTTP '+r.status);return null}
     return await r.json()}catch(e){toast(e instanceof SyntaxError?'Некоректна відповідь сервера':'Сервер API недоступний');return null}finally{busy=false}}
 function loading(){const m=document.getElementById('main');m.innerHTML='<div class="skel"></div><div class="skel"></div><div class="skel"></div>';const c=document.getElementById('composer');if(c)c.style.display='none';const mb=document.getElementById('mbar');if(mb)mb.remove()}

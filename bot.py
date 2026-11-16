@@ -1946,13 +1946,50 @@ async def reply_html(update: Update, text, kb=None):
     )
 
 
+def seen_users():
+    try:
+        return json.loads(kv_get("seen_users") or "{}")
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def seen_note(user):
+    """Хто натискав «Старт», не маючи доступу, — щоб запрошення приходило йому одразу, без повторного «Старт»."""
+    if not user:
+        return
+    d = seen_users()
+    if d.get(str(user.id)) == (user.username or "").lower():
+        return
+    d[str(user.id)] = (user.username or "").lower()
+    kv_set("seen_users", json.dumps(dict(list(d.items())[-1000:])))
+
+
+INVITE_TEXT = ("👋 Власник цього бота запросив вас стати учасником.\n\n"
+               "Ви отримаєте ШІ-помічника з кількома моделями, розмовами, завданнями й генераторами.\n\nПогоджуєтесь?")
+
+
+async def push_invite(bot, key):
+    """Надсилає запрошення людині, яка вже знайома з ботом. Повертає True, якщо повідомлення дійшло."""
+    if key.isdigit():
+        uid = int(key)
+    else:
+        name = key.lstrip("@").lower()
+        uid = next((int(i) for i, u in seen_users().items() if u and u == name), None)
+    if not uid or member_status(uid) == "blocked":
+        return False
+    try:
+        await bot.send_message(uid, INVITE_TEXT, reply_markup=kb([[("✅ Згоден(-на)", "cons:yes"), ("❌ Не згоден(-на)", "cons:no")]]))
+        return True
+    except Exception as exc:  # noqa: BLE001 — людина ще не відкривала бота або заблокувала його
+        log.info("запрошення %s не надіслано: %s", key, exc)
+        return False
+
+
 async def deny(update: Update):
+    seen_note(update.effective_user)
     if preinvite_match(update.effective_user) and member_status(update.effective_user.id) != "blocked":
         markup = kb([[("✅ Згоден(-на)", "cons:yes"), ("❌ Не згоден(-на)", "cons:no")]])
-        text = (
-            "👋 Власник цього бота запросив вас стати учасником.\n\n"
-            "Ви отримаєте ШІ-помічника з кількома моделями, розмовами, завданнями й генераторами.\n\nПогоджуєтесь?"
-        )
+        text = INVITE_TEXT
         if update.callback_query:
             await update.callback_query.answer()
         return await update.effective_chat.send_message(text, reply_markup=markup)
@@ -7175,12 +7212,13 @@ async def _handle_awaited(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text):
             return await reply("Потрібен @username (латиницею) або числовий ID. Спробуйте ще раз.")
         key = preinvite_add(text)
         link = f"https://t.me/{BOT_USERNAME}" if BOT_USERNAME else "бот у пошуку Telegram"
+        if await push_invite(ctx.bot, key):
+            note = f"✅ {esc(key)} додано. Ця людина вже знайома з ботом — запит на згоду їй уже надіслано, чекаємо відповіді."
+        else:
+            note = (f"✅ {esc(key)} додано. Бот поки не може написати цій людині першим (Telegram дозволяє це лише після «Старт»). "
+                    f"Надішліть їй {esc(link)} — після «Старт» вона одразу побачить запит на згоду.")
         t, r = scr_access()
-        return await reply_html(
-            update,
-            f"✅ {esc(key)} додано. Тепер цей акаунт має відкрити {esc(link)} і натиснути «Старт» — бот спитає згоди.\n\n" + t,
-            kb(r),
-        )
+        return await reply_html(update, note + "\n\n" + t, kb(r))
     if action == "nadd":
         nid = add_note_db(text, "", "telegram")
         t, r = scr_notes(chat_id)
@@ -8818,6 +8856,25 @@ async def main():
                     NODE.set("public_url", url.split("/app")[0].rstrip("/"))
             except Exception:  # noqa: BLE001
                 pass
+        if os.getenv("MENU_BUTTON", "commands") != "app":
+            # Telegram дає кнопці «Меню» лише один вигляд: або список команд, або сам застосунок.
+            # Список команд містить і «🧩 Відкрити застосунок», тож нічого не губиться.
+            try:
+                from telegram import MenuButtonCommands
+                await tg_app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+                if not kv_get("menu_cmds_v1"):
+                    chats = {owner_id(), *ALLOWED_USERS}
+                    with closing(db()) as con:
+                        chats |= {r["user_id"] for r in con.execute("SELECT user_id FROM members WHERE status='approved'")}
+                    for c in filter(None, chats):
+                        try:
+                            await tg_app.bot.set_chat_menu_button(chat_id=c, menu_button=MenuButtonCommands())
+                            set_pref(c, "menu_button", "commands")
+                        except Exception:  # noqa: BLE001
+                            pass
+                    kv_set("menu_cmds_v1", "1")
+            except Exception:  # noqa: BLE001
+                log.info("не вдалося повернути список команд у кнопку «Меню»")
         global BOT_USERNAME
         BOT_USERNAME = tg_app.bot.username or ""
         await tg_app.start()
