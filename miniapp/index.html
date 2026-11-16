@@ -33,7 +33,7 @@ main{padding:14px 16px calc(92px + env(safe-area-inset-bottom));max-width:720px;
 .notes{margin:0 0 14px}.notes div{background:color-mix(in srgb,var(--acc) 12%,transparent);border-radius:12px;padding:10px 12px;margin:6px 0;font-size:14px}
 nav{position:fixed;left:0;right:0;bottom:0;background:color-mix(in srgb,var(--card) 94%,transparent);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
 display:flex;justify-content:space-around;padding:6px 4px calc(6px + env(safe-area-inset-bottom));border-top:1px solid var(--sep)}
-nav button{border:0;background:none;color:var(--hint);font:inherit;font-size:11px;display:flex;flex-direction:column;align-items:center;gap:2px;padding:4px 8px;cursor:pointer;min-width:58px}
+nav button{max-width:20%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:0;background:none;color:var(--hint);font:inherit;font-size:11px;display:flex;flex-direction:column;align-items:center;gap:2px;padding:4px 8px;cursor:pointer;min-width:58px}
 nav button span{font-size:21px;filter:grayscale(.6);opacity:.8}nav button.on{color:var(--acc)}nav button.on span{filter:none;opacity:1}
 .sheet{position:fixed;left:0;right:0;bottom:0;background:var(--card);border-radius:18px 18px 0 0;padding:14px 16px calc(16px + env(safe-area-inset-bottom));box-shadow:0 -10px 30px #0007;transform:translateY(110%);transition:.25s;z-index:5}
 .sheet.on{transform:none}.sheet textarea{width:100%;min-height:96px;border-radius:12px;border:1px solid var(--sep);background:var(--bg);color:var(--txt);padding:10px;font:inherit}
@@ -60,6 +60,8 @@ body.marking .cell,body.marking .seg button,body.marking .card{outline:1.5px das
 .tile .em{font-size:20px;flex:none}.tile .tx{flex:1;min-width:0}.tile small{display:block;color:var(--hint);font-size:12px;line-height:1.25;margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.tile .q{flex:none;align-self:flex-start;color:var(--hint);font-size:15px;padding:0 0 6px 6px}.tile:active{transform:scale(.97);background:color-mix(in srgb,var(--hint) 14%,var(--card))}
 .info{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:0 0 4px}
 .info button{border:0;background:var(--card);color:var(--txt);border-radius:14px;padding:10px;font:inherit;text-align:left;cursor:pointer;min-width:0}
+.tile.pick{outline:2px solid var(--acc);outline-offset:-2px}.tile .num{flex:none;background:var(--acc);color:var(--acct);border-radius:50%;width:22px;height:22px;display:grid;place-items:center;font-size:12px;font-weight:700}
+.edit{display:flex;gap:8px;margin:-6px 0 4px}.edit button{flex:1;border:0;border-radius:12px;padding:10px;font:inherit;font-size:14.5px;background:var(--card);color:var(--txt);cursor:pointer}.edit .pri{background:var(--acc);color:var(--acct);font-weight:650}
 .info small{display:block;color:var(--hint);font-size:12px}.info b{display:block;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 </style>
 </head>
@@ -74,7 +76,12 @@ body.marking .cell,body.marking .seg button,body.marking .card{outline:1.5px das
 const TG = window.Telegram && Telegram.WebApp;
 const init = TG && TG.initData;
 const API = new URL('app/api', location.href.replace(/app\/?(#.*)?$/, '')).href;
-const TABS = [['chat','💬','Розмова'],['m:pl:news','📰','Ньюзрум'],['m:pl:inb','📮','Скринька'],['m:pl:stk','🧷','Стікери'],['menu','☰','Меню']];
+const MENU_TAB = ['menu','☰','Меню','menu'];
+let TABS = [['chat','💬','Розмова','chat'],['m:pl:news','📰','Ньюзрум','news'],['m:pl:inb','📮','Скринька','inbox'],['m:pl:stk','🧷','Стікери','stk']];
+try{const t=JSON.parse(localStorage.getItem('orion_tabs')||'null');if(Array.isArray(t))TABS=t}catch(_){}
+let editTabs = null;
+function setTabs(list){if(!Array.isArray(list))return;TABS=list.map(t=>{const sp=split(t.label);return [t.data,sp.icon||'•',sp.rest,t.key]});
+  try{localStorage.setItem('orion_tabs',JSON.stringify(TABS))}catch(_){} tabs()}
 const HASH = {chat:'chat', menu:'menu', news:'m:pl:news', inbox:'m:pl:inb', stk:'m:pl:stk', lists:'m:pl:news:L', find:'m:pl:news:D'};
 let hist = [], cur = null, marking = false, busy = false, seq = 0, menuCache = null;
 
@@ -180,7 +187,7 @@ function render(res, bare){
 async function openMenu(push=true){
   const my=++seq; if(push && cur && cur!=='menu') hist.push(cur); cur='menu'; syncBack();
   if(menuCache) renderMenu(menuCache); else {tabs();loading()}
-  const res=await call('menu','m:home'); if(my!==seq||!res) return; menuCache=res; renderMenu(res);
+  const res=await call('menu','m:home'); if(my!==seq||!res) return; menuCache=res; setTabs(res.tabs); renderMenu(res);
 }
 function renderMenu(res){
   const main=document.getElementById('main'); const q=(document.getElementById('msearch')||{}).value||'';
@@ -190,25 +197,37 @@ function renderMenu(res){
   for(const it of res.info||[]){const b=document.createElement('button');b.innerHTML='<small></small><b></b>';b.querySelector('small').textContent=it.icon+' '+it.label;b.querySelector('b').textContent=it.value;b.onclick=()=>press(it.label,it.data);info.appendChild(b)}
   main.appendChild(info);
   const s=document.createElement('input');s.id='msearch';s.className='search';s.placeholder='🔍 Пошук розділу';s.value=q;s.style.marginTop='14px';main.appendChild(s);
+  const ed=document.createElement('div');ed.className='edit';
+  if(editTabs){const note=document.createElement('div');note.className='notes';note.innerHTML='<div></div>';
+    note.firstChild.textContent='📌 Оберіть до '+(res.tabs_max||4)+' кнопок для панелі внизу, у потрібному порядку. «☰ Меню» лишається завжди. Обрано: '+editTabs.length;main.appendChild(note);
+    ed.innerHTML='<button>Скасувати</button><button class="pri">Зберегти панель</button>';
+    ed.children[0].onclick=()=>{editTabs=null;renderMenu(res)};
+    ed.children[1].onclick=async()=>{const r=await call('tabs','m:home',{tabs:editTabs});editTabs=null;if(r){menuCache=r;setTabs(r.tabs);toast('📌 Панель збережено');renderMenu(r)}else renderMenu(res)}}
+  else{ed.innerHTML='<button>📌 Налаштувати панель унизу</button>';ed.children[0].onclick=()=>{haptic();editTabs=(res.tabs||[]).map(t=>t.key);renderMenu(res)}}
+  main.appendChild(ed);
   const body=document.createElement('div');main.appendChild(body);
+  const secs=editTabs?[{title:'Розмова з ШІ',items:[{key:'chat',label:'💬 Розмова',data:'chat',hint:'Чат із ШІ прямо в застосунку'}]}].concat(res.sections||[]):(res.sections||[]);
   const draw=()=>{body.innerHTML='';const f=s.value.trim().toLowerCase();let n=0;
-    for(const sec of res.sections||[]){const its=sec.items.filter(i=>!f||i.label.toLowerCase().includes(f)||sec.title.toLowerCase().includes(f));if(!its.length)continue;
+    for(const sec of secs){const its=sec.items.filter(i=>!f||i.label.toLowerCase().includes(f)||sec.title.toLowerCase().includes(f));if(!its.length)continue;
       const h=document.createElement('div');h.className='sec';h.textContent=sec.title;body.appendChild(h);
       const g=document.createElement('div');g.className='grid';
       for(const it of its){n++;const sp=split(it.label);const b=document.createElement('button');b.className='tile';
-        b.innerHTML='<span class="em"></span><span class="tx"><span></span><small></small></span>'+(it.why?'<span class="q" title="Що це і як скасувати">ⓘ</span>':'');
+        const pos=editTabs?editTabs.indexOf(it.key):-1;
+        b.innerHTML='<span class="em"></span><span class="tx"><span></span><small></small></span>'+(editTabs?(pos>=0?'<span class="num">'+(pos+1)+'</span>':''):(it.why?'<span class="q" title="Що це і як скасувати">ⓘ</span>':''));
+        if(pos>=0) b.classList.add('pick');
         b.querySelector('.em').textContent=sp.icon||'•';b.querySelector('.tx span').textContent=sp.rest;b.querySelector('small').textContent=it.hint||'';
-        if(it.why) b.querySelector('.q').onclick=e=>{e.stopPropagation();press('ⓘ '+it.label,it.why)};
-        b.onclick=()=>press(it.label,it.data);g.appendChild(b)}
+        if(it.why&&!editTabs) b.querySelector('.q').onclick=e=>{e.stopPropagation();press('ⓘ '+it.label,it.why)};
+        b.onclick=editTabs?()=>{haptic();const i=editTabs.indexOf(it.key);if(i>=0)editTabs.splice(i,1);else if(editTabs.length>=(res.tabs_max||4)){toast('Панель повна — спершу зніміть одну з кнопок');return}else editTabs.push(it.key);renderMenu(res)}:()=>press(it.label,it.data);g.appendChild(b)}
       body.appendChild(g)}
     if(!n){const e=document.createElement('div');e.className='empty';e.textContent='Нічого не знайдено';body.appendChild(e)}};
   s.oninput=draw; draw(); tabs();
 }
 function back(){if(!hist.length)return;const h=hist.pop();h==='chat'?openChat(false):h==='menu'?openMenu(false):open_(h,false)}
 function tabs(){const n=document.getElementById('tabs');n.innerHTML='';
-  const active=TABS.find(([d])=>cur&&(cur===d||cur.startsWith(d+':')))||TABS[4];
-  for(const tb of TABS){const b=document.createElement('button');b.className=tb===active?'on':'';b.innerHTML='<span>'+tb[1]+'</span>'+tb[2];
-    b.onclick=()=>{haptic();hist=[];cur=null;tb[0]==='chat'?openChat(false):tb[0]==='menu'?openMenu(false):open_(tb[0],false)};n.appendChild(b)}}
+  const all=TABS.concat([MENU_TAB]);
+  const active=all.find(([d])=>cur&&(cur===d||cur.startsWith(d+':')))||MENU_TAB;
+  for(const tb of all){const b=document.createElement('button');b.className=tb===active?'on':'';b.innerHTML='<span>'+tb[1]+'</span>'+tb[2];
+    b.onclick=()=>{haptic();hist=[];cur=null;editTabs=null;tb[0]==='chat'?openChat(false):tb[0]==='menu'?openMenu(false):open_(tb[0],false)};n.appendChild(b)}}
 function press(label, d){
   if(marking){mark('кнопка «'+label+'»',d,'');return}
   haptic();
@@ -241,7 +260,8 @@ if(TG){TG.ready();TG.expand();try{TG.BackButton.onClick(back)}catch(_){}}
 (function start(){
   if(TG && TG.isVersionAtLeast && !TG.isVersionAtLeast('6.1')){
     render({text:'<b>Цей Telegram не підтримує застосунок</b>\nУсе те саме доступне в чаті з ботом кнопками. Оновіть Telegram, щоб користуватись і застосунком.',rows:[]},true);return}
-  const first=HASH[(location.hash||'').slice(1)]||(TG&&TG.initDataUnsafe&&HASH[TG.initDataUnsafe.start_param])||'m:pl:news';
+  const first=HASH[(location.hash||'').slice(1)]||(TG&&TG.initDataUnsafe&&HASH[TG.initDataUnsafe.start_param])||(TABS[0]&&TABS[0][0])||'menu';
+  if(init) call('menu','m:home').then(r=>{if(r&&r.tabs){menuCache=r;setTabs(r.tabs)}});
   first==='chat'?openChat(false):first==='menu'?openMenu(false):open_(first,false);
 })();
 </script>

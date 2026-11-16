@@ -213,7 +213,7 @@ def menu(B, uid):
             if i.startswith("g:"):
                 subs += items(i, path + [L.label(uid, i)])
             elif i not in ("menu", "app"):
-                own.append({"label": L.label(uid, i), "data": L.target(i), "hint": explain.short(i), "why": f"m:why:{i}" if i in explain.E else ""})
+                own.append({"key": i, "label": L.label(uid, i), "data": L.target(i), "hint": explain.short(i), "why": f"m:why:{i}" if i in explain.E else ""})
         return ([{"title": " › ".join(path), "items": own}] if own else []) + subs
 
     sections = items(PLACE_HOME, [])
@@ -223,7 +223,30 @@ def menu(B, uid):
     info = [("💬", "Розмова", d["title"], "m:dl"),
             ("🤖", "Відповідає", B.choice_label(B.get_choice(uid)), "m:md"),
             ("⏰", "Завдань", str(len(B.tasks_open(chat_id=uid))), "m:tl")]
-    return {"menu": True, "info": [{"icon": a, "label": b, "value": c, "data": e} for a, b, c, e in info], "sections": sections}
+    return {"menu": True, "info": [{"icon": a, "label": b, "value": c, "data": e} for a, b, c, e in info], "sections": sections,
+            "tabs": tabs(B, uid), "tabs_max": TABS_MAX}
+
+
+TABS_MAX = 4  # + «☰ Меню», яке лишається завжди
+TABS_DEFAULT = ["chat", "news", "inbox", "stk"]
+
+
+def tabs(B, uid):
+    """Панель унизу застосунку: вибрані кнопки (налаштовує сам користувач)."""
+    keys = B.prefs(uid).get("app_tabs") or TABS_DEFAULT
+    out = []
+    for k in keys:
+        if k == "chat":
+            out.append({"key": "chat", "label": "💬 Розмова", "data": "chat"})
+        elif k in B.ITEMS and k not in ("menu", "app") and B.ITEMS[k][1].startswith(("m:", "help:")):
+            out.append({"key": k, "label": B.L.label(uid, k), "data": B.ITEMS[k][1]})
+    return out[:TABS_MAX]
+
+
+def save_tabs(B, uid, keys):
+    keys = [str(k) for k in (keys or []) if k == "chat" or k in B.ITEMS][:TABS_MAX]
+    B.set_pref(uid, "app_tabs", list(dict.fromkeys(keys)))
+    return menu(B, uid)
 
 
 async def run(bot_module, uid, op, data=None, text=None, user=None, file=None):
