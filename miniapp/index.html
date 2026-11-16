@@ -113,7 +113,7 @@ async function openChat(push=true){
 function renderChat(res, typing){
   const main=document.getElementById('main'); main.innerHTML='';
   const top=document.createElement('div');top.className='top';top.innerHTML='<h1></h1>';top.querySelector('h1').textContent='💬 '+(res.dialog||'Розмова');
-  const chat=document.createElement('button');chat.className='ic pill';chat.textContent='↗ Чат';chat.title='Продовжити в чаті з ботом';chat.onclick=toChat;top.appendChild(chat);main.appendChild(top);
+  const chat=document.createElement('button');chat.className='ic pill';chat.textContent='↗ Чат-бот';chat.title='Продовжити в чаті з ботом';chat.onclick=toChat;top.appendChild(chat);main.appendChild(top);
   const sub=document.createElement('div');sub.className='sub';sub.textContent='Та сама розмова, що й у чаті з ботом: пишіть тут або там — історія спільна.';main.appendChild(sub);
   for(const m of res.messages||[]){const b=document.createElement('div');b.className='bub '+(m.role==='user'?'user':'assistant');b.textContent=m.text;
     if(m.provider){const sm=document.createElement('small');sm.textContent=m.provider;b.appendChild(sm)}main.appendChild(b)}
@@ -150,7 +150,7 @@ function render(res, bare){
   const p=rest.split('\n\n'); if(p.length>1 && p[0].length<160 && !/<b>/.test(p[0])){sub=p.shift();rest=p.join('\n\n')}
   const top=document.createElement('div');top.className='top';top.innerHTML='<h1></h1>';top.querySelector('h1').textContent=title||'OrionAI';
   if(!bare){
-    const chat=document.createElement('button');chat.className='ic pill';chat.title='Продовжити цей екран у чаті з ботом';chat.textContent='↗ Чат';chat.onclick=toChat;
+    const chat=document.createElement('button');chat.className='ic pill';chat.title='Продовжити цей екран у чаті з ботом';chat.textContent='↗ Чат-бот';chat.onclick=toChat;
     const imp=document.createElement('button');imp.className='ic'+(marking?' on':'');imp.title='Позначити для «Покращити»';imp.textContent='💡';imp.onclick=()=>{marking=!marking;document.body.classList.toggle('marking',marking);imp.classList.toggle('on',marking);if(marking)toast('💡 Торкніться того, що треба покращити')};
     top.append(imp,chat)}
   main.appendChild(top);
