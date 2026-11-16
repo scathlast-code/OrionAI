@@ -11,6 +11,56 @@ from plugins import esc
 from .desk import (BLOCK_KINDS, FOLDERS, MODES, REL, SIZES, TEMPLATES, angles_prompt, article_blocks, compose_prompt, docx_bytes,
                    domain, google_news_url, parse_google_news, parse_websearch, priority, relation_prompt, score_prompt, source_search_queries)
 from .engine import clean, system_prompt
+
+
+class Progress:
+    """Одне повідомлення, що оновлюється: що зараз робиться, крок N з M і скільки секунд минуло."""
+
+    def __init__(self, host, chat, title):
+        self.host, self.chat, self.title = host, chat, title
+        self.msg, self.stage, self.t0, self.task = None, "", time.time(), None
+
+    def _text(self, extra=""):
+        sec = int(time.time() - self.t0)
+        return (f"⏳ <b>{esc(self.title)}</b>\n{self.stage} · ⏱ {sec} с"
+                + "\n<i>Пошук зазвичай 5–20 с, написання ШІ — 10–45 с.</i>" + extra)
+
+    async def start(self, stage):
+        self.stage = stage
+        self.msg = await self.host.notify(self.chat, self._text())
+        self.task = asyncio.get_running_loop().create_task(self._tick())
+        return self
+
+    async def _tick(self):
+        try:
+            while True:
+                await asyncio.sleep(4)
+                await self._edit(self._text())
+        except asyncio.CancelledError:
+            pass
+
+    async def _edit(self, text, rows=None):
+        bot = self.host.bot()
+        if not (bot and self.msg):
+            return
+        markup = None
+        if rows:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton(t, callback_data=d) for t, d in r] for r in rows])
+        try:
+            await bot.edit_message_text(text[:4096], chat_id=self.chat, message_id=self.msg.message_id, parse_mode="HTML", reply_markup=markup)
+        except Exception:  # noqa: BLE001 — «не змінилось» тощо
+            pass
+
+    async def set(self, stage):
+        self.stage = stage
+        await self._edit(self._text())
+
+    async def done(self, text, rows=None):
+        if self.task:
+            self.task.cancel()
+        sec = int(time.time() - self.t0)
+        await self._edit(f"{text} · ⏱ {sec} с", rows)
 from .feeds import fetch
 
 log = logging.getLogger("orion.plugins.newsroom.desk")
@@ -128,7 +178,10 @@ class DeskUI:
         return text or (f["title"] + "\n" + (f.get("snippet") or ""))
 
     # ================================================================ написання
-    async def compose(self, chat, finds, size, template_key=None, extra_note=""):
+    def prompt_rows(self):
+        return [[("📋 Промт для іншого ШІ", self.cb("Pr")), ("🔁 Іншою моделлю", self.cb("Prr"))]]
+
+    async def compose(self, chat, finds, size, template_key=None, extra_note="", avoid=None):
         """Біг ньюз: кілька знахідок -> одна публікація за шаблоном. -> id чернетки"""
         items = []
         for f in finds[:5]:
@@ -139,11 +192,21 @@ class DeskUI:
         tkey = template_key or size
         custom = self.store.get("tpl_" + tkey) or TEMPLATES[tkey][1]
         prompt = compose_prompt(items, size if size in ("short", "news", "big") else "news", custom, self.media_topics(), ours_ctx)
+        sysp = system_prompt(self.store.get("rules") or "")
+        # запам'ятовуємо промт: його можна скопіювати в будь-який інший ШІ або повторити іншою моделлю
+        self.store.set(f"lastcomp:{chat}", json.dumps({"finds": [dict(f) for f in finds[:5]], "size": size, "tkey": tkey, "note": extra_note,
+                                                       "prompt": prompt, "system": sysp, "model": ""}, ensure_ascii=False, default=str))
         data, model = await self.engine._json(prompt + "\n\n" + __import__("plugins.newsroom.engine", fromlist=["JSON_SPEC"]).JSON_SPEC,
-                                              system_prompt(self.store.get("rules") or ""), f"📰 Пульт: {SIZES.get(size, ('',))[0]}")
+                                              sysp, f"📰 Пульт: {SIZES.get(size, ('',))[0]}", avoid=avoid)
+        try:
+            lc = json.loads(self.store.get(f"lastcomp:{chat}") or "{}")
+            lc["model"] = model
+            self.store.set(f"lastcomp:{chat}", json.dumps(lc, ensure_ascii=False, default=str))
+        except ValueError:
+            pass
         data = clean(data)
         if data["skip"]:
-            await self.host.notify(chat, "ℹ️ Не вийшло написати: " + esc(data["notes"] or "модель вирішила, що матеріалу недостатньо"))
+            await self.host.notify(chat, f"ℹ️ {esc(model)} не написала: " + esc(data["notes"] or "модель вирішила, що матеріалу недостатньо"), self.prompt_rows())
             return None
         for f in finds[:5]:
             if f.get("url") and f["url"] not in data["sources"]:
@@ -197,7 +260,7 @@ class DeskUI:
 
     async def run_mode(self, chat, key, size):
         title = MODES.get(key, (None,))[0] or (self.desk.topic(key) or {}).get("title", key)
-        status = await self.host.notify(chat, f"🔎 {esc(title)}: шукаю свіже, оцінюю й одразу пишу ({SIZES[size][0]})…")
+        pg = await Progress(self.host, chat, f"{title} · {SIZES[size][0]}").start("🔎 Крок 1 з 3: шукаю свіже в інтернеті…")
         try:
             queries, hours = self.mode_queries(key)
             angle_note = ""
@@ -213,8 +276,9 @@ class DeskUI:
                 angle_note = "Кути: " + "; ".join(short(a.get("title"), 60) for a in angles[:5])
             cands = await self.web_candidates(queries, hours)
             if not cands:
-                return await self.host.notify(chat, f"🔎 {esc(title)}: нічого свіжого не знайшов (або все відсіяли блокування й антиспам).",
-                                              [[("🚫 Блокування", self.cb("Bk")), ("🔎 Знайти й написати", self.cb("D"))]])
+                return await pg.done(f"🔎 {esc(title)}: нічого свіжого не знайшов (або все відсіяли блокування й антиспам)",
+                                     [[("🚫 Блокування", self.cb("Bk")), ("🔎 Знайти й написати", self.cb("D"))]])
+            await pg.set(f"⭐ Крок 2 з 3: оцінюю знайдене ({len(cands)})…")
             scored = await self.score(cands)
             run = f"{key}-{int(time.time())}"
             ids = await self.save_finds("mode", run, scored)
@@ -227,10 +291,12 @@ class DeskUI:
                 groups.setdefault(f["story_id"], []).append(f)
             best = max(groups.values(), key=lambda g: (sum(x["priority"] for x in g[:3]), len(g)))
             tkey = "big" if size == "big" else size
-            await self.compose(chat, best, size, tkey, (f"{title}. " + angle_note).strip())
+            await pg.set("✍️ Крок 3 з 3: ШІ пише чернетку…")
+            did = await self.compose(chat, best, size, tkey, (f"{title}. " + angle_note).strip())
+            await pg.done(f"✅ {esc(title)}: чернетку готово — нижче" if did else f"ℹ️ {esc(title)}: чернетку не написано", self.prompt_rows())
         except Exception as exc:  # noqa: BLE001
             log.exception("run_mode")
-            await self.host.notify(chat, f"⚠️ {esc(title)}: не вдалося — {esc(exc)[:300]}")
+            await pg.done(f"⚠️ {esc(title)}: не вдалося — {esc(exc)[:300]}", self.prompt_rows())
 
     async def run_tag(self, tag, chat=None, notify=True):
         hours = max(2, int(tag["interval"] // 3600) + 2) if tag["last_run"] else 24
@@ -534,8 +600,36 @@ class DeskUI:
             return None, self.D_mode(x)
         if a == "Dgo":
             self._bg(self.run_mode(chat, x, y))
-            return "🔎 Шукаю й пишу…", ("🔎 <b>Шукаю, оцінюю й пишу</b> — список знайденого й готова чернетка прийдуть окремими повідомленнями.",
+            return "🔎 Шукаю й пишу…", ("🔎 <b>Шукаю, оцінюю й пишу</b>\nУ чаті з ботом з'явиться повідомлення з ходом роботи (крок і секунди), потім — список знайденого й чернетка.\nЯкщо ШІ відмовиться — там будуть «📋 Промт для іншого ШІ» і «🔁 Іншою моделлю».",
                                        [[("🔎 Знайти й написати", self.cb("D"))]])
+        if a == "Pr":  # 📋 промт — щоб скопіювати в будь-який інший ШІ
+            lc = json.loads(self.store.get(f"lastcomp:{chat}") or "{}")
+            if not lc.get("prompt"):
+                return "Промту ще немає", None
+            full = f"{lc['system']}\n\n{lc['prompt']}"
+            if len(full) > 3300:
+                bot = self.host.bot()
+                if bot:
+                    from telegram import InputFile
+                    await bot.send_document(chat, InputFile(io.BytesIO(full.encode("utf-8")), filename="prompt.txt"),
+                                            caption="📋 Повний промт — відкрийте й скопіюйте в будь-який ШІ.")
+                return "📋 Промт надіслано файлом", None
+            return None, (f"📋 <b>Промт</b> (писала: {esc(lc.get('model') or '—')})\nТоркніться тексту, щоб скопіювати, і вставте в будь-який ШІ:\n\n<pre>{esc(full)}</pre>",
+                          [[("🔁 Іншою моделлю", self.cb("Prr"))], [("« Знайти й написати", self.cb("D"))]])
+        if a == "Prr":  # 🔁 те саме завдання — іншою моделлю (без тієї, що відмовилась)
+            lc = json.loads(self.store.get(f"lastcomp:{chat}") or "{}")
+            if not lc.get("prompt"):
+                return "Немає що повторювати", None
+
+            async def again():
+                pg = await Progress(self.host, chat, "Інша модель").start(f"✍️ Пише інша модель (не {lc.get('model') or '—'})…")
+                try:
+                    did = await self.compose(chat, lc["finds"], lc["size"], lc["tkey"], lc.get("note", ""), avoid=lc.get("model") or None)
+                    await pg.done("✅ Готово — чернетка нижче" if did else "ℹ️ Чернетку не написано", self.prompt_rows())
+                except Exception as exc:  # noqa: BLE001
+                    await pg.done(f"⚠️ Не вдалося: {esc(exc)[:300]}", self.prompt_rows())
+            self._bg(again())
+            return "🔁 Передаю іншій моделі…", None
         if a == "Dfind":
             async def only_find():
                 queries, hours = self.mode_queries(x)
