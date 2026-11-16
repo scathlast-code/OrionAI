@@ -45,6 +45,9 @@ nav button span{font-size:21px;filter:grayscale(.6);opacity:.8}nav button.on{col
 @keyframes sk{to{background-position:-200% 0}}
 body.marking .cell,body.marking .seg button,body.marking .card{outline:1.5px dashed #f5c451;outline-offset:-2px}
 .bub{max-width:86%;padding:9px 12px;border-radius:16px;margin:6px 0;white-space:pre-wrap;overflow-wrap:anywhere;font-size:15px}
+.arow{display:flex;gap:8px;align-items:flex-end;margin:6px 0}.arow .bub{margin:0}
+.ava{flex:none;width:30px;height:30px;border-radius:50%;display:grid;place-items:center;color:#fff;font-size:14px;font-weight:700}
+.switch{text-align:center;margin:10px 0}.switch span{display:inline-block;font-size:12px;color:var(--hint);background:var(--card);border-radius:12px;padding:4px 10px}
 .bub.user{margin-left:auto;background:var(--acc);color:var(--acct);border-bottom-right-radius:5px}
 .bub.assistant{background:var(--card);border-bottom-left-radius:5px}.bub small{display:block;opacity:.65;font-size:11.5px;margin-top:3px}
 .composer{position:fixed;left:0;right:0;bottom:calc(58px + env(safe-area-inset-bottom));display:flex;gap:8px;padding:8px 12px;background:var(--bg);border-top:1px solid var(--sep)}
@@ -52,7 +55,9 @@ body.marking .cell,body.marking .seg button,body.marking .card{outline:1.5px das
 .composer button{border:0;width:42px;height:42px;border-radius:50%;background:var(--card);color:var(--txt);font-size:18px;cursor:pointer;flex:none}
 .composer .send{background:var(--acc);color:var(--acct)}
 .typing{display:inline-block;color:var(--hint);font-size:12.5px;margin:6px 0;padding:6px 11px;border-radius:14px;background:var(--card);white-space:pre-wrap;max-width:86%}
-.bh{display:block;color:var(--hint);font-size:11px;line-height:1.2;margin-top:2px;font-weight:400;white-space:normal}.rowhint{color:var(--hint);font-size:11px;line-height:1.25;margin:-9px 6px 12px}.seg button{white-space:normal;flex:1 1 0}
+.seg .sel .bh{color:inherit;opacity:.8}.bh{display:block;color:var(--hint);font-size:11px;line-height:1.2;margin-top:2px;font-weight:400;white-space:normal}.rowhint{color:var(--hint);font-size:11px;line-height:1.25;margin:-9px 6px 12px}.seg button{white-space:normal;flex:1 1 0}
+.fold{margin:0 0 10px}.foldh{display:flex;width:100%;align-items:center;justify-content:space-between;border:0;background:none;color:var(--txt);font:inherit;font-weight:650;font-size:16px;padding:8px 4px;cursor:pointer}
+.foldh i{font-style:normal;color:var(--hint);transition:.2s}.fold.shut .foldh i{transform:rotate(-90deg)}.fold.shut .foldb{display:none}
 .empty{text-align:center;color:var(--hint);padding:50px 10px}
 .search{width:100%;border:0;border-radius:12px;background:var(--card);color:var(--txt);padding:11px 14px;font:inherit;margin:0 0 14px}
 .sec{color:var(--hint);font-size:13px;text-transform:uppercase;letter-spacing:.4px;margin:18px 4px 8px}
@@ -131,8 +136,17 @@ function renderChat(res, typing){
   const top=document.createElement('div');top.className='top';top.innerHTML='<h1></h1>';top.querySelector('h1').textContent='💬 '+(res.dialog||'Розмова');
   const chat=document.createElement('button');chat.className='ic pill';chat.textContent='↗ Чат-бот';chat.title='Продовжити в чаті з ботом';chat.onclick=toChat;top.appendChild(chat);main.appendChild(top);
   const sub=document.createElement('div');sub.className='sub';sub.textContent='Та сама розмова, що й у чаті з ботом: пишіть тут або там — історія спільна.';main.appendChild(sub);
+  let lastProv='';
   for(const m of res.messages||[]){const b=document.createElement('div');b.className='bub '+(m.role==='user'?'user':'assistant');b.textContent=m.text;
-    if(m.provider){const sm=document.createElement('small');sm.textContent=m.provider;b.appendChild(sm)}main.appendChild(b)}
+    if(m.role!=='user'){
+      const pv=m.provider||'';
+      if(lastProv&&pv&&pv!==lastProv){const sw=document.createElement('div');sw.className='switch';sw.innerHTML='<span></span>';
+        sw.firstChild.textContent='↪️ Тепер відповідає '+avatar(pv).name+' (замість '+avatar(lastProv).name+')';main.appendChild(sw)}
+      if(pv) lastProv=pv;
+      const a=avatar(pv);if(pv){const sm=document.createElement('small');sm.textContent=a.name;b.appendChild(sm)}
+      const row=document.createElement('div');row.className='arow';const av=document.createElement('div');av.className='ava';av.style.background=a.color;av.textContent=a.icon;av.title=a.name;
+      row.append(av,b);main.appendChild(row)}
+    else main.appendChild(b)}
   if(!(res.messages||[]).length){const e=document.createElement('div');e.className='empty';e.textContent='Почніть розмову — напишіть питання, перешліть текст новини або надішліть файл 📎';main.appendChild(e)}
   if(typing){const t=document.createElement('div');t.className='typing';t.id='typing';t.textContent='Думаю над відповіддю…';main.appendChild(t)}
   main.style.paddingBottom='160px';
@@ -153,6 +167,10 @@ function showResult(res){
   for(const n of res.notes||[]) if(!(res.replies||[]).length) toast(n);
   openChat(false);
 }
+const AVATARS={gemini:['✦','#4285F4','Gemini'],openrouter:['⇄','#6E56CF','OpenRouter'],groq:['⚡','#F55036','Groq'],mistral:['M','#FA520F','Mistral'],
+  nvidia:['N','#76B900','NVIDIA'],ollama_cloud:['🦙','#333','Ollama Cloud'],ollama_local:['🦙','#555','Моя Ollama'],cloudflare:['☁','#F38020','Cloudflare'],cohere:['C','#39594D','Cohere']};
+function avatar(p){const a=AVATARS[p];if(a)return {icon:a[0],color:a[1],name:a[2]};let h=0;for(const c of (p||'?'))h=(h*31+c.charCodeAt(0))%360;
+  return {icon:((p||'?')[0]||'?').toUpperCase(),color:'hsl('+h+',55%,45%)',name:p||'ШІ'}}
 function userInfo(){const u=(TG&&TG.initDataUnsafe&&TG.initDataUnsafe.user)||{};return {name:[u.first_name,u.last_name].filter(Boolean).join(' '),username:u.username||''}}
 function pickFile(caption){const f=document.getElementById('filein');f.value='';f.onchange=async()=>{const file=f.files[0];if(!file)return;
   if(file.size>15*1024*1024){toast('Файл більший за 15 МБ — надішліть його в чат');return}
@@ -160,6 +178,43 @@ function pickFile(caption){const f=document.getElementById('filein');f.value='';
   document.getElementById('sheet').classList.remove('on');toast('📎 Надсилаю '+file.name+'…');
   const res=await call('file',cur||'chat',{name:file.name,mime:file.type,b64,text:caption||'',user:userInfo()});if(res)showResult(res)};f.click()}
 function syncBack(){try{hist.length?TG.BackButton.show():TG.BackButton.hide()}catch(_){}}
+function drawRows(parent, rows, H){
+  let list=null; H=H||[];
+  (rows||[]).forEach((row,ri)=>{const rh=H[ri];
+    const segment = row.length>1 && row.every(([t])=>t.length<=24);
+    if(segment){list=null;const g=document.createElement('div');g.className='seg';
+      row.forEach(([t,d],bi)=>{if(/^[^\p{L}]*Назад$/u.test(t)||t.startsWith('«'))return;const b=document.createElement('button');b.textContent=(t.startsWith('● ')?t.slice(2):t);if(t.startsWith('● '))b.className='sel';
+        const h=Array.isArray(rh)?rh[bi]:'';if(h){const sm=document.createElement('small');sm.className='bh';sm.textContent=h;b.appendChild(sm)}
+        b.onclick=()=>press(t,d);g.appendChild(b)});
+      parent.appendChild(g);
+      if(typeof rh==='string'&&rh){const c=document.createElement('div');c.className='rowhint';c.textContent=rh;parent.appendChild(c)}
+      return}
+    row.forEach(([t,d],bi)=>{
+      if(/^[^\p{L}]*Назад$/u.test(t)||t.startsWith('«')) return;
+      if(!list){list=document.createElement('div');list.className='list';parent.appendChild(list)}
+      const s=split(t);const b=document.createElement('button');b.className='cell'+(/^🗑|видалити/i.test(t)?' danger':'');
+      b.innerHTML='<span class="em"></span><span class="lb"></span>'+(s.badge?'<span class="badge"></span>':'')+'<span class="chev">›</span>';
+      b.querySelector('.em').textContent=s.icon||'•';b.querySelector('.lb').textContent=s.rest;if(s.badge)b.querySelector('.badge').textContent=s.badge;
+      const h=typeof rh==='string'?rh:(rh||[])[bi];if(h){const sm=document.createElement('small');sm.className='bh';sm.textContent=h;b.querySelector('.lb').appendChild(sm)}
+      b.onclick=()=>press(t,d);list.appendChild(b)});
+    if(row.length>1) list=null;
+  });
+}
+function drawSections(main,res){
+  // Об'єднаний розділ: кожна частина згортається окремо (стан запам'ятовується)
+  const key='orion_fold:'+(res.text||'').split('\n')[0];let st={};try{st=JSON.parse(localStorage.getItem(key)||'{}')}catch(_){}
+  for(const sec of res.sections){
+    const box=document.createElement('div');box.className='fold'+(st[sec.head]?' shut':'');
+    const h=document.createElement('button');h.className='foldh';h.innerHTML='<span></span><i>▾</i>';h.firstChild.textContent=sec.head;
+    h.onclick=()=>{box.classList.toggle('shut');st[sec.head]=box.classList.contains('shut');try{localStorage.setItem(key,JSON.stringify(st))}catch(_){}haptic()};
+    const inner=document.createElement('div');inner.className='foldb';
+    if(sec.body){const c=document.createElement('div');c.className='card';c.innerHTML=sanitize(sec.body);inner.appendChild(c)}
+    drawRows(inner,sec.rows,sec.hints);
+    box.append(h,inner);main.appendChild(box)}
+  const used=new Set(res.sections.flatMap(x=>(x.rows||[]).flat().map(b=>b[1])));
+  const rest=(res.rows||[]).map(r=>r.filter(([t,d])=>!used.has(d)&&d!=='m:noop')).filter(r=>r.length);
+  if(rest.length) drawRows(main,rest,[]);
+}
 function render(res, bare){
   const main=document.getElementById('main'); main.innerHTML=''; main.style.paddingBottom='';
   const comp=document.getElementById('composer'); if(comp) comp.style.display='none';
@@ -173,28 +228,11 @@ function render(res, bare){
     top.append(imp,chat)}
   main.appendChild(top);
   if(sub){const s=document.createElement('div');s.className='sub';s.innerHTML=sanitize(sub);main.appendChild(s)}
+  if(res.sections&&res.sections.length) rest='';
   if(rest.trim()){const c=document.createElement('div');c.className='card';c.innerHTML=sanitize(rest.trim());c.onclick=()=>{if(marking)mark('текст екрана','',c.textContent)};main.appendChild(c)}
   for(const n of res.notes||[]){const d=document.createElement('div');d.className='notes';d.innerHTML='<div></div>';d.firstChild.textContent=n;main.appendChild(d)}
-  let list=null; const H=res.hints||[];
-  (res.rows||[]).forEach((row,ri)=>{const rh=H[ri];
-    const segment = row.length>1 && row.every(([t])=>t.length<=24);
-    if(segment){list=null;const g=document.createElement('div');g.className='seg';
-      row.forEach(([t,d],bi)=>{if(/^[^\p{L}]*Назад$/u.test(t)||t.startsWith('«'))return;const b=document.createElement('button');b.textContent=(t.startsWith('● ')?t.slice(2):t);if(t.startsWith('● '))b.className='sel';
-        const h=Array.isArray(rh)?rh[bi]:'';if(h){const sm=document.createElement('small');sm.className='bh';sm.textContent=h;b.appendChild(sm)}
-        b.onclick=()=>press(t,d);g.appendChild(b)});
-      main.appendChild(g);
-      if(typeof rh==='string'&&rh){const c=document.createElement('div');c.className='rowhint';c.textContent=rh;main.appendChild(c)}
-      return}
-    row.forEach(([t,d],bi)=>{
-      if(/^[^\p{L}]*Назад$/u.test(t)||t.startsWith('«')) return;
-      if(!list){list=document.createElement('div');list.className='list';main.appendChild(list)}
-      const s=split(t);const b=document.createElement('button');b.className='cell'+(/^🗑|видалити/i.test(t)?' danger':'');
-      b.innerHTML='<span class="em"></span><span class="lb"></span>'+(s.badge?'<span class="badge"></span>':'')+'<span class="chev">›</span>';
-      b.querySelector('.em').textContent=s.icon||'•';b.querySelector('.lb').textContent=s.rest;if(s.badge)b.querySelector('.badge').textContent=s.badge;
-      const h=typeof rh==='string'?rh:(rh||[])[bi];if(h){const sm=document.createElement('small');sm.className='bh';sm.textContent=h;b.querySelector('.lb').appendChild(sm)}
-      b.onclick=()=>press(t,d);list.appendChild(b)});
-    if(row.length>1) list=null;
-  });
+  if(res.sections&&res.sections.length){drawSections(main,res);}
+  else drawRows(main,res.rows,res.hints);
   if(!(res.rows||[]).length && !rest.trim()){const e=document.createElement('div');e.className='empty';e.textContent='Тут поки порожньо';main.appendChild(e)}
   if(res.toast) toast(res.toast);
   if(res.awaiting) askInput(res.text);
