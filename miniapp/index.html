@@ -64,7 +64,7 @@ body.marking .cell,body.marking .seg button,body.marking .card{outline:1.5px das
 .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0 0 6px}
 .tile{position:relative;border:0;background:var(--card);color:var(--txt);border-radius:14px;padding:12px 22px 12px 12px;display:flex;align-items:center;gap:10px;font:inherit;font-size:14.5px;text-align:left;cursor:pointer;min-height:54px}
 .tile .em{font-size:20px;flex:none}.tile .tx{flex:1;min-width:0}.tile small{display:block;color:var(--hint);font-size:11.5px;line-height:1.2;margin-top:2px;overflow:hidden}.tile .q{position:absolute;top:4px;right:6px;color:var(--hint);font-size:13px;padding:2px 4px}.tile:active{transform:scale(.97);background:color-mix(in srgb,var(--hint) 14%,var(--card))}
-.info{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:0 0 4px}
+.info{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin:0 0 4px}
 .info button{border:0;background:var(--card);color:var(--txt);border-radius:14px;padding:10px;font:inherit;text-align:left;cursor:pointer;min-width:0}
 .tile.pick{outline:2px solid var(--acc);outline-offset:-2px}.tile .num{position:absolute;top:6px;right:6px;background:var(--acc);color:var(--acct);border-radius:50%;width:22px;height:22px;display:grid;place-items:center;font-size:12px;font-weight:700}
 .edit{display:flex;gap:8px;margin:-6px 0 4px}.edit button{flex:1;border:0;border-radius:12px;padding:10px;font:inherit;font-size:14.5px;background:var(--card);color:var(--txt);cursor:pointer}.edit .pri{background:var(--acc);color:var(--acct);font-weight:650}
@@ -135,7 +135,7 @@ function renderChat(res, typing){
   const main=document.getElementById('main'); main.innerHTML='';
   const top=document.createElement('div');top.className='top';top.innerHTML='<h1></h1>';top.querySelector('h1').textContent='💬 '+(res.dialog||'Розмова');
   const chat=document.createElement('button');chat.className='ic pill';chat.textContent='↗ Чат-бот';chat.title='Продовжити в чаті з ботом';chat.onclick=toChat;top.appendChild(chat);main.appendChild(top);
-  const sub=document.createElement('div');sub.className='sub';sub.textContent='Та сама розмова, що й у чаті з ботом: пишіть тут або там — історія спільна.';main.appendChild(sub);
+  const sub=document.createElement('div');sub.className='sub';sub.textContent=res.limits?('📊 '+res.limits):'Та сама розмова, що й у чаті з ботом: пишіть тут або там — історія спільна.';main.appendChild(sub);
   let lastProv='';
   for(const m of res.messages||[]){const b=document.createElement('div');b.className='bub '+(m.role==='user'?'user':'assistant');b.textContent=m.text;
     if(m.role!=='user'){

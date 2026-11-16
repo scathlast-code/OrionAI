@@ -1072,7 +1072,10 @@ def mark_error(pid, info):
 
 
 def paused_until(pid):
-    until = get_state(pid).get("cooldown_until")
+    st = get_state(pid)
+    until = st.get("cooldown_until")
+    if pid == "gemini" and st.get("cooldown_kind") in ("rate_day", "rate") and pid in PROVIDERS and len(gemini_models(PROVIDERS[pid])) > 1:
+        return None  # денний ліміт вичерпала одна модель Gemini — інші моделі тим самим ключем ще можуть відповідати
     return until if until and until > time.time() else None
 
 
@@ -1346,6 +1349,24 @@ def has_images(messages):
     return any(isinstance(m.get("content"), list) for m in messages)
 
 
+GEM_OUT = {}  # модель Gemini -> до коли вичерпано її денний ліміт (у кожної моделі Gemini свій ліміт)
+
+
+def pacific_reset():
+    """Денні ліміти Google оновлюються опівночі за тихоокеанським часом."""
+    from zoneinfo import ZoneInfo
+    la = datetime.now(ZoneInfo("America/Los_Angeles"))
+    nxt = (la + timedelta(days=1)).replace(hour=0, minute=0, second=5, microsecond=0)
+    return nxt.timestamp()
+
+
+def gemini_models(p):
+    """Основна модель Gemini і запасні (тим самим ключем), без тих, чий денний ліміт уже вичерпано."""
+    alts = [m.strip() for m in env("GEMINI_FALLBACK_MODELS", "gemini-flash-lite-latest,gemini-2.5-flash-lite").split(",") if m.strip()]
+    out = [m for m in [p["model"]] + alts if GEM_OUT.get(m, 0) <= time.time()]
+    return list(dict.fromkeys(out))
+
+
 WARN_EXTRA = contextvars.ContextVar("warn_extra", default=None)  # попередження з глибини виклику (заміна моделі тощо)
 NO_REASONING = set()  # моделі, які не приймають reasoning_effort — більше не надсилаємо
 
@@ -1361,6 +1382,11 @@ def reasoning_for(p):
 
 async def post_chat(client, p, messages, use_tools):
     o = OPTS.get() or {}
+    if p["id"] == "gemini" and not p.get("_alt") and GEM_OUT.get(p["model"], 0) > time.time():
+        live = gemini_models(p)
+        if live:  # основна модель вичерпала денний ліміт — одразу запасна, без зайвого запиту
+            p = {**p, "model": live[0], "_alt": True}
+            WARN_EXTRA.set((WARN_EXTRA.get() or []) + [f"⚡ основна модель Gemini вичерпала денний ліміт — відповідає {live[0]}"])
     body = {"model": p["model"], "messages": messages, "max_tokens": o.get("max_tokens", MAX_TOKENS)}
     effort = reasoning_for(p)
     if effort:
@@ -1381,14 +1407,16 @@ async def post_chat(client, p, messages, use_tools):
         count_request(p["id"], error=True)
         raise ProviderError("network", str(e) or type(e).__name__, 300 if p["id"] == "ollama_local" else 120)
     save_ratelimit(p["id"], r.headers)
-    if r.status_code in (500, 503) and p["id"] == "gemini" and not p.get("_alt"):
+    if r.status_code == 429 and p["id"] == "gemini" and re.search(r"per ?day|perday|daily|quota", r.text.lower()):
+        GEM_OUT[p["model"]] = pacific_reset()  # вичерпано саме цю модель — інші моделі Gemini мають окремі ліміти
+    if r.status_code in (429, 500, 503) and p["id"] == "gemini" and not p.get("_alt"):
         # «This model is currently experiencing high demand» — пробуємо легші моделі Gemini тим самим ключем
-        for alt in [m.strip() for m in env("GEMINI_FALLBACK_MODELS", "gemini-flash-lite-latest,gemini-2.5-flash-lite").split(",") if m.strip()]:
+        for alt in gemini_models(p):
             if alt == p["model"]:
                 continue
             try:
                 msg, finish = await post_chat(client, {**p, "model": alt, "_alt": True}, messages, use_tools)
-                warn = f"⚡ {p['model']} перевантажена — відповіла {alt}"
+                warn = f"⚡ {p['model']} {'— денний ліміт вичерпано' if r.status_code == 429 else 'перевантажена'} — відповіла {alt}"
                 WARN_EXTRA.set((WARN_EXTRA.get() or []) + [warn])
                 return msg, finish
             except ProviderError:
@@ -1401,6 +1429,8 @@ async def post_chat(client, p, messages, use_tools):
         kind, cooldown = classify(r.status_code, r.text, r.headers)
         raise ProviderError(kind, f"HTTP {r.status_code}: {r.text[:300]}", cooldown)
     count_request(p["id"])
+    if p["id"] == "gemini":
+        count_request(f"gemini:{p['model']}")
     try:
         choice = r.json()["choices"][0]
         return choice["message"], choice.get("finish_reason")
@@ -2470,7 +2500,8 @@ def scr_home(chat_id, open_group=None):
         + "<b>🏠 Головне меню</b>\n\n"
         f"💬 Розмова: <b>{esc(d['title'])}</b>\n"
         f"🤖 Відповідає: <b>{esc(choice_label(get_choice(chat_id)))}</b>\n"
-        f"⏰ Завдань в очікуванні: <b>{open_tasks}</b>\n\n"
+        f"⏰ Завдань в очікуванні: <b>{open_tasks}</b>\n"
+        f"📊 Сьогодні: {esc(limits_brief(short=True))}\n\n"
         "Натисніть ▼, щоб розгорнути розділ. Натисніть ▲, щоб згорнути."
     )
     pending = len(members_list("pending")) if is_admin_id(chat_id) else 0
@@ -2758,6 +2789,7 @@ def scr_models(chat_id):
         "<b>🤖 Моделі</b>\n",
         f"Зараз відповідає: <b>{esc(choice_label(cur, chat_id) if mode != 'one' or cur != 'auto' else 'ще не обрано — торкніться моделі')}</b>",
         MODEL_MODE_HINT[mode],
+        f"\n📊 Запитів сьогодні: {esc(limits_brief())}\n<i>Денні ліміти Google оновлюються о {hhmm(pacific_reset())}; точний ліміт видно в AI Studio.</i>",
         "\n✅ працює · ⏸ на паузі · ⚠️ були помилки · ❌ потрібні дії · 🩺 «Перевірити моделі» покаже, що з кожною",
     ]
     if mode == "pool" and not [p for p in pool if p in PROVIDERS]:
@@ -2820,6 +2852,23 @@ async def models_check():
     res = dict(await asyncio.gather(*(one(p) for p in PROVIDERS))) if PROVIDERS else {}
     kv_set("mdtest", json.dumps({"ts": time.time(), "res": res}))
     return res
+
+
+def limits_brief(short=False):
+    """Скільки запитів сьогодні й що з лімітами — коротко, для меню, застосунку й екрана моделей."""
+    parts = []
+    for pid, p in PROVIDERS.items():
+        used, _ = usage(pid, "day")
+        lim = p.get("limit")
+        cap = f"/{lim[1]}" if lim and lim[0] == "day" else ""
+        pu = paused_until(pid)
+        st = f"⏸ до {hhmm(pu)}" if pu else ""
+        if pid == "gemini":
+            out = [m for m, t in GEM_OUT.items() if t > time.time()]
+            if out and not short:
+                st = (st + " · " if st else "") + "вичерпано: " + ", ".join(out) + f" (до {hhmm(pacific_reset())})"
+        parts.append(f"{p['title']} {used}{cap}" + (f" {st}" if st else ""))
+    return " · ".join(parts) or "моделі не підключені"
 
 
 def scr_mdtest():
