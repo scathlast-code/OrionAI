@@ -49,6 +49,21 @@ class ShortIO:
         if link_id is not None: params["linkId"]=str(link_id)
         return await self.request("GET",f"{STATS}/statistics/domain/{self.domain_id}/{allowed[dimension]}",params=params)
 
+    async def link_stats(self, link_id):
+        """Статистика одного посилання за весь час → {'clicks': {'total': n}, 'country': {...}, 'city': {...}, ...}."""
+        data = await self.request('GET', f'{STATS}/statistics/link/{link_id}', params={'period': 'total', 'tz': 'Europe/Kiev'})
+        if not isinstance(data, dict): raise ShortIOError('Неочікувана відповідь статистики')
+        out = {'clicks': {'total': int(data.get('humanClicks') or data.get('totalClicks') or 0)}}
+        for dim, src, keys in (('country', 'country', ('countryName', 'country')), ('city', 'city', ('cityName', 'city', 'name')),
+                               ('browser', 'browser', ('browser',)), ('os', 'os', ('os',)), ('referrer', 'referer', ('referer', 'referrer', 'social'))):
+            rows = data.get(src) or data.get(dim) or []
+            counts = {}
+            for r in rows if isinstance(rows, list) else []:
+                k = next((r.get(x) for x in keys if isinstance(r, dict) and r.get(x)), None)
+                if k: counts[str(k)] = counts.get(str(k), 0) + int(r.get('score') or r.get('count') or 0)
+            if counts: out[dim] = counts
+        return out
+
     async def list_links(self, limit=50):
         if not self.domain_id or not str(self.domain_id).isdigit(): raise ShortIOError('Потрібен SHORTIO_DOMAIN_ID')
         return await self.request('GET',API+'/api/links',params={'domain_id':self.domain_id,'limit':max(1,min(limit,150))})
