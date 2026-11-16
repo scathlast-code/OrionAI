@@ -1637,8 +1637,14 @@ async def _ask_llm(history, user_content, preferred=None, fallback=True, exclude
     cands = ready + (paused if fallback else [])
     for k, pid in enumerate(cands, 1):
         prev = [a for a in attempts if a[1].get("kind") != "paused"]
+        limit = int(OLLAMA_TIMEOUT if pid == "ollama_local" else REQUEST_TIMEOUT)
         progress_stage((f"↪️ {PROVIDERS[prev[-1][0]]['title']} не відповіла ({ERR_SHORT.get(prev[-1][1]['kind'], prev[-1][1]['kind'])}) — " if prev else "")
-                       + f"🤖 {PROVIDERS[pid]['title']} думає…" + (f" (спроба {k} з {len(cands)})" if k > 1 else ""), 2, 3)
+                       + f"🤖 {PROVIDERS[pid]['title']} думає… (чекаю до {limit} с"
+                       + (", далі — інша модель)" if k < len(cands) else ")") + (f" · спроба {k} з {len(cands)}" if k > 1 else ""), 2, 3)
+        if CHAT.get():
+            LIVE[CHAT.get()] = {"title": PROVIDERS[pid]["title"], "model": PROVIDERS[pid]["model"], "t0": time.time(),
+                                "limit": limit, "try": k, "of": len(cands),
+                                "prev": (PROVIDERS[prev[-1][0]]["title"] + " — " + ERR_SHORT.get(prev[-1][1]["kind"], prev[-1][1]["kind"])) if prev else ""}
         try:
             text, warnings = await ask_provider(PROVIDERS[pid], messages)
         except ProviderError as e:
@@ -1650,12 +1656,14 @@ async def _ask_llm(history, user_content, preferred=None, fallback=True, exclude
             await maybe_alert(pid, info, fails)
             continue
         mark_ok(pid)
+        LIVE.pop(CHAT.get(), None)
         attempts = [a for a in attempts if a[0] != pid]
         partial = any(w.startswith("✂️") for w in warnings)
         journal_update(jid, status="partial" if partial else "done", provider=pid, result=text[:8000],
                        attempts="\n".join(attempt_line(p, i) for p, i in attempts) or None)
         LAST_JOURNAL.set(jid)
         return text, pid, attempts, warnings + low_limit_warnings(pid)
+    LIVE.pop(CHAT.get(), None)
     journal_update(jid, status="failed", attempts="\n".join(attempt_line(p, i) for p, i in attempts))
     LAST_JOURNAL.set(jid)
     raise Unavailable(attempts)
@@ -3922,6 +3930,16 @@ class Progress:
             await self.bot.send_message(self.chat_id, f"🛑 Зупинено через {sec} с: {self.title}.\nЗапит лишився в 📒 Журналі — його можна виконати знову.")
             return True  # зупинку обробили — далі не пробрасываємо
         return False
+
+
+LIVE = {}  # chat -> яка модель зараз думає: для «Думаю…» у застосунку
+
+
+def live_info(chat_id):
+    v = LIVE.get(chat_id)
+    if not v:
+        return None
+    return {**v, "sec": int(time.time() - v["t0"])}
 
 
 def progress_stage(text, step=None, of=None):
@@ -8525,6 +8543,8 @@ async def main():
                 rows = L.decorate(uid, res["rows"], nav=True, current=data)
                 await tg_app.bot.send_message(uid, res["text"][:4096], parse_mode=ParseMode.HTML, reply_markup=kb(rows), link_preview_options=NO_PREVIEW)
             return _Resp(json.dumps({"ok": True}), media_type="application/json")
+        if op == "progress":  # «Думаю…» у застосунку: яка модель, скільки думає й скільки їй відведено
+            return _Resp(json.dumps(live_info(uid) or {}, ensure_ascii=False), media_type="application/json")
         if op == "tabs":  # ☰ → «✏️ Панель унизу»: які кнопки показувати внизу застосунку
             res = _mini.save_tabs(sys.modules[__name__], uid, body.get("tabs"))
             return _Resp(json.dumps(res, ensure_ascii=False), media_type="application/json")

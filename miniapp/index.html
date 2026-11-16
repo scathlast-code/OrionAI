@@ -51,7 +51,7 @@ body.marking .cell,body.marking .seg button,body.marking .card{outline:1.5px das
 .composer textarea{flex:1;resize:none;height:42px;max-height:120px;border-radius:21px;border:1px solid var(--sep);background:var(--card);color:var(--txt);padding:10px 14px;font:inherit}
 .composer button{border:0;width:42px;height:42px;border-radius:50%;background:var(--card);color:var(--txt);font-size:18px;cursor:pointer;flex:none}
 .composer .send{background:var(--acc);color:var(--acct)}
-.typing{color:var(--hint);font-size:13px;margin:6px 2px}
+.typing{color:var(--hint);font-size:13px;margin:6px 2px;white-space:pre-wrap}
 .bh{display:block;color:var(--hint);font-size:11px;line-height:1.2;margin-top:2px;font-weight:400;white-space:normal}.rowhint{color:var(--hint);font-size:11px;line-height:1.25;margin:-9px 6px 12px}.seg button{white-space:normal;flex:1 1 0}
 .empty{text-align:center;color:var(--hint);padding:50px 10px}
 .search{width:100%;border:0;border-radius:12px;background:var(--card);color:var(--txt);padding:11px 14px;font:inherit;margin:0 0 14px}
@@ -134,7 +134,7 @@ function renderChat(res, typing){
   for(const m of res.messages||[]){const b=document.createElement('div');b.className='bub '+(m.role==='user'?'user':'assistant');b.textContent=m.text;
     if(m.provider){const sm=document.createElement('small');sm.textContent=m.provider;b.appendChild(sm)}main.appendChild(b)}
   if(!(res.messages||[]).length){const e=document.createElement('div');e.className='empty';e.textContent='Почніть розмову — напишіть питання, перешліть текст новини або надішліть файл 📎';main.appendChild(e)}
-  if(typing){const t=document.createElement('div');t.className='typing';t.textContent='Думаю над відповіддю…';main.appendChild(t)}
+  if(typing){const t=document.createElement('div');t.className='typing';t.id='typing';t.textContent='Думаю над відповіддю…';main.appendChild(t)}
   main.style.paddingBottom='160px';
   let c=document.getElementById('composer');
   if(!c){c=document.createElement('div');c.id='composer';c.className='composer';
@@ -145,7 +145,9 @@ function renderChat(res, typing){
 }
 async function say(){const ta=document.querySelector('#composer textarea');const t=ta.value.trim();if(!t||busy)return;ta.value='';
   const h=await call('history','chat');if(h){h.messages.push({role:'user',text:t});renderChat(h,true)}
-  const res=await call('say','chat',{text:t,user:userInfo()});if(!res)return;showResult(res)}
+  const tick=setInterval(async()=>{const p=await call('progress','chat');const el=document.getElementById('typing');if(!el||!p||!p.title)return;
+    el.textContent='🤖 '+p.title+' ('+p.model+') думає · '+p.sec+' с з '+p.limit+(p.of>1?' · спроба '+p.try+' з '+p.of:'')+(p.prev?'\n↪️ '+p.prev:'')},1000);
+  const res=await call('say','chat',{text:t,user:userInfo()});clearInterval(tick);if(!res)return;showResult(res)}
 function showResult(res){
   if(res.text){hist.push('chat');cur=null;render(res);return}   // плагін показав екран (ньюзрум, стікери, імпорт…)
   for(const n of res.notes||[]) if(!(res.replies||[]).length) toast(n);
