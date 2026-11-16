@@ -1332,9 +1332,24 @@ def has_images(messages):
     return any(isinstance(m.get("content"), list) for m in messages)
 
 
+NO_REASONING = set()  # моделі, які не приймають reasoning_effort — більше не надсилаємо
+
+
+def reasoning_for(p):
+    """Скільки моделі «думати» перед відповіддю. Менше — відповідь за 1–3 с замість 30+.
+    {ID}_REASONING: none | minimal | low | medium | high | off (не надсилати). Gemini за замовчуванням — low."""
+    if p["id"] in NO_REASONING:
+        return None
+    v = env(f"{p['id'].upper()}_REASONING", "low" if p["id"] == "gemini" else "off").strip().lower()
+    return None if v in ("", "off", "default") else v
+
+
 async def post_chat(client, p, messages, use_tools):
     o = OPTS.get() or {}
     body = {"model": p["model"], "messages": messages, "max_tokens": o.get("max_tokens", MAX_TOKENS)}
+    effort = reasoning_for(p)
+    if effort:
+        body["reasoning_effort"] = effort
     if "temperature" in o:
         body["temperature"] = o["temperature"]
     if use_tools:
@@ -1351,6 +1366,9 @@ async def post_chat(client, p, messages, use_tools):
         count_request(p["id"], error=True)
         raise ProviderError("network", str(e) or type(e).__name__, 300 if p["id"] == "ollama_local" else 120)
     save_ratelimit(p["id"], r.headers)
+    if r.status_code == 400 and effort and "reasoning" in r.text.lower():  # модель не приймає цей рівень — без нього
+        NO_REASONING.add(p["id"])
+        return await post_chat(client, p, messages, use_tools)
     if r.status_code >= 400:
         count_request(p["id"], error=True)
         kind, cooldown = classify(r.status_code, r.text, r.headers)
