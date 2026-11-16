@@ -97,7 +97,7 @@ ALERT_EVERY = 6 * 3600  # не частіше ніж раз на 6 год для
 SYSTEM_PROMPT = env(
     "SYSTEM_PROMPT",
     "Ти — особистий помічник у Telegram. Відповідай мовою користувача, коротко й по суті, "
-    "без Markdown-розмітки (Telegram показує її як звичайний текст). "
+    "гарно оформлено: бот сам перетворює Markdown на форматування Telegram. "
     "Коли користувач просить щось запам'ятати або записати — збережи нотатку інструментом save_note. "
     "Коли питає про збережене — шукай інструментом search_notes. "
     "У тебе є доступ до інтернету через інструмент web_search: коли відповідь залежить від свіжих даних (новини, події, ціни, курси, погода) "
@@ -1377,7 +1377,9 @@ def gemini_models(p):
     return list(dict.fromkeys(out))
 
 
-WARN_EXTRA = contextvars.ContextVar("warn_extra", default=None)  # попередження з глибини виклику (заміна моделі тощо)
+WARN_EXTRA = contextvars.ContextVar("warn_extra", default=None)
+ACTUAL_MODEL = contextvars.ContextVar("actual_model", default="")
+ACTUAL_BY_PID = {}  # сервіс -> модель, що відповіла останньою (основна чи запасна)  # попередження з глибини виклику (заміна моделі тощо)
 NO_REASONING = set()  # моделі, які не приймають reasoning_effort — більше не надсилаємо
 
 
@@ -1439,6 +1441,8 @@ async def post_chat(client, p, messages, use_tools):
         kind, cooldown = classify(r.status_code, r.text, r.headers)
         raise ProviderError(kind, f"HTTP {r.status_code}: {r.text[:300]}", cooldown)
     count_request(p["id"])
+    ACTUAL_MODEL.set(p["model"])
+    ACTUAL_BY_PID[p["id"]] = p["model"]
     if p["id"] == "gemini":
         count_request(f"gemini:{p['model']}")
     try:
@@ -1689,7 +1693,9 @@ async def _ask_llm(history, user_content, preferred=None, fallback=True, exclude
     _now = now()
     today_line = (f"\nЗараз {_now.strftime('%d.%m.%Y, %H:%M')} за Києвом ({['понеділок','вівторок','середа','четвер','пʼятниця','субота','неділя'][_now.weekday()]}). "
                   "Коли просять дізнатися щось актуальне — одразу шукай інструментами (web_search, weather), не перепитуй дозволу. "
-                  "Пиши звичайним текстом: без **зірочок** і без [дужок](посилань) — посилання просто URL.")
+                  "Оформлюй відповідь охайно й наочно (Markdown): на початку короткий рядок-заголовок з доречним емодзі, "
+                  "ключові цифри й назви **жирним**, переліки — списками з емодзі чи «•», дані по днях/пунктах — окремими рядками, "
+                  "посилання — [назва](url), наприкінці джерело. Коротке привітання чи проста відповідь — без зайвого оформлення.")
     messages = [{"role": "system", "content": SYSTEM_PROMPT + today_line + ("\n" + hint if hint else "") + ("\n\n" + extra if extra else "")}] + history + [{"role": "user", "content": user_content}]
     # Search happens in the bot, not in the language model. Works even for models
     # that reject OpenAI tool-calling (e.g. some OpenRouter free models).
@@ -3755,7 +3761,7 @@ async def complete_task(bot, task, text, pid, attempts, warnings, deferred=False
                 f"💬 Розмова: {d['title'] if d else '—'}\n\n")
     show_footer = prefs(task["chat_id"])["footer"] or attempts or warnings
     tail = footer(pid, attempts, warnings) if show_footer else ""
-    await send_long(bot, task["chat_id"], demarkdown(text), head=head, foot=tail)
+    await send_long(bot, task["chat_id"], demarkdown(text), head=head, foot=tail, html=md_html(text))
     await send_media(bot, task["chat_id"], MEDIA.get())
 
 
@@ -7418,12 +7424,13 @@ async def send_media(bot, chat_id, items):
 
 
 def footer(pid, attempts, warnings):
-    lines = [f"— {PROVIDERS[pid]['title']} · {PROVIDERS[pid]['model']}"]
+    real = ACTUAL_BY_PID.get(pid) or PROVIDERS[pid]["model"]  # модель, що справді відповіла (може бути запасна)
+    lines = [f"— {PROVIDERS[pid]['title']} · {real}"]
     lines += [attempt_line(p, i) for p, i in attempts]
-    lines += warnings
+    lines += [w for w in warnings if not (pid == "gemini" and "вичерпала денний ліміт — відповідає" in w and real in w)]
     if attempts:
         lines.append("Деталі: /limits")
-    return "\n".join(lines)
+    return "\n".join(dict.fromkeys(l for l in lines if l))  # без повторів
 
 
 async def cmd_privacy_mode(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -7507,6 +7514,23 @@ async def finish_note(bot, chat_id, did, outcome, jid=None, pid=None, q=None):
                            parse_mode=ParseMode.HTML, reply_markup=kb(rows))
 
 
+def md_html(t):
+    """Markdown моделі → HTML Telegram: **жирне**, *курсив*, `код`, ```блок```, [текст](url), # заголовки, списки «•»."""
+    t = t or ""
+    blocks = []
+    t = re.sub(r"```[\w-]*\n?(.*?)```", lambda m: blocks.append(m.group(1)) or f"\x00{len(blocks) - 1}\x00", t, flags=re.S)
+    t = esc(t)
+    t = re.sub(r"`([^`\n]+)`", r"<code>\1</code>", t)
+    t = re.sub(r"\[([^\]\n]{1,120})\]\((https?://[^)\s]+)\)", lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>', t)
+    t = re.sub(r"(?m)^#{1,6}\s+(.+)$", r"<b>\1</b>", t)
+    t = re.sub(r"\*\*([^*\n]+)\*\*", r"<b>\1</b>", t)
+    t = re.sub(r"__([^_\n]+)__", r"<b>\1</b>", t)
+    t = re.sub(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])", r"<i>\1</i>", t)
+    t = re.sub(r"(?m)^(\s*)[-*]\s+", r"\1• ", t)
+    t = re.sub(r"\x00(\d+)\x00", lambda m: f"<pre>{esc(blocks[int(m.group(1))])}</pre>", t)
+    return t
+
+
 def demarkdown(t):
     """Telegram показує Markdown сирим: **жирне** → жирне, [текст](url) → текст: url, ### Заголовок → Заголовок."""
     t = re.sub(r"\[([^\]\n]{1,120})\]\((https?://[^)\s]+)\)", lambda m: m.group(2) if m.group(1).strip() in m.group(2) else f"{m.group(1)}: {m.group(2)}", t or "")
@@ -7547,7 +7571,6 @@ async def _answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE, content, histo
         if away:
             await finish_note(ctx.bot, chat_id, did, "unavailable", q=history_text)
         return None
-    text = demarkdown(text)
     jid = LAST_JOURNAL.get()
     save_message(chat_id, "assistant", text, provider=pid, dialog_id=did)
     outcome = answer_outcome(text)
@@ -7564,10 +7587,10 @@ async def _answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE, content, histo
         top += f"↪️ Відповідає {PROVIDERS.get(pid, {}).get('title', pid)} — {', '.join(skipped)} не відповіла\n\n"
     body = text
     if jid and any(w.startswith("✂️") for w in warnings):
-        await send_long(ctx.bot, chat_id, body, head=top, foot=foot)
+        await send_long(ctx.bot, chat_id, demarkdown(body), head=top, foot=foot, html=md_html(body))
         await ctx.bot.send_message(chat_id, "✂️ Відповідь обірвалася.", reply_markup=kb([[("▶️ Продовжити · 🔁 Авто", f"m:jrun:{jid}:auto")], [("📒 Інша модель…", f"m:j:{jid}")]]))
     else:
-        await send_long(ctx.bot, chat_id, body, head=top, foot=foot)
+        await send_long(ctx.bot, chat_id, demarkdown(body), head=top, foot=foot, html=md_html(body))
     await send_media(ctx.bot, chat_id, MEDIA.get())
     if away or (parallel and outcome != "done") or (time.time() - started > 60 and outcome == "done" and away):
         await finish_note(ctx.bot, chat_id, did, outcome, jid=jid, pid=pid, q=history_text)
