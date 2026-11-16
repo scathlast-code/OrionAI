@@ -1332,6 +1332,7 @@ def has_images(messages):
     return any(isinstance(m.get("content"), list) for m in messages)
 
 
+WARN_EXTRA = contextvars.ContextVar("warn_extra", default=None)  # попередження з глибини виклику (заміна моделі тощо)
 NO_REASONING = set()  # моделі, які не приймають reasoning_effort — більше не надсилаємо
 
 
@@ -1366,6 +1367,18 @@ async def post_chat(client, p, messages, use_tools):
         count_request(p["id"], error=True)
         raise ProviderError("network", str(e) or type(e).__name__, 300 if p["id"] == "ollama_local" else 120)
     save_ratelimit(p["id"], r.headers)
+    if r.status_code in (500, 503) and p["id"] == "gemini" and not p.get("_alt"):
+        # «This model is currently experiencing high demand» — пробуємо легші моделі Gemini тим самим ключем
+        for alt in [m.strip() for m in env("GEMINI_FALLBACK_MODELS", "gemini-flash-lite-latest,gemini-2.5-flash-lite").split(",") if m.strip()]:
+            if alt == p["model"]:
+                continue
+            try:
+                msg, finish = await post_chat(client, {**p, "model": alt, "_alt": True}, messages, use_tools)
+                warn = f"⚡ {p['model']} перевантажена — відповіла {alt}"
+                WARN_EXTRA.set((WARN_EXTRA.get() or []) + [warn])
+                return msg, finish
+            except ProviderError:
+                continue
     if r.status_code == 400 and effort and "reasoning" in r.text.lower():  # модель не приймає цей рівень — без нього
         NO_REASONING.add(p["id"])
         return await post_chat(client, p, messages, use_tools)
@@ -1384,6 +1397,7 @@ async def post_chat(client, p, messages, use_tools):
 async def ask_provider(p, messages):
     """Розмова з одним сервісом, включно з інструментами. Повертає (текст, попередження)."""
     pid, warnings = p["id"], []
+    WARN_EXTRA.set([])
     if pid in NO_IMAGES and has_images(messages):
         messages = strip_images(messages)
         warnings.append("🖼 Модель не бачить фото, отримала лише підпис. Для фото оберіть Gemini.")
@@ -1413,7 +1427,7 @@ async def ask_provider(p, messages):
                     raise ProviderError("empty", "модель повернула порожню відповідь", None)
                 if finish == "length":
                     warnings.append("✂️ Відповідь обірвалася через ліміт довжини — «▶️ Продовжити» допише її з того самого місця (можна іншою моделлю).")
-                return text, warnings
+                return text, warnings + (WARN_EXTRA.get() or [])
             messages = messages + [{"role": "assistant", "content": msg.get("content") or "", "tool_calls": calls}]
             for c in calls:
                 try:
@@ -1707,7 +1721,8 @@ BACKGROUND = set()  # посилання на фонові задачі, щоб 
 
 async def maybe_alert(pid, info, fails):
     kind = info["kind"]
-    serious = kind in ALERT_KINDS or (kind in ("network", "timeout", "overloaded", "bad_response", "bad_request") and fails >= 3)
+    # тимчасові збої (перевантаження, тайм-аут) не засмічують чат: відповідає інша модель, причина — під відповіддю
+    serious = kind in ALERT_KINDS or (kind in ("network", "bad_response", "bad_request") and fails >= 3) or (kind in ("timeout", "overloaded") and fails >= 20)
     if not serious or tg_app is None or not ALLOWED_USERS or not prefs(ALLOWED_USERS[0])["alerts"]:
         return
     if time.time() - ALERTED.get((pid, kind), 0) < ALERT_EVERY:
