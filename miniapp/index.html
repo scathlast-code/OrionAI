@@ -47,7 +47,7 @@ body.marking .cell,body.marking .seg button,body.marking .card{outline:1.5px das
 .bub{max-width:86%;padding:9px 12px;border-radius:16px;margin:6px 0;white-space:pre-wrap;overflow-wrap:anywhere;font-size:15px}
 .arow{display:flex;gap:8px;align-items:flex-end;margin:6px 0}.arow .bub{margin:0}
 .ava{flex:none;width:30px;height:30px;border-radius:50%;display:grid;place-items:center;color:#fff;font-size:14px;font-weight:700}
-.mbar{display:flex;gap:6px;overflow-x:auto;margin:-4px 0 12px;padding-bottom:2px}.mbar button{flex:none;border:0;border-radius:16px;padding:6px 12px;background:var(--card);color:var(--txt);font:inherit;font-size:13.5px}.mbar button.on{background:var(--acc);color:var(--acct);font-weight:600}
+.mbar{position:fixed;left:0;right:0;bottom:calc(116px + env(safe-area-inset-bottom));display:flex;gap:6px;overflow-x:auto;padding:6px 12px;background:var(--bg);z-index:5}.mbar button{flex:none;border:0;border-radius:16px;padding:6px 12px;background:var(--card);color:var(--txt);font:inherit;font-size:13.5px}.mbar button.on{background:var(--acc);color:var(--acct);font-weight:600}
 .switch{text-align:center;margin:10px 0}.switch span{display:inline-block;font-size:12px;color:var(--hint);background:var(--card);border-radius:12px;padding:4px 10px}
 .bub.user{margin-left:auto;background:var(--acc);color:var(--acct);border-bottom-right-radius:5px}
 .bub.assistant{background:var(--card);border-bottom-left-radius:5px}.bub b{font-weight:650}.bub a{color:var(--acc)}.bub pre{white-space:pre-wrap;background:color-mix(in srgb,var(--hint) 14%,transparent);padding:8px;border-radius:8px;font-size:13px}.bub small{display:block;opacity:.65;font-size:11.5px;margin-top:3px}
@@ -114,7 +114,7 @@ async function call(op, data, extra){
     if(r.status===403){render({text:'<b>Немає доступу</b>\nЦей застосунок відкривається лише для учасників бота.',rows:[]},true);return null}
     if(!r.ok){toast('Помилка API: HTTP '+r.status);return null}
     return await r.json()}catch(e){toast(e instanceof SyntaxError?'Некоректна відповідь сервера':'Сервер API недоступний');return null}finally{busy=false}}
-function loading(){const m=document.getElementById('main');m.innerHTML='<div class="skel"></div><div class="skel"></div><div class="skel"></div>';const c=document.getElementById('composer');if(c)c.style.display='none'}
+function loading(){const m=document.getElementById('main');m.innerHTML='<div class="skel"></div><div class="skel"></div><div class="skel"></div>';const c=document.getElementById('composer');if(c)c.style.display='none';const mb=document.getElementById('mbar');if(mb)mb.remove()}
 async function open_(data, push=true){
   if(data==='m:home'||data==='m:nav:home') return openMenu(push);
   // «Назад» веде на попередній ЕКРАН, а не на попереднє налаштування: вибір на тому самому екрані історію не множить,
@@ -154,9 +154,9 @@ function renderChat(res, typing){
     const bar=document.createElement('div');bar.className='mbar';
     for(const m of res.models){const b=document.createElement('button');b.textContent=m.title;if(m.on)b.className='on';
       b.onclick=async()=>{haptic();await call('screen',m.id==='auto'?'m:mmode:all':'m:pick:'+m.id);toast('Відповідає: '+m.title);const h=await call('history','chat');if(h)renderChat(h)};bar.appendChild(b)}
-    main.insertBefore(bar,main.children[2]||null)}
+    const old=document.getElementById('mbar');if(old)old.remove();bar.id='mbar';document.body.appendChild(bar)}
   if(typing){const t=document.createElement('div');t.className='typing';t.id='typing';t.textContent='Думаю над відповіддю…';main.appendChild(t)}
-  main.style.paddingBottom='160px';
+  main.style.paddingBottom='200px';
   let c=document.getElementById('composer');
   if(!c){c=document.createElement('div');c.id='composer';c.className='composer';
     c.innerHTML='<button title="Файл або фото">📎</button><textarea placeholder="Повідомлення…"></textarea><button class="send">➤</button>';
@@ -255,7 +255,7 @@ function drawSections(main,res){
 }
 function render(res, bare){
   const main=document.getElementById('main'); main.innerHTML=''; main.style.paddingBottom='';
-  const comp=document.getElementById('composer'); if(comp) comp.style.display='none';
+  const comp=document.getElementById('composer'); if(comp) comp.style.display='none'; const mb=document.getElementById('mbar'); if(mb) mb.remove();
   const lines=(res.text||'').split('\n'); const title=lines.shift().replace(/<[^>]+>/g,'').trim();
   let rest=lines.join('\n').replace(/^\n+/,''); let sub='';
   const p=rest.split('\n\n'); if(p.length>1 && p[0].length<160 && !/<b>/.test(p[0])){sub=p.shift();rest=p.join('\n\n')}
@@ -283,7 +283,7 @@ async function openMenu(push=true){
 }
 function renderMenu(res){
   const main=document.getElementById('main'); const q=(document.getElementById('msearch')||{}).value||'';
-  main.innerHTML=''; main.style.paddingBottom=''; const comp=document.getElementById('composer'); if(comp) comp.style.display='none';
+  main.innerHTML=''; main.style.paddingBottom=''; const comp=document.getElementById('composer'); if(comp) comp.style.display='none'; const mb=document.getElementById('mbar'); if(mb) mb.remove();
   const top=document.createElement('div');top.className='top';top.innerHTML='<h1>☰ Меню</h1>';main.appendChild(top);
   const info=document.createElement('div');info.className='info';
   for(const it of res.info||[]){const b=document.createElement('button');b.innerHTML='<small></small><b></b>';b.querySelector('small').textContent=it.icon+' '+it.label;b.querySelector('b').textContent=it.value;b.onclick=()=>press(it.label,it.data);info.appendChild(b)}
