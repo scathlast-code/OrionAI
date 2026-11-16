@@ -218,7 +218,9 @@ def menu(B, uid):
             if i.startswith("g:"):
                 subs += items(i, path + [L.label(uid, i)])
             elif i not in ("menu", "app"):
-                own.append({"key": i, "label": L.label(uid, i), "data": L.target(i), "hint": explain.short(i), "why": f"m:why:{i}" if i in explain.E else ""})
+                o = (B.prefs(uid).get("hint_over") or {}).get(__import__("button_hints").norm_label(L.label(uid, i))) or {}
+                own.append({"key": i, "label": L.label(uid, i), "data": L.target(i), "hint": o.get("t", explain.short(i)), "hs": o.get("s", 0),
+                            "why": f"m:why:{i}" if i in explain.E else ""})
         return ([{"title": " › ".join(path), "items": own}] if own else []) + subs
 
     sections = items(PLACE_HOME, [])
@@ -303,8 +305,8 @@ async def run(bot_module, uid, op, data=None, text=None, user=None, file=None):
     if secs:  # об'єднаний розділ — частинами, щоб кожну можна було згорнути
         for sec in secs:
             sec["rows"] = clean_rows([[(t, d) for t, d in r if d != "m:noop"] for r in sec["rows"]])
-            sec["hints"] = button_hints.for_rows(sec["rows"])
-    return {"text": text_out, "rows": rows, "hints": button_hints.for_rows(rows), "sections": secs or None, "toast": sink.toast, "notes": sink.notes[-5:], "awaiting": uid in B.AWAIT,
+            sec["hints"] = button_hints.apply_over(sec["rows"], button_hints.for_rows(sec["rows"]), B.prefs(uid).get("hint_over"))
+    return {"text": text_out, "rows": rows, "hints": button_hints.apply_over(rows, button_hints.for_rows(rows), B.prefs(uid).get("hint_over")), "sections": secs or None, "toast": sink.toast, "notes": sink.notes[-5:], "awaiting": uid in B.AWAIT,
             "view": bool(op == "screen" and data and B.is_view(data)),
             "replies": [re.sub(r"<[^>]+>", "", t)[:6000] for t in replies[-5:]]}
 
@@ -314,3 +316,16 @@ def page():
         return PAGE.read_text("utf-8")
     except OSError:
         return None
+
+
+def save_hint(B, uid, label, text, size):
+    """Власний підпис під кнопкою: текст ("" — сховати, None — повернути стандартний) і розмір шрифту (0 — авто)."""
+    import button_hints
+    over = dict(B.prefs(uid).get("hint_over") or {})
+    key = button_hints.norm_label(label)
+    if text is None:
+        over.pop(key, None)
+    else:
+        over[key] = {"t": str(text)[:120], "s": max(0, min(16, float(size or 0)))}
+    B.set_pref(uid, "hint_over", over)
+    return {"ok": True}
