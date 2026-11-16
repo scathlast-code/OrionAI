@@ -151,7 +151,7 @@ def test_registry_toggle_and_admin(tmp_path):
     host, bot, _ = make_host(tmp_path, lambda p, n: "{}")
     reg = Registry(host)
     assert set(reg.plugins) == {"hub", "news", "stk", "inb"}
-    assert "Ньюзрум" not in reg.home(5)[0]          # не адміністратор не бачить ньюзрум
+    assert "m:pl:news" not in str(reg.home(5)[1]) and "лише для власника" in reg.home(5)[0]  # без кнопки, лише пояснення
     toast, _ = run(reg.route(None, None, 5, ["news"]))
     assert "власника" in toast
     assert reg.is_view(["news", "d", "3"]) and not reg.is_view(["news", "ok", "3"])

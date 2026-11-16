@@ -3,6 +3,8 @@
 - Незнайомі (не учасники ШІ) пишуть будь-що — повідомлення копіюються власнику з підписом і кнопками.
 - Учасники пишуть власнику через «📮 Написати власнику» або /owner (звичайні їхні повідомлення йдуть до ШІ).
 - Власник відповідає reply на скопійоване повідомлення (будь-яким типом) або кнопкою «↩️ Відповісти».
+- 📣 Канали й коментарі: бот — адміністратор вашого каналу та його групи обговорення → нові дописи й коментарі
+  (а також повідомлення каналу, якщо вони приходять у групу) теж падають у скриньку; відповідь reply іде прямо в коментарі.
 """
 from __future__ import annotations
 
@@ -23,6 +25,8 @@ CREATE TABLE IF NOT EXISTS msgs (id INTEGER PRIMARY KEY AUTOINCREMENT, user INTE
 CREATE INDEX IF NOT EXISTS msgs_owner ON msgs(owner_chat, owner_msg);
 CREATE INDEX IF NOT EXISTS msgs_user ON msgs(user, id);
 CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS chats (chat INTEGER PRIMARY KEY, title TEXT, type TEXT, username TEXT, posts INTEGER DEFAULT 0,
+    comments INTEGER DEFAULT 0, asked INTEGER DEFAULT 0, seen REAL);
 """
 DEFAULTS = {"who": "all", "greeting": "👋 Вітаю! Напишіть повідомлення або надішліть новину, фото чи файл — я передам власнику, і він відповість тут.",
             "ack": "1", "silent": "0", "flood": "20"}
@@ -55,6 +59,8 @@ class Plugin(Base):
         self.db_path = self.dir / "inbox.db"
         with closing(self.db()) as con, con:
             con.executescript(SCHEMA)
+            if "src_chat" not in {r[1] for r in con.execute("PRAGMA table_info(msgs)")}:
+                con.execute("ALTER TABLE msgs ADD COLUMN src_chat INTEGER")
         self.reply_to: dict[int, int] = {}       # власник -> кому відповідаємо наступним повідомленням
         self.compose: set[int] = set()           # учасники, які зараз пишуть власнику
         self.flood: dict[int, list] = {}
@@ -100,6 +106,8 @@ class Plugin(Base):
                 target = self.reply_to.pop(uid)
             if target is None:
                 return False
+            if isinstance(target, tuple):  # коментар у групі каналу — відповідаємо там же, reply на нього
+                return await self._send_to_chat(ctx, msg, *target)
             return await self._send_to_person(ctx, msg, target)
         if H.is_allowed(uid):
             if uid in self.compose and not (msg.text or "").startswith("/"):
@@ -118,8 +126,7 @@ class Plugin(Base):
         if p and p["blocked"]:
             return True  # мовчки
         if (msg.text or "").startswith("/start"):
-            await msg.reply_text(self.get("greeting"))
-            return True
+            return False  # «Старт» — заявка на доступ власнику (стандартний потік бота); писати в скриньку можна й далі
         if not self._flood_ok(uid):
             await msg.reply_text("⏳ Забагато повідомлень поспіль. Спробуйте трохи пізніше.")
             return True
@@ -135,8 +142,119 @@ class Plugin(Base):
 
     def _owner_map(self, owner_chat, owner_msg):
         with closing(self.db()) as con:
-            r = con.execute("SELECT user FROM msgs WHERE owner_chat=? AND owner_msg=? ORDER BY id DESC LIMIT 1", (owner_chat, owner_msg)).fetchone()
-        return r["user"] if r else None
+            r = con.execute("SELECT user, src_chat, src_msg FROM msgs WHERE owner_chat=? AND owner_msg=? ORDER BY id DESC LIMIT 1",
+                            (owner_chat, owner_msg)).fetchone()
+        if not r:
+            return None
+        return (r["src_chat"], r["src_msg"]) if r["src_chat"] else r["user"]
+
+    # ================================================================ 📣 канали й коментарі
+    def chat_row(self, cid):
+        with closing(self.db()) as con:
+            r = con.execute("SELECT * FROM chats WHERE chat=?", (int(cid),)).fetchone()
+        return dict(r) if r else None
+
+    def chats(self):
+        with closing(self.db()) as con:
+            return [dict(r) for r in con.execute("SELECT * FROM chats ORDER BY type, title")]
+
+    async def on_channel_post(self, update, ctx):
+        """Дописи каналу й коментарі в його групі обговорення → скринька власнику (якщо для цього чату ввімкнено)."""
+        m = update.channel_post or update.message
+        if not m or not m.chat or m.chat.type == "private":
+            return
+        c = m.chat
+        row = self.chat_row(c.id)
+        with closing(self.db()) as con, con:
+            con.execute("INSERT INTO chats(chat,title,type,username,seen) VALUES(?,?,?,?,?) ON CONFLICT(chat) DO UPDATE SET "
+                        "title=excluded.title, username=excluded.username, seen=excluded.seen",
+                        (c.id, c.title or str(c.id), c.type, c.username or "", time.time()))
+        if not row:  # бот уперше побачив цей чат — питаємо власника, чи стежити
+            row = self.chat_row(c.id)
+            kind = "канал" if c.type == "channel" else "групу"
+            what = ("нові дописи" if c.type == "channel" else "коментарі й повідомлення")
+            rows = [[(f"✅ Так, {what} у скриньку", self.cb("cht", c.id, "posts" if c.type == "channel" else "comments", 1))],
+                    [("Ні", self.cb("chs"))]]
+            for owner in self.host.admins():
+                try:
+                    await ctx.bot.send_message(owner, f"📣 Бот бачить {kind} «{esc(c.title or c.id)}». Надсилати {what} в 📮 Скриньку?",
+                                               parse_mode="HTML", reply_markup=self._kb(rows))
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+        if c.type == "channel":
+            if not row["posts"]:
+                return
+            await self._deliver_chat(ctx, m, c, None, "📣 Новий допис")
+            return
+        if not row["comments"] or getattr(m, "is_automatic_forward", False):
+            return  # копія допису каналу в групі — це не коментар
+        u = m.from_user
+        if u and (u.is_bot or self.host.is_admin(u.id)):
+            return  # власні відповіді й інші боти — не потрібні
+        post = m.reply_to_message
+        about = ""
+        if post is not None:
+            about = (post.text or post.caption or "")[:120]
+        await self._deliver_chat(ctx, m, c, u, "💬 Коментар" if post is not None else "💬 Повідомлення", about)
+
+    async def _deliver_chat(self, ctx, m, c, u, what, about=""):
+        now = time.time()
+        sender = m.sender_chat
+        uid = u.id if u else (sender.id if sender else c.id)
+        name = u.full_name if u else (sender.title if sender else c.title or "")
+        with closing(self.db()) as con, con:
+            con.execute("INSERT INTO people(user,name,username,first,last,count,unread) VALUES(?,?,?,?,?,1,1) "
+                        "ON CONFLICT(user) DO UPDATE SET name=excluded.name, last=excluded.last, count=count+1, unread=unread+1",
+                        (uid, name, (u.username if u else "") or "", now, now))
+        link = (f"https://t.me/{c.username}/{m.message_id}" if c.username
+                else f"https://t.me/c/{str(c.id).removeprefix('-100')}/{m.message_id}")
+        head = (f"{what} · <b>{esc(c.title or '')}</b>\n👤 {esc(name)}" + (f" @{esc(u.username)}" if u and u.username else "")
+                + (f"\n↪️ до допису: «{esc(about)}»" if about else "")
+                + ("\n<i>Відповідь — reply на повідомлення нижче: бот відповість прямо в коментарях.</i>" if c.type != "channel" else ""))
+        rows = [[("🔗 Відкрити", "url:" + link)]]
+        if c.type != "channel":
+            rows[0].insert(0, ("↩️ Відповісти там", self.cb("rc", c.id, m.message_id)))
+        rows.append([("✅ Прочитано", self.cb("ok", uid))])
+        for owner in self.host.admins():
+            try:
+                await ctx.bot.send_message(owner, head, parse_mode="HTML", disable_notification=self.get("silent") == "1")
+                copied = await ctx.bot.copy_message(owner, c.id, m.message_id, reply_markup=self._kb(rows),
+                                                    disable_notification=self.get("silent") == "1")
+                with closing(self.db()) as con, con:
+                    con.execute("INSERT INTO msgs(user,at,dir,kind,text,src_msg,owner_chat,owner_msg,src_chat) VALUES(?,?,?,?,?,?,?,?,?)",
+                                (uid, now, "in", kind_of(m), (m.text or m.caption or "")[:4000], m.message_id, owner, copied.message_id, c.id))
+            except Exception:  # noqa: BLE001
+                log.exception("inbox: chat deliver failed")
+
+    async def _send_to_chat(self, ctx, msg, chat, reply_to):
+        from telegram import ReplyParameters
+        try:
+            await ctx.bot.copy_message(chat, msg.chat_id, msg.message_id,
+                                       reply_parameters=ReplyParameters(message_id=reply_to, allow_sending_without_reply=True))
+        except Exception as exc:  # noqa: BLE001
+            await msg.reply_text(f"⚠️ Не вдалося відповісти в чаті: {exc}\n(бот має бути адміністратором групи обговорення)")
+            return True
+        await msg.reply_text("✅ Відповів у коментарях")
+        return True
+
+    def chats_screen(self):
+        cs = self.chats()
+        lines = ["📣 <b>Канали й коментарі</b>",
+                 "Як підключити: додайте бота <b>адміністратором</b> у ваш канал і в його групу обговорення (де коментарі). "
+                 "Щойно там з'явиться перший допис чи коментар, бот спитає, чи надсилати їх у скриньку. "
+                 "Відповідь reply на коментар у скриньці бот опублікує прямо під ним.", ""]
+        rows = []
+        for c in cs:
+            ch = c["type"] == "channel"
+            key = "posts" if ch else "comments"
+            on = c[key]
+            lines.append(f"{'📣' if ch else '💬'} {esc(c['title'])} — {'дописи' if ch else 'коментарі'}: {'✅' if on else '⏸'}")
+            rows.append([(f"{'✅' if on else '⏸'} {c['title']}"[:40], self.cb("cht", c["chat"], key, 0 if on else 1))])
+        if not cs:
+            lines.append("Поки бот не бачив жодного каналу чи групи.")
+        rows.append([("« Налаштування скриньки", self.cb("set"))])
+        return "\n".join(lines), rows
 
     async def _deliver(self, ctx, msg, user, member=False):
         now = time.time()
@@ -251,7 +369,7 @@ class Plugin(Base):
         rows = [[(("● " if self.get("who") == k else "") + v.split(" (")[0].capitalize(), self.cb("who", k))] for k, v in WHO.items()]
         rows += [[(("✅ «Передав»: так" if self.get("ack") == "1" else "✅ «Передав»: ні"), self.cb("ack")),
                   (("🔕 Без звуку" if self.get("silent") == "1" else "🔔 Зі звуком"), self.cb("sil"))],
-                 [("✏️ Привітання", self.cb("gr"))], [("« Скринька", self.cb())]]
+                 [("✏️ Привітання", self.cb("gr")), ("📣 Канали й коментарі", self.cb("chs"))], [("« Скринька", self.cb())]]
         return text, rows
 
     def blocked_screen(self):
@@ -303,6 +421,16 @@ class Plugin(Base):
             return (f"📰 Узяв у ньюзрум #{iid}" if iid else "Порожньо (фото/файл без тексту — перешліть його в ньюзрум вручну)"), None
         if a == "set":
             return None, self.settings()
+        if a == "chs":
+            return None, self.chats_screen()
+        if a == "cht" and x and y:
+            with closing(self.db()) as con, con:
+                con.execute(f"UPDATE chats SET {'posts' if y == 'posts' else 'comments'}=?, asked=1 WHERE chat=?",
+                            (int(args[3]) if len(args) > 3 else 1, int(x)))
+            return "Збережено", self.chats_screen()
+        if a == "rc" and x and y:
+            self.reply_to[chat] = (int(x), int(y))
+            return None, ("↩️ Наступне ваше повідомлення бот опублікує відповіддю на цей коментар.", [[("✖️ Скасувати", self.cb("rx"))]])
         if a == "who":
             self.set("who", x)
             return None, self.settings()
