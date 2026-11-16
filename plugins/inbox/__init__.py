@@ -46,11 +46,8 @@ def mention(uid, name, username=""):
 
 
 def profile_row(cb, uid, username=""):
-    """Кнопки «👤 Профіль» (картка з фото й описом) і «↗ Відкрити акаунт» (для людей з @username)."""
-    row = [("👤 Профіль", cb("pf", uid))]
-    if username:
-        row.append(("↗ Відкрити акаунт", f"url:https://t.me/{username}"))
-    return row
+    """«↗ Відкрити акаунт» — для людей з @username; без нього сторінку відкриває дотик до імені в тексті."""
+    return [("↗ Відкрити акаунт", f"url:https://t.me/{username}")] if username else []
 
 
 def kind_of(m):
@@ -226,7 +223,7 @@ class Plugin(Base):
         with closing(self.db()) as con, con:
             con.execute("INSERT INTO people(user,name,username,first,last,count,unread) VALUES(?,?,?,?,?,1,1) "
                         "ON CONFLICT(user) DO UPDATE SET name=excluded.name, last=excluded.last, count=count+1, unread=unread+1",
-                        (uid, name, (u.username if u else "") or "", now, now))
+                        (uid, name if uid < 0 or self.host.is_allowed(uid) else "", "", now, now))
         link = (f"https://t.me/{c.username}/{m.message_id}" if c.username
                 else f"https://t.me/c/{str(c.id).removeprefix('-100')}/{m.message_id}")
         uname = (u.username if u else getattr(sender, "username", "")) or ""
@@ -238,7 +235,8 @@ class Plugin(Base):
             rows[0].insert(0, ("↩️ Відповісти там", self.cb("rc", c.id, m.message_id)))
             rows.append([("🔇 Мут 1 год", self.cb("mu", c.id, uid, 3600)), ("🔇 Мут 1 добу", self.cb("mu", c.id, uid, 86400))])
             rows.append([("🚫 Забанити", self.cb("ban", c.id, uid)), ("🗑 Видалити коментар", self.cb("del", c.id, m.message_id))])
-        rows.append(profile_row(self.cb, uid, uname))
+        if uname:
+            rows.append(profile_row(self.cb, uid, uname))
         rows.append([("✅ Прочитано", self.cb("ok", uid))])
         for owner in self.host.admins():
             try:
@@ -247,7 +245,8 @@ class Plugin(Base):
                                                     disable_notification=self.get("silent") == "1")
                 with closing(self.db()) as con, con:
                     con.execute("INSERT INTO msgs(user,at,dir,kind,text,src_msg,owner_chat,owner_msg,src_chat) VALUES(?,?,?,?,?,?,?,?,?)",
-                                (uid, now, "in", kind_of(m), (m.text or m.caption or "")[:4000], m.message_id, owner, copied.message_id, c.id))
+                                (uid, now, "in", kind_of(m), (m.text or m.caption or "")[:4000] if self.host.is_allowed(uid) else "",
+                                 m.message_id, owner, copied.message_id, c.id))
             except Exception:  # noqa: BLE001
                 log.exception("inbox: chat deliver failed")
 
@@ -319,29 +318,13 @@ class Plugin(Base):
         rows.append([("« Канали й коментарі", self.cb("chs"))])
         return "\n".join(lines), rows
 
-    async def send_profile(self, ctx, to, uid):
-        """👤 Картка людини: фото профілю, ім'я (відкриває акаунт), @username, опис, ID, скільки писала."""
-        bot = ctx.bot
-        p = self.person(uid) or {}
-        name, username, bio = p.get("name") or str(uid), p.get("username") or "", ""
-        try:
-            ch = await bot.get_chat(uid)
-            name = getattr(ch, "full_name", None) or getattr(ch, "title", None) or name
-            username = ch.username or username
-            bio = getattr(ch, "bio", None) or getattr(ch, "description", None) or ""
-        except Exception:  # noqa: BLE001 — Telegram дає дані лише про тих, хто писав боту чи в спільний чат
-            pass
-        text = (f"👤 {mention(uid, name, username)}\nID: <code>{uid}</code>" + (f"\n📝 {esc(bio)[:300]}" if bio else "")
-                + (f"\nПовідомлень: {p.get('count', 0)}" if p else "")
-                + ("" if username else "\n<i>Без @username — торкніться імені, щоб відкрити акаунт.</i>"))
-        rows = [r for r in [[("↗ Відкрити акаунт", f"url:https://t.me/{username}")] if username else []] if r]
-        try:
-            ph = await bot.get_user_profile_photos(uid, limit=1) if uid > 0 else None
-            if ph and ph.total_count:
-                return await bot.send_photo(to, ph.photos[0][-1].file_id, caption=text, parse_mode="HTML", reply_markup=self._kb(rows) if rows else None)
-        except Exception:  # noqa: BLE001
-            pass
-        await bot.send_message(to, text, parse_mode="HTML", reply_markup=self._kb(rows) if rows else None)
+    def forget_strangers(self, allowed):
+        """Про людей без доступу лишаємо тільки ID і зв'язок «яке повідомлення кому» — без імен і текстів."""
+        with closing(self.db()) as con, con:
+            for (uid,) in con.execute("SELECT user FROM people").fetchall():
+                if uid > 0 and not allowed(uid):
+                    con.execute("UPDATE people SET name='', username='', note='' WHERE user=?", (uid,))
+                    con.execute("UPDATE msgs SET text='' WHERE user=?", (uid,))
 
     def chats_screen(self):
         cs = self.chats()
@@ -368,10 +351,12 @@ class Plugin(Base):
         now = time.time()
         k = kind_of(msg)
         text = msg.text or msg.caption or ""
+        known = self.host.is_allowed(user.id)  # про незнайомих зберігаємо лише ID — ім'я й текст бачите тільки в сповіщенні
+        sname, suser, stext = (user.full_name, user.username or "", text) if known else ("", "", "")
         with closing(self.db()) as con, con:
             con.execute("INSERT INTO people(user,name,username,first,last,count,unread) VALUES(?,?,?,?,?,1,1) "
                         "ON CONFLICT(user) DO UPDATE SET name=excluded.name, username=excluded.username, last=excluded.last, "
-                        "count=count+1, unread=unread+1", (user.id, user.full_name, user.username or "", now, now))
+                        "count=count+1, unread=unread+1", (user.id, sname, suser, now, now))
             n = con.execute("SELECT count FROM people WHERE user=?", (user.id,)).fetchone()[0]
         fwd = getattr(msg, "forward_origin", None)
         fsrc = ""
@@ -383,8 +368,9 @@ class Plugin(Base):
                 + "\n<i>Відповідь — просто reply на повідомлення нижче.</i>")
         rows = [[("↩️ Відповісти", self.cb("r", user.id)), ("📰 У ньюзрум", self.cb("n", user.id, msg.message_id))],
                 [("🔇 Мут 1 год", f"m:bpn:{user.id}:mute:3600"), ("🔇 Мут 1 добу", f"m:bpn:{user.id}:mute:86400")],
-                [("🚫 Забанити в боті", f"m:bpn:{user.id}:ban"), ("✅ Прочитано", self.cb("ok", user.id))],
-                profile_row(self.cb, user.id, user.username or "")]
+                [("🚫 Забанити в боті", f"m:bpn:{user.id}:ban"), ("✅ Прочитано", self.cb("ok", user.id))]]
+        if user.username:
+            rows.append(profile_row(self.cb, user.id, user.username))
         silent = self.get("silent") == "1"
         bot = ctx.bot
         for owner in self.host.admins():
@@ -393,7 +379,7 @@ class Plugin(Base):
                 copied = await bot.copy_message(owner, msg.chat_id, msg.message_id, reply_markup=self._kb(rows), disable_notification=silent)
                 with closing(self.db()) as con, con:
                     con.execute("INSERT INTO msgs(user,at,dir,kind,text,src_msg,owner_chat,owner_msg) VALUES(?,?,?,?,?,?,?,?)",
-                                (user.id, now, "in", k, text[:4000], msg.message_id, owner, copied.message_id))
+                                (user.id, now, "in", k, stext[:4000], msg.message_id, owner, copied.message_id))
             except Exception:  # noqa: BLE001
                 log.exception("inbox deliver to owner failed")
         if self.get("ack") == "1":
@@ -445,7 +431,7 @@ class Plugin(Base):
         rows = []
         for p in ps:
             mark = f"🔵{p['unread']} " if p["unread"] else ""
-            rows.append([(f"{mark}{p['name'][:26]} · {p['count']}", self.cb("t", p["user"]))])
+            rows.append([(f"{mark}{(p['name'] or 'ID ' + str(p['user']))[:26]} · {p['count']}", self.cb("t", p["user"]))])
         if not ps:
             lines.append("\nПоки ніхто не писав. Поділіться посиланням на бота — t.me/ваш_бот.")
         rows.append([("⚙️ Налаштування скриньки", self.cb("set")), ("🚫 Заблоковані", self.cb("bl"))])
@@ -459,7 +445,7 @@ class Plugin(Base):
             ms = [dict(r) for r in con.execute("SELECT * FROM msgs WHERE user=? AND (dir='out' OR owner_chat=?) ORDER BY id DESC LIMIT 12",
                                                (int(uid), self.host.admins()[0] if self.host.admins() else 0))][::-1]
             con.execute("UPDATE people SET unread=0 WHERE user=?", (int(uid),))
-        lines = [f"📮 <b>{esc(p['name'])}</b>" + (f" @{esc(p['username'])}" if p["username"] else "") + f" · <code>{p['user']}</code>",
+        lines = [f"📮 <b>{mention(p['user'], p['name'] or 'Відкрити акаунт', p['username'])}</b> · <code>{p['user']}</code>",
                  f"Повідомлень: {p['count']} · перше: {time.strftime('%d.%m.%Y', time.localtime(p['first']))}" + (" · 🚫 заблоковано" if p["blocked"] else ""), ""]
         for m in ms:
             who = "👤" if m["dir"] == "in" else "↩️ ви"
@@ -552,9 +538,6 @@ class Plugin(Base):
                 return "🗑 Коментар видалено", None
             except Exception as exc:  # noqa: BLE001
                 return f"Не вдалося видалити: {str(exc)[:150]}", None
-        if a == "pf" and x:
-            await self.send_profile(ctx, chat, int(x))
-            return "👤 Картка профілю нижче", None
         if a == "mod" and x:
             return None, self.sanctions_screen(int(x))
         if a == "rc" and x and y:

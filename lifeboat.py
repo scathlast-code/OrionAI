@@ -56,6 +56,23 @@ class Journal:
                     return out
         return out
 
+    def keep_only(self, allowed):
+        """Прибирає з журналу записи людей без доступу (u=0 — система, лишається)."""
+        for name in os.listdir(self.dir):
+            if not name.endswith(".jsonl"):
+                continue
+            path = os.path.join(self.dir, name)
+            try:
+                with open(path, encoding="utf-8") as f:
+                    lines = f.readlines()
+                keep = [ln for ln in lines if (lambda r: not r.get("u") or allowed(r["u"]))(json.loads(ln) if ln.strip() else {})]
+                if len(keep) != len(lines):
+                    with open(path + ".tmp", "w", encoding="utf-8") as f:
+                        f.writelines(keep)
+                    os.replace(path + ".tmp", path)
+            except (OSError, ValueError):
+                continue
+
     def size(self):
         return sum(os.path.getsize(os.path.join(self.dir, f)) for f in os.listdir(self.dir) if f.endswith(".jsonl"))
 
