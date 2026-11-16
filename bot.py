@@ -1167,7 +1167,7 @@ def classify(status, body, headers):
             return "rate_minute", retry or 60
         return "rate", retry or 120
     if status >= 500:
-        return "overloaded", retry or 60
+        return "overloaded", retry or 15
     return "bad_request", None
 
 
@@ -1361,7 +1361,7 @@ async def post_chat(client, p, messages, use_tools):
         )
     except httpx.TimeoutException:
         count_request(p["id"], error=True)
-        raise ProviderError("timeout", f"не відповів за {int(OLLAMA_TIMEOUT if p['id'] == 'ollama_local' else REQUEST_TIMEOUT)} с", 120)
+        raise ProviderError("timeout", f"не відповів за {int(OLLAMA_TIMEOUT if p['id'] == 'ollama_local' else REQUEST_TIMEOUT)} с", 15)  # коротка пауза: наступне повідомлення вже знову спробує
     except httpx.HTTPError as e:
         count_request(p["id"], error=True)
         raise ProviderError("network", str(e) or type(e).__name__, 300 if p["id"] == "ollama_local" else 120)
