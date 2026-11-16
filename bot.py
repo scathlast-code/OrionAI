@@ -5350,11 +5350,13 @@ async def on_task_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         prov = task["provider"] if task["provider"] in PROVIDERS else None
         until = paused_until(prov) if prov else None
         who = PROVIDERS[prov]["title"] if prov else "перша модель, що звільниться"
-        when = f" Орієнтовно о {hhmm(until)}." if until else ""
+        when = f" Орієнтовно о {hhmm(until)} (через {left(until)})." if until else ""
+        st = get_state(prov) if prov else {}
+        why = f"\nЧому чекаємо: {ERR.get(st.get('cooldown_kind') or st.get('err_kind'), ('', 'збій'))[1].lower()}." if until and (st.get("cooldown_kind") or st.get("err_kind")) else ""
         await q.answer("Відкладено")
         return await q.edit_message_text(
             f"⏳ Завдання #{tid} відкладено: «{short_q(task['history_text'])}»\n"
-            f"Виконає: {who}.{when} Відповідь прийде сюди.",
+            f"Виконає: {who}.{when}{why} Відповідь прийде сюди.",
             reply_markup=kb([[("⚙️ Керувати завданням", f"m:t:{tid}"), ("⏰ Усі завдання", "m:tl")]]),
         )
     pid = parts[3] if action == "run" else None
