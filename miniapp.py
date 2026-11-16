@@ -202,7 +202,7 @@ def history(B, uid, limit=40):
         rows = con.execute("SELECT role, text, provider, ts FROM messages WHERE dialog_id=? AND pending=0 ORDER BY id DESC LIMIT ?",
                            (did, limit)).fetchall()
     title = B.dialog_name(did) if did else "Нова розмова"
-    return {"dialog": title, "messages": [{"role": r["role"], "text": r["text"][:6000], "provider": r["provider"] or "", "ts": r["ts"]} for r in rows[::-1]]}
+    return {"dialog": title, "limits": B.limits_brief(short=True), "messages": [{"role": r["role"], "text": r["text"][:6000], "provider": r["provider"] or "", "ts": r["ts"]} for r in rows[::-1]]}
 
 
 def menu(B, uid):
@@ -229,7 +229,8 @@ def menu(B, uid):
     d = B.dialog_get(B.current_dialog(uid))
     info = [("💬", "Розмова", d["title"], "m:dl"),
             ("🤖", "Відповідає", B.choice_label(B.get_choice(uid)), "m:md"),
-            ("⏰", "Завдань", str(len(B.tasks_open(chat_id=uid))), "m:tl")]
+            ("⏰", "Завдань", str(len(B.tasks_open(chat_id=uid))), "m:tl"),
+            ("📊", "Сьогодні", B.limits_brief(short=True), "m:lim")]
     return {"menu": True, "info": [{"icon": a, "label": b, "value": c, "data": e} for a, b, c, e in info], "sections": sections,
             "tabs": tabs(B, uid), "tabs_max": TABS_MAX}
 
