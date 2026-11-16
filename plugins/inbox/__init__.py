@@ -274,7 +274,8 @@ class Plugin(Base):
                 + (" · учасник" if member else "") + f" · {n}-е" + (f"\n↪️ переслано з «{esc(fsrc)}»" if fsrc else "")
                 + "\n<i>Відповідь — просто reply на повідомлення нижче.</i>")
         rows = [[("↩️ Відповісти", self.cb("r", user.id)), ("📰 У ньюзрум", self.cb("n", user.id, msg.message_id))],
-                [("🚫 Заблокувати", self.cb("b", user.id)), ("✅ Прочитано", self.cb("ok", user.id))]]
+                [("🔇 Мут 1 год", f"m:bpn:{user.id}:mute:3600"), ("🔇 Мут 1 добу", f"m:bpn:{user.id}:mute:86400")],
+                [("🚫 Забанити в боті", f"m:bpn:{user.id}:ban"), ("✅ Прочитано", self.cb("ok", user.id))]]
         silent = self.get("silent") == "1"
         bot = ctx.bot
         for owner in self.host.admins():
