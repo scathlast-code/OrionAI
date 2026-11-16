@@ -2360,6 +2360,9 @@ def scr_home(chat_id, open_group=None):
         for g in L.chain(chat_id, L.where(chat_id, "acc")[2:]) if L.where(chat_id, "acc").startswith("g:") else []:
             badges[g] = f" · 🔔 {pending}"
     rows = [[("📌 Де просідаємо — звіт", "m:pl:news:rp")]] if banner else []
+    app = miniapp_url()
+    if app:  # застосунок — одним натиском з головного меню
+        rows.insert(0, [("🧩 Відкрити застосунок", "app:" + app)])
     return text, rows + L.accordion_rows(chat_id, open_group, badges)
 
 
@@ -8180,6 +8183,10 @@ async def main():
         uid = improve.check_webapp(str(body.get("initData") or ""), TELEGRAM_TOKEN)
         if not uid or not is_allowed_id(uid):
             return _Resp(json.dumps({"error": "forbidden"}), status_code=403, media_type="application/json")
+        if not public_base():  # застосунок відкрився — отже ця адреса робоча: запам'ятати її для кнопок і /start
+            host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+            if host and not host.startswith(("localhost", "127.", "0.0.0.0")):
+                NODE.set("public_url", "https://" + host.split(",")[0].strip())
         op, data = str(body.get("op") or "screen"), str(body.get("data") or "m:home")[:64]
         if op in ("screen", "tochat") and not data.startswith(("m:", "help:")):
             data = "m:home"
