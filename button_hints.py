@@ -55,6 +55,7 @@ H = {
     "m:cpl": "Моделі, додані вручну (свій ключ і адреса)",
     "m:cpnew": "Підключити іншу модель за адресою й ключем",
     "m:qask": "Одне питання конкретній моделі",
+    "m:pr:b": "Інші боти й ШІ, які звертаються до вашого",
     "m:pr": "Що бот виконує першим, коли запитів багато",
     "m:pri": "Змінити важливість",
     "m:prm": "Підняти чи опустити в черзі",
@@ -402,4 +403,29 @@ def for_rows(rows):
             out.append(hs[0])
         else:
             out.append(hs)
+    return out
+
+
+def norm_label(t):
+    """Підпис кнопки без позначок вибору й лічильників — ключ для власних підписів."""
+    import re
+    t = re.sub(r"^(● |☑️ |▫️ )", "", t or "")
+    t = re.sub(r"\s*·\s*[\d🔔 ]+$", "", t)
+    return t.strip()[:60]
+
+
+def apply_over(rows, hints, over):
+    """Власні підписи користувача (текст і розмір) замість стандартних."""
+    if not over:
+        return hints
+    out = []
+    for row, h in zip(rows or [], hints or []):
+        per = [h] * len(row) if isinstance(h, str) else list(h)
+        changed = False
+        for i, (t, _) in enumerate(row):
+            o = over.get(norm_label(t))
+            if o:
+                per[i] = {"t": o.get("t", per[i] if isinstance(per[i], str) else ""), "s": o.get("s", 0)}
+                changed = True
+        out.append(per if changed else h)
     return out
