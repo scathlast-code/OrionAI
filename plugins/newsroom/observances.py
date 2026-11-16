@@ -159,11 +159,14 @@ class ObservancesUI:
     async def fetch_wiki_day(self, d: dt.date, client=None):
         page = f"{d.day} {MONTHS_GEN[d.month - 1]}"
         url = "https://uk.wikipedia.org/w/api.php"
-        params = {"action": "parse", "page": page, "prop": "wikitext", "format": "json", "formatversion": "2"}
+        params = {"action": "parse", "page": page, "prop": "wikitext", "format": "json", "formatversion": "2", "redirects": "1", "maxlag": "5"}
         own = client is None
-        c = client or httpx.AsyncClient(timeout=20, headers={"User-Agent": "OrionAI-Newsroom/2 (calendar)"})
+        c = client or httpx.AsyncClient(timeout=20, headers={"User-Agent": "OrionAI-Newsroom/2.1 (https://github.com/scathlast-code/OrionAI; Telegram bot calendar) httpx", "Accept": "application/json"})
         try:
             r = await c.get(url, params=params)
+            if r.status_code == 429 or "json" not in r.headers.get("content-type", ""):
+                # Вікіпедія відповіла не JSON (обмеження частоти чи блок) — це не «порожній день», а збій: хай вирішує prefetch
+                raise RuntimeError(f"HTTP {r.status_code}, {r.headers.get('content-type', '?')}")
             wt = (r.json().get("parse") or {}).get("wikitext") or ""
         finally:
             if own:
@@ -185,7 +188,8 @@ class ObservancesUI:
         t0 = self.today()
         order = [t0 + dt.timedelta(days=i) for i in range(366)]          # спершу найближчі
         seen = set()
-        async with httpx.AsyncClient(timeout=20, headers={"User-Agent": "OrionAI-Newsroom/2 (calendar)"}) as c:
+        fails, first_err = 0, ""
+        async with httpx.AsyncClient(timeout=20, headers={"User-Agent": "OrionAI-Newsroom/2.1 (https://github.com/scathlast-code/OrionAI; Telegram bot calendar) httpx", "Accept": "application/json"}) as c:
             for d in order[:days]:
                 key = d.strftime("%m-%d")
                 if key in seen or now - float(done.get(key, 0)) < refresh_days * 86400:
@@ -194,11 +198,17 @@ class ObservancesUI:
                 try:
                     n += await self.fetch_wiki_day(d, c)
                     done[key] = now
+                    fails = 0
                     if len(seen) % 20 == 0:
                         self.store.set("obs_fetched_at", done)
                 except Exception as exc:  # noqa: BLE001
-                    log.info("wiki %s: %s", key, exc)
-                await asyncio.sleep(0.7)
+                    fails += 1
+                    first_err = first_err or f"{key}: {exc}"
+                    if fails >= 5:  # Вікіпедія зараз не відповідає — не засмічуємо журнал 366 рядками, спробуємо згодом
+                        log.warning("wiki: 5 збоїв поспіль (перший — %s); календар допишеться пізніше", first_err)
+                        break
+                    await asyncio.sleep(3 * fails)
+                await asyncio.sleep(1.0)
             if t0.year % 4 and "02-29" not in done:                       # 29 лютого — з високосного року
                 try:
                     n += await self.fetch_wiki_day(dt.date(2028, 2, 29), c)
