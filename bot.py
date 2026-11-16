@@ -1616,8 +1616,11 @@ async def _ask_llm(history, user_content, preferred=None, fallback=True, exclude
                 ". Не стверджуй, що перевірив інтернет. Повідом користувача про цю проблему.")
     jid = journal_start(user_content)
     LAST_JOURNAL.set(jid)  # щоб пауза чи «Зупинити» знали, який запис журналу оновити
+    pool = auto_pool() if preferred is None else []
     if preferred in PROVIDERS and not fallback:
         order = [preferred]
+    elif pool:  # «🎯 Авто серед обраних»: перемикання лише між вибраними моделями
+        order = [p for p in AUTO_ORDER if p in pool]
     else:
         order = ([preferred] if preferred in PROVIDERS else []) + [p for p in AUTO_ORDER if p != preferred]
     order = [p for p in order if p not in exclude] or order
@@ -1847,8 +1850,22 @@ async def deny(update: Update):
     await update.effective_message.reply_text(text)
 
 
-def choice_label(choice):
-    return "🔁 Авто" if choice == "auto" else PROVIDERS[choice]["title"]
+def auto_pool(chat_id=None):
+    """Моделі, серед яких обирає «🎯 Авто серед обраних» (порожньо — режим «🔁 Авто: усі»)."""
+    chat_id = chat_id or CHAT.get()
+    if not chat_id:
+        return []
+    p = prefs(chat_id)
+    if p.get("model_mode") != "pool":
+        return []
+    return [x for x in p.get("auto_pool") or [] if x in PROVIDERS]
+
+
+def choice_label(choice, chat_id=None):
+    if choice != "auto":
+        return PROVIDERS[choice]["title"]
+    pool = auto_pool(chat_id)
+    return f"🎯 Авто серед обраних ({len(pool)})" if pool else "🔁 Авто"
 
 
 # ---------------------------------------------------------------- Telegram: довідка (без ШІ)
@@ -2067,12 +2084,11 @@ DEFAULT_GROUPS = {
     "ai": "🤖 Моделі та ШІ",
     "services": "🔗 Сервіси",
     "settings": "⚙️ Налаштування",
-    "start": "🚀 Початок",
     "plugins": "📰 Медіа",
 }
 DEFAULT_LAYOUT = [
     ["g:work", "home"], ["g:plugins", "home"], ["g:create", "home"], ["g:ai", "home"],
-    ["g:services", "home"], ["g:settings", "home"], ["g:start", "home"],
+    ["g:services", "home"], ["g:settings", "home"],
     ["dl", "g:work"], ["tl", "g:work"], ["nt", "g:work"], ["pins", "g:work"],
     ["arc", "g:work"], ["jrn", "g:work"],
     ["cr", "g:create"], ["lib", "g:create"], ["voice", "g:create"],
@@ -2080,8 +2096,8 @@ DEFAULT_LAYOUT = [
     ["svc", "g:services"], ["comm", "g:services"],
     ["st", "g:settings"], ["acc", "g:settings"], ["backup", "g:settings"],
     ["btns", "g:settings"], ["runmode", "g:settings"], ["links", "g:settings"], ["diag", "g:settings"], ["trash", "g:settings"],
-    ["help", "g:start"], ["menu", "off"],
-    ["news", "g:plugins"], ["utm", "g:plugins"], ["stk", "g:plugins"], ["plg", "g:settings"], ["sbx", "g:start"], ["imp", "g:settings"], ["inbox", "g:work"], ["hubm", "g:services"], ["app", "g:settings"],
+    ["help", "g:settings"], ["menu", "off"],
+    ["news", "g:plugins"], ["utm", "g:plugins"], ["stk", "g:plugins"], ["plg", "g:settings"], ["sbx", "g:settings"], ["imp", "g:settings"], ["inbox", "g:work"], ["hubm", "g:services"], ["app", "g:settings"],
 ]
 L = Layout(ITEMS, DEFAULT_LAYOUT, DEFAULT_GROUPS, lambda c: prefs(c), lambda c, k, v: set_pref(c, k, v),
            locked={"st"}, admin_items={"acc", "backup", "svc", "comm", "runmode", "links", "ollama", "news", "hubm"}, is_admin=lambda c: is_admin_id(c), use_kb=False)
@@ -2090,6 +2106,18 @@ L = Layout(ITEMS, DEFAULT_LAYOUT, DEFAULT_GROUPS, lambda c: prefs(c), lambda c, 
 def _migrate_compact_menu(chat_id):
     """Міграція меню: шість категорій-акордеонів, без дубльованих назв."""
     p = prefs(chat_id)
+    if p.get("compact_menu_v2") and not p.get("no_start_group_v6"):
+        # Група «🚀 Початок» мала лише Довідку й Пісочницю — переносимо їх у ⚙️ Налаштування, порожню групу прибираємо.
+        groups = dict(p.get("groups") or {})
+        saved = [list(x) for x in (p.get("layout") or [])]
+        inside = {i for i, place in saved if place == "g:start"}
+        if "start" in groups and inside <= {"help", "sbx"}:
+            groups.pop("start")
+            saved = [[i, "g:settings" if place == "g:start" else place] for i, place in saved if i != "g:start"]
+            set_pref(chat_id, "groups", groups)
+            set_pref(chat_id, "layout", saved)
+        set_pref(chat_id, "no_start_group_v6", True)
+        p = prefs(chat_id)
     if not p.get("compact_menu_v2"):
         set_pref(chat_id, "groups", dict(DEFAULT_GROUPS))
         set_pref(chat_id, "layout", [list(x) for x in DEFAULT_LAYOUT])
@@ -2617,25 +2645,115 @@ def create_planned_task(chat_id, text, dialog_id=None, folder_id=None):
 # ---------------------------------------------------------------- моделі, ліміти, налаштування
 
 
+def model_mode(chat_id):
+    if get_choice(chat_id) != "auto":
+        return "one"
+    m = prefs(chat_id).get("model_mode", "all")
+    return m if m in ("pool", "one") else "all"
+
+
+MODEL_MODES = [("all", "🔁 Авто: усі"), ("pool", "🎯 Авто: обрані"), ("one", "✋ Одна")]
+MODEL_MODE_HINT = {
+    "all": "Бот сам бере першу модель, що працює, і перемикається на наступну, коли та впирається в ліміт чи збоїть.",
+    "pool": "Бот перемикається лише між позначеними ☑️ моделями. Торкніться моделі, щоб додати її або прибрати.",
+    "one": "Відповідає лише обрана модель. Якщо вона не може — бот скаже про це й запропонує іншу. Торкніться моделі, щоб обрати.",
+}
+
+
 def scr_models(chat_id):
     cur = get_choice(chat_id)
+    mode = model_mode(chat_id)
+    pool = prefs(chat_id).get("auto_pool") or []
     lines = [
         "<b>🤖 Моделі</b>\n",
-        f"Зараз відповідає: <b>{esc(choice_label(cur))}</b>",
-        "✅ працює · ⏸ на паузі · ⚠️ були помилки · ❌ потрібні дії",
+        f"Зараз відповідає: <b>{esc(choice_label(cur, chat_id) if mode != 'one' or cur != 'auto' else 'ще не обрано — торкніться моделі')}</b>",
+        MODEL_MODE_HINT[mode],
+        "\n✅ працює · ⏸ на паузі · ⚠️ були помилки · ❌ потрібні дії · 🩺 «Перевірити моделі» покаже, що з кожною",
     ]
+    if mode == "pool" and not [p for p in pool if p in PROVIDERS]:
+        lines.append("\n⚠️ Не позначено жодної моделі — поки що бот обирає серед усіх.")
     paused = [p for p in PROVIDERS if paused_until(p)]
     if paused:
         lines.append("\n<b>⏸ На паузі:</b>")
         lines += [f"• {esc(PROVIDERS[p]['title'])} — знову доступна о {hhmm(paused_until(p))} (ще {left(paused_until(p))})" for p in paused]
         lines.append("<i>Коли пауза мине, бот напише окремо.</i>")
-    rows = [[(("● " if cur == "auto" else "") + "🔁 Авто", "m:pick:auto")]]
-    rows += pairs([(("● " if p == cur else "") + f"{provider_icon(p)} {PROVIDERS[p]['title']}"
+    rows = [[(("● " if mode == m else "") + t, f"m:mmode:{m}") for m, t in MODEL_MODES]]
+
+    def mark(p):
+        if mode == "pool":
+            return "☑️ " if p in pool else "▫️ "
+        return "● " if (mode == "one" and p == cur) else ""
+    rows += pairs([(mark(p) + f"{provider_icon(p)} {PROVIDERS[p]['title']}"
                     + (f" · {left(paused_until(p))}" if paused_until(p) else ""), f"m:pick:{p}") for p in PROVIDERS])
-    rows.append([("📊 Ліміти", "m:lim"), ("ℹ️", "help:models")])
+    rows.append([("🩺 Перевірити моделі", "m:mdtest"), ("📊 Ліміти", "m:lim"), ("ℹ️", "help:models")])
     if is_admin_id(chat_id):
         rows.append([("🧩 Мої моделі · " + str(len(custom_rows())), "m:cpl"), ("➕ Додати модель", "m:cpnew")])
     return "\n".join(lines), rows
+
+
+FIX_HINT = {
+    "auth": "Ключ не підходить. Перевірте змінну {env} у Railway → Variables: скопійовано повністю, без пробілів? Якщо ключ видалили на сайті — створіть новий на {site}.",
+    "forbidden": "Ключ не має доступу до цієї моделі. Створіть новий ключ на {site} або задайте іншу модель змінною {up}_MODEL.",
+    "region": "Сервіс не обслуговує країну, де стоїть сервер бота. Користуйтесь іншими моделями або змініть регіон сервера.",
+    "model": "Такої моделі вже немає. Задайте актуальну змінною {up}_MODEL у Railway → Variables.",
+    "rate_minute": "Забагато запитів за хвилину — запрацює сама за хвилину-дві.",
+    "rate_day": "Денний безкоштовний ліміт вичерпано — запрацює сама після оновлення ліміту (зазвичай опівночі за часом сервісу).",
+    "rate_month": "Місячний ліміт вичерпано — запрацює з нового місяця.",
+    "rate": "Ліміт вичерпано — запрацює сама згодом.",
+    "payment": "Закінчились безкоштовні кредити. Поповніть баланс на {site} або приберіть цю модель з «🎯 обраних».",
+    "overloaded": "Тимчасовий збій на боці сервісу — зазвичай минає сам. Перевірте ще раз пізніше.",
+    "timeout": "Сервіс не відповів за 30 секунд — перевантажений або повільна модель. Перевірте ще раз пізніше.",
+    "network": "Сервер бота не може з'єднатися із сервісом. Якщо триває довго — збій у мережі хостингу.",
+    "bad_request": "Сервіс відхилив запит. Якщо повторюється — задайте іншу модель змінною {up}_MODEL.",
+    "bad_response": "Сервіс відповів незрозуміло. Якщо повторюється — задайте іншу модель змінною {up}_MODEL.",
+    "empty": "Модель повернула порожню відповідь. Якщо повторюється — задайте іншу модель змінною {up}_MODEL.",
+}
+
+
+async def models_check():
+    """Коротке питання кожній підключеній моделі паралельно. Результат — у kv «mdtest»."""
+    async def one(pid):
+        t0 = time.time()
+        try:
+            text, _ = await asyncio.wait_for(ask_provider(PROVIDERS[pid], [{"role": "user", "content": "Відповідай одним словом: працюю"}]), 30)
+            mark_ok(pid)
+            return pid, {"ok": True, "sec": round(time.time() - t0, 1), "text": (text or "")[:40]}
+        except asyncio.TimeoutError:
+            return pid, {"ok": False, "kind": "timeout", "detail": ""}
+        except ProviderError as e:
+            return pid, {"ok": False, "kind": e.kind, "detail": str(e.detail)[:160]}
+        except Exception as e:  # noqa: BLE001
+            return pid, {"ok": False, "kind": "network", "detail": str(e)[:160]}
+    res = dict(await asyncio.gather(*(one(p) for p in PROVIDERS))) if PROVIDERS else {}
+    kv_set("mdtest", json.dumps({"ts": time.time(), "res": res}))
+    return res
+
+
+def scr_mdtest():
+    raw = kv_get("mdtest")
+    data = json.loads(raw) if raw else {"ts": 0, "res": {}}
+    res = data.get("res") or {}
+    lines = ["<b>🩺 Перевірка моделей</b>", (f"Перевірено {ago(data['ts'])}." if data.get("ts") else "Ще не перевіряли.")
+             + " Кожній моделі бот надсилає коротке питання (це 1 запит із її ліміту).\n"]
+    for pid in PROVIDERS:
+        p, r = PROVIDERS[pid], res.get(pid)
+        head = f"{provider_icon(pid)} <b>{esc(p['title'])}</b> · <code>{esc(p['model'])}</code>"
+        if not r:
+            lines.append(f"{head}\n▫️ ще не перевірена (додана після перевірки)")
+        elif r.get("ok"):
+            lines.append(f"{head}\n✅ працює · відповідь за {r['sec']} с" + (f" · ⏸ у боті на паузі до {hhmm(paused_until(pid))}" if paused_until(pid) else ""))
+        else:
+            icon, title = ERR.get(r["kind"], ("❌", r["kind"]))
+            fix = FIX_HINT.get(r["kind"], "").format(env=p.get("key_env", ""), site=p.get("site", ""), up=pid.upper())
+            lines.append(f"{head}\n❌ не працює: {icon} {esc(title)}" + (f"\n<i>{esc(r['detail'])}</i>" if r.get("detail") else "")
+                         + (f"\n👉 {esc(fix)}" if fix else ""))
+    missing = [c["title"] for k, c in CATALOG.items() if k not in PROVIDERS]
+    if missing:
+        lines.append("\n▫️ Не підключені (немає ключа): " + ", ".join(missing) + ". Як додати — «ℹ️» на екрані моделей.")
+    if not PROVIDERS:
+        lines.append("❌ Жодна модель не підключена — бот не може відповідати. Додайте хоча б GEMINI_API_KEY.")
+    text = "\n\n".join(lines[:2]) + "\n" + "\n\n".join(lines[2:])
+    return text[:4000], [[("🔄 Перевірити ще раз", "m:mdtest:go"), ("« Моделі", "m:md")]]
 
 
 def scr_limits(pid=None):
@@ -5426,7 +5544,7 @@ async def finish_wizard(update, ctx, chat_id):
 
 EDITOR_ACTIONS = {"btn", "bi", "bmv", "bup", "bdn", "bset", "lren", "lunren", "bgnew", "bgdel", "brl", "brldel", "breset"}
 VIEW_ACTIONS = {"appm", "sbx", "imp", "home", "dl", "d", "f", "tl", "t", "md", "lim", "st", "nt", "cr", "canva", "pins", "box", "it", "acc",
-                "mem", "mdl", "mdv", "btn", "bi", "brl", "voice", "cpl", "cp", "bk", "fr", "svc", "sv", "svls", "diag", "jl", "j", "bks", "bkt", "bkls", "bkrs", "bkfmt", "bkscope", "lib", "mi", "note", "bl", "pr", "pri", "backup", "qask", "rm", "rw", "cl", "why"}
+                "mem", "mdl", "mdv", "btn", "bi", "brl", "voice", "cpl", "cp", "bk", "fr", "svc", "sv", "svls", "diag", "jl", "j", "bks", "bkt", "bkls", "bkrs", "bkfmt", "bkscope", "lib", "mi", "note", "bl", "pr", "pri", "backup", "qask", "rm", "rw", "cl", "why", "mdtest"}
 
 
 def is_view(data):
@@ -5753,12 +5871,40 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
     # моделі, ліміти, налаштування
     elif a == "md":
         screen = scr_models(chat_id)
-    elif a == "pick":
-        set_choice(chat_id, arg)
-        toast = f"Відповідає: {choice_label(arg)}"
-        if arg != "auto" and paused_until(arg):
-            toast += f" (зараз на паузі до {hhmm(paused_until(arg))})"
+    elif a == "mmode":  # 🔁 усі · 🎯 обрані · ✋ одна
+        if arg in ("all", "pool"):
+            set_choice(chat_id, "auto")
+            if arg == "pool" and not [p for p in prefs(chat_id).get("auto_pool") or [] if p in PROVIDERS]:
+                set_pref(chat_id, "auto_pool", [p for p in AUTO_ORDER if not paused_until(p)][:3])  # для початку — перші робочі
+        set_pref(chat_id, "model_mode", arg if arg in ("all", "pool", "one") else "all")
+        toast = dict(MODEL_MODES).get(arg, "")
         screen = scr_models(chat_id)
+    elif a == "pick":
+        if arg == "auto":
+            set_choice(chat_id, "auto")
+            set_pref(chat_id, "model_mode", "all")
+            toast = "Відповідає: 🔁 Авто"
+        elif model_mode(chat_id) == "pool" and arg in PROVIDERS:
+            pool = [p for p in prefs(chat_id).get("auto_pool") or [] if p in PROVIDERS]
+            pool = [p for p in pool if p != arg] if arg in pool else pool + [arg]
+            set_pref(chat_id, "auto_pool", pool)
+            toast = f"{'Додано' if arg in pool else 'Прибрано'}: {PROVIDERS[arg]['title']} · обрано {len(pool)}"
+        else:
+            set_choice(chat_id, arg)
+            set_pref(chat_id, "model_mode", "one")
+            toast = f"Відповідає: {choice_label(arg)}"
+            if arg != "auto" and paused_until(arg):
+                toast += f" (зараз на паузі до {hhmm(paused_until(arg))})"
+        screen = scr_models(chat_id)
+    elif a == "mdtest":  # 🩺 перевірка: кожній моделі — коротке питання, і пояснення, якщо не відповіла
+        if arg == "go" or not kv_get("mdtest"):
+            if q:
+                try:
+                    await q.answer("Перевіряю моделі… до 30 секунд")
+                except BadRequest:
+                    pass
+            await models_check()
+        screen = scr_mdtest()
     elif a == "lim":
         if q:
             await q.answer("Оновлюю…")
