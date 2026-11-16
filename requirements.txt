@@ -13,4 +13,5 @@ fastapi>=0.115,<1
 geoip2>=4.8,<6
 telethon>=1.36,<2
 openpyxl>=3.1,<4        # Excel зі статистикою UTM
+segno>=1.6,<2            # QR-коди коротких посилань (без Pillow)
 python-docx>=1.1,<2     # Word-звіт UTM

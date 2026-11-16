@@ -8,6 +8,7 @@
 (хеш IP + браузер + день). Вік і стать за кліком дізнатися неможливо: їх дає лише аналітика самого сайту.
 """
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -83,7 +84,7 @@ def network_of(platform, app, ref_host):
         if ref_host and re.search(rx, ref_host, re.I):
             return name
     src = (platform or "").split("_")[0]
-    return NETWORK.get(src, src or "Невідомо")
+    return NETWORK.get(src, "Напряму / інше")
 
 
 class Tracker:
@@ -102,6 +103,12 @@ class Tracker:
                 CREATE TABLE IF NOT EXISTS ext_stats (code TEXT NOT NULL, dim TEXT NOT NULL, key TEXT NOT NULL, n INTEGER NOT NULL, synced REAL NOT NULL,
                     PRIMARY KEY (code, dim, key));
             """)
+
+        with closing(self.db()) as con, con:  # власний скорочувач — усе, що вміє Short.io
+            cols = {r[1] for r in con.execute("PRAGMA table_info(links)")}
+            for col, ddl in EXTRA_COLS.items():
+                if col not in cols:
+                    con.execute(f"ALTER TABLE links ADD COLUMN {col} {ddl}")
 
     def db(self):
         con = sqlite3.connect(self.path, timeout=10)
@@ -137,6 +144,134 @@ class Tracker:
         with closing(self.db()) as con:
             row = con.execute("SELECT full_url FROM links WHERE code=? AND provider='own'", (code,)).fetchone()
         return row["full_url"] if row else None
+
+    # ---------------------------------------------------------------- власний скорочувач (як Short.io)
+    def create(self, url, slug=None, title="", folder="", platform="link", tag=""):
+        """Нове коротке посилання на будь-яку адресу. slug — власний кінець адреси (латиниця, цифри, - _)."""
+        url = (url or "").strip()
+        if not re.match(r"https?://[^\s/]+\.[^\s]+", url):
+            raise ValueError("Потрібне посилання, що починається з http:// або https://")
+        if slug:
+            slug = slug.strip().strip("/")
+            if not SLUG_RE.fullmatch(slug):
+                raise ValueError("Кінець адреси: 2–40 символів — латиниця, цифри, - або _")
+            if self.get(slug) or slug.lower() in RESERVED:
+                raise ValueError(f"Адреса «{slug}» уже зайнята")
+        with closing(self.db()) as con, con:
+            code = slug
+            while not code:
+                c = secrets.token_urlsafe(5).replace("-", "x").replace("_", "z")[:6]
+                if not con.execute("SELECT 1 FROM links WHERE code=?", (c,)).fetchone():
+                    code = c
+            con.execute("INSERT INTO links(code, full_url, base_url, platform, tag, created, title, folder, updated) VALUES (?,?,?,?,?,?,?,?,?)",
+                        (code, url, base_of(url), platform, tag, time.time(), title[:120], folder[:40], time.time()))
+        return code
+
+    def get(self, code):
+        with closing(self.db()) as con:
+            r = con.execute("SELECT * FROM links WHERE code=?", (code,)).fetchone()
+        return dict(r) if r else None
+
+    def update(self, code, **fields):
+        fields = {k: v for k, v in fields.items() if k in EDITABLE}
+        if "full_url" in fields:
+            if not re.match(r"https?://[^\s/]+\.[^\s]+", fields["full_url"] or ""):
+                raise ValueError("Потрібне посилання, що починається з http:// або https://")
+            fields["base_url"] = base_of(fields["full_url"])
+        if "rules" in fields and not isinstance(fields["rules"], str):
+            fields["rules"] = json.dumps(fields["rules"], ensure_ascii=False)
+        if not fields:
+            return
+        with closing(self.db()) as con, con:
+            sets = ", ".join(f"{k}=?" for k in fields)
+            con.execute(f"UPDATE links SET {sets}, updated=? WHERE code=?", (*fields.values(), time.time(), code))
+
+    def rename(self, code, new):
+        """Змінити кінець адреси. Статистика переїжджає разом із посиланням."""
+        new = (new or "").strip().strip("/")
+        if not SLUG_RE.fullmatch(new):
+            raise ValueError("Кінець адреси: 2–40 символів — латиниця, цифри, - або _")
+        if self.get(new) or new.lower() in RESERVED:
+            raise ValueError(f"Адреса «{new}» уже зайнята")
+        with closing(self.db()) as con, con:
+            con.execute("UPDATE links SET code=?, updated=? WHERE code=?", (new, time.time(), code))
+            con.execute("UPDATE hits SET code=? WHERE code=?", (new, code))
+        return new
+
+    def delete(self, code):
+        with closing(self.db()) as con, con:
+            con.execute("DELETE FROM hits WHERE code=?", (code,))
+            con.execute("DELETE FROM links WHERE code=?", (code,))
+
+    def listing(self, query="", folder=None, limit=20, offset=0):
+        q, args = ("SELECT l.*, (SELECT COUNT(*) FROM hits h WHERE h.code=l.code AND h.bot=0) AS n FROM links l WHERE provider='own'", [])
+        if query:
+            q += " AND (l.code LIKE ? OR l.full_url LIKE ? OR l.title LIKE ? OR l.tag LIKE ? OR l.note LIKE ?)"
+            args += [f"%{query}%"] * 5
+        if folder is not None:
+            q += " AND l.folder=?"
+            args.append(folder)
+        with closing(self.db()) as con:
+            total = con.execute(f"SELECT COUNT(*) FROM ({q})", args).fetchone()[0]
+            rows = [dict(r) for r in con.execute(q + " ORDER BY l.created DESC LIMIT ? OFFSET ?", (*args, limit, offset))]
+        return rows, total
+
+    def folders(self):
+        with closing(self.db()) as con:
+            return [r[0] for r in con.execute("SELECT DISTINCT folder FROM links WHERE provider='own' AND folder!='' ORDER BY folder")]
+
+    def link_counts(self, code):
+        with closing(self.db()) as con:
+            r = con.execute("SELECT COUNT(*) AS n, COUNT(DISTINCT uniq) AS u FROM hits WHERE code=? AND bot=0", (code,)).fetchone()
+        return r["n"], r["u"]
+
+    def check(self, code, ua="", country="", password=None):
+        """Куди вести відвідувача: ('go', url) | ('password', None) | ('gone', причина) | ('preview', link) для роботів соцмереж."""
+        link = self.get(code)
+        if not link or link["provider"] != "own":
+            return ("missing", None)
+        if not link["active"]:
+            return ("gone", "Посилання вимкнено")
+        if link["expires"] and time.time() > link["expires"]:
+            return ("gone", "Термін дії посилання минув")
+        if link["max_clicks"] and self.link_counts(code)[0] >= link["max_clicks"]:
+            return ("gone", "Ліміт переходів за цим посиланням вичерпано")
+        is_bot = bool(BOT_UA.search(ua or ""))
+        if is_bot and (link["og_title"] or link["og_image"]):
+            return ("preview", link)
+        if link["pw_hash"] and not is_bot:
+            if password is None or hashlib.sha256((link["code"] + ":" + password).encode()).hexdigest() != link["pw_hash"]:
+                return ("password", None)
+        return ("go", route_target(link, ua, country))
+
+    def csv(self):
+        import csv
+        from io import StringIO
+        buf = StringIO()
+        w = csv.writer(buf)
+        w.writerow(["Коротке", "Куди веде", "Назва", "Тека", "Тег", "Платформа", "Кліки", "Унікальні", "Створено", "Активне"])
+        for r in self.listing(limit=100000)[0]:
+            n, u = self.link_counts(r["code"])
+            w.writerow([r["code"], r["full_url"], r["title"], r["folder"], r["tag"], r["platform"], n, u,
+                        datetime.fromtimestamp(r["created"], TZ).strftime("%Y-%m-%d %H:%M"), "так" if r["active"] else "ні"])
+        return ("\ufeff" + buf.getvalue()).encode("utf-8")
+
+    def import_rows(self, rows):
+        """Імпорт зі Short.io (лише читання там): (оригінал, короткий шлях, назва). Повертає кількість нових."""
+        n = 0
+        for url, path, title in rows:
+            slug = (path or "").strip("/")
+            if not url or not SLUG_RE.fullmatch(slug or "-") or self.get(slug):
+                slug = None
+            with closing(self.db()) as con:
+                if con.execute("SELECT 1 FROM links WHERE full_url=? AND provider='own'", (url,)).fetchone():
+                    continue
+            try:
+                self.create(url, slug, title or "", "Short.io")
+                n += 1
+            except ValueError:
+                pass
+        return n
 
     # ---------------------------------------------------------------- кліки
     async def geo(self, ip):
@@ -195,7 +330,7 @@ class Tracker:
                                                  (time.time() - 90 * 86400,))]
 
     # ---------------------------------------------------------------- звіт
-    def report(self, days=None, tag=None, network=None):
+    def report(self, days=None, tag=None, network=None, code=None):
         """Зведення як у Short.io / Google Analytics: кліки, унікальні, по днях, соцмережах, тегах, країнах, містах, пристроях…"""
         since = time.time() - days * 86400 if days else 0
         q = ("SELECT h.*, l.tag, l.platform, l.base_url FROM hits h JOIN links l ON l.code=h.code WHERE h.ts>=?")
@@ -203,9 +338,12 @@ class Tracker:
         if tag:
             q += " AND l.tag=?"
             args.append(tag)
+        if code:
+            q += " AND l.code=?"
+            args.append(code)
         with closing(self.db()) as con:
             rows = [dict(r) for r in con.execute(q, args)]
-            ext = [dict(r) for r in con.execute("SELECT e.dim, e.key, e.n, l.tag, l.platform, l.base_url FROM ext_stats e JOIN links l ON l.code=e.code"
+            ext = [] if code else [dict(r) for r in con.execute("SELECT e.dim, e.key, e.n, l.tag, l.platform, l.base_url FROM ext_stats e JOIN links l ON l.code=e.code"
                                                  + (" WHERE l.tag=?" if tag else ""), [tag] if tag else [])]
             nlinks = con.execute("SELECT COUNT(*) FROM links").fetchone()[0]
         if network:
@@ -234,6 +372,67 @@ class Tracker:
         out["shortio"] = sum(shortio.values())
         out["clicks"] += out["shortio"]
         return out
+
+
+EXTRA_COLS = {"title": "TEXT NOT NULL DEFAULT ''", "note": "TEXT NOT NULL DEFAULT ''", "folder": "TEXT NOT NULL DEFAULT ''",
+              "active": "INTEGER NOT NULL DEFAULT 1", "expires": "REAL", "max_clicks": "INTEGER", "pw_hash": "TEXT",
+              "og_title": "TEXT", "og_desc": "TEXT", "og_image": "TEXT", "rules": "TEXT", "updated": "REAL"}
+EDITABLE = {"full_url", "title", "note", "folder", "active", "expires", "max_clicks", "pw_hash", "og_title", "og_desc", "og_image", "rules"}
+SLUG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{1,39}")
+RESERVED = {"app", "api", "r", "sandbox", "wake", "health", "admin", "static"}
+
+
+def route_target(link, ua="", country=""):
+    """Правила переадресації: за країною, за пристроєм, A/B-ротація між кількома адресами. Інакше — основна адреса."""
+    try:
+        rules = json.loads(link.get("rules") or "{}")
+    except ValueError:
+        rules = {}
+    if country:
+        for c, url in (rules.get("geo") or {}).items():
+            if c.lower() in (country.lower(), COUNTRY_UK.get(country, country).lower()):
+                return url
+    dev, os_, _br, _app = parse_ua(ua)
+    dv = rules.get("device") or {}
+    for key in (os_.lower(), {"Телефон": "mobile", "Планшет": "mobile", "Комп'ютер": "desktop"}.get(dev, "")):
+        if key and dv.get(key):
+            return dv[key]
+    ab = [x for x in rules.get("ab") or [] if x.get("url")]
+    if ab:
+        import random
+        pool = [{"url": link["full_url"], "w": int(rules.get("main_w") or 50)}] + ab
+        return random.choices([x["url"] for x in pool], weights=[max(1, int(x.get("w") or 50)) for x in pool])[0]
+    return link["full_url"]
+
+
+def qr_png(url, scale=10):
+    import segno
+    from io import BytesIO
+    buf = BytesIO()
+    segno.make(url, error="m").save(buf, kind="png", scale=scale, border=2)
+    return buf.getvalue()
+
+
+def password_hash(code, password):
+    return hashlib.sha256((code + ":" + password).encode()).hexdigest()
+
+
+def preview_html(link, target, esc):
+    """Для роботів соцмереж — власна картка прев'ю (назва, опис, картинка), людей одразу перекидає далі."""
+    t, d, img = esc(link.get("og_title") or ""), esc(link.get("og_desc") or ""), esc(link.get("og_image") or "")
+    return (f'<!doctype html><html><head><meta charset="utf-8"><title>{t}</title><meta property="og:title" content="{t}">'
+            f'<meta property="og:description" content="{d}">' + (f'<meta property="og:image" content="{img}"><meta name="twitter:card" content="summary_large_image">' if img else "")
+            + f'<meta property="og:url" content="{esc(target)}"><meta http-equiv="refresh" content="0;url={esc(target)}"></head><body></body></html>')
+
+
+def password_page(code, esc, wrong=False):
+    return ('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>🔒</title>'
+            '<style>body{font-family:system-ui;display:grid;place-items:center;min-height:90vh;margin:0;background:#f4f5f7}'
+            'form{background:#fff;padding:24px;border-radius:16px;box-shadow:0 4px 20px #0001;width:min(320px,85vw)}'
+            'input,button{width:100%;box-sizing:border-box;padding:12px;margin-top:10px;border-radius:10px;border:1px solid #ccd;font:inherit}'
+            'button{background:#2481cc;color:#fff;border:0}</style></head><body><form method="post">'
+            '<b>🔒 Посилання захищене паролем</b>' + ('<p style="color:#c33">Неправильний пароль</p>' if wrong else '')
+            + '<input type="password" name="p" placeholder="Пароль" autofocus><button>Відкрити</button></form></body></html>')
 
 
 def bar(n, top, width=12):
