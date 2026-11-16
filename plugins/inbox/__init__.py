@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS msgs (id INTEGER PRIMARY KEY AUTOINCREMENT, user INTE
 CREATE INDEX IF NOT EXISTS msgs_owner ON msgs(owner_chat, owner_msg);
 CREATE INDEX IF NOT EXISTS msgs_user ON msgs(user, id);
 CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS sanctions (chat INTEGER, user INTEGER, name TEXT, kind TEXT, until REAL, at REAL, PRIMARY KEY (chat, user));
 CREATE TABLE IF NOT EXISTS chats (chat INTEGER PRIMARY KEY, title TEXT, type TEXT, username TEXT, posts INTEGER DEFAULT 0,
     comments INTEGER DEFAULT 0, asked INTEGER DEFAULT 0, seen REAL);
 """
@@ -215,6 +216,8 @@ class Plugin(Base):
         rows = [[("🔗 Відкрити", "url:" + link)]]
         if c.type != "channel":
             rows[0].insert(0, ("↩️ Відповісти там", self.cb("rc", c.id, m.message_id)))
+            rows.append([("🔇 Мут 1 год", self.cb("mu", c.id, uid, 3600)), ("🔇 Мут 1 добу", self.cb("mu", c.id, uid, 86400))])
+            rows.append([("🚫 Забанити", self.cb("ban", c.id, uid)), ("🗑 Видалити коментар", self.cb("del", c.id, m.message_id))])
         rows.append([("✅ Прочитано", self.cb("ok", uid))])
         for owner in self.host.admins():
             try:
@@ -235,22 +238,82 @@ class Plugin(Base):
         except Exception as exc:  # noqa: BLE001
             await msg.reply_text(f"⚠️ Не вдалося відповісти в чаті: {exc}\n(бот має бути адміністратором групи обговорення)")
             return True
-        await msg.reply_text("✅ Відповів у коментарях")
+        note = ""
+        try:  # від чийого імені видно відповідь: бот-«анонімний адміністратор» пише від імені групи
+            me = await ctx.bot.get_chat_member(chat, ctx.bot.id)
+            if not getattr(me, "is_anonymous", False):
+                note = ("\n⚠️ Відповідь видно від імені бота. Щоб бот писав від імені групи: група → Адміністратори → бот → "
+                        "увімкніть «Залишатися анонімним» (Remain anonymous).")
+        except Exception:  # noqa: BLE001
+            pass
+        await msg.reply_text("✅ Відповів у коментарях" + note)
         return True
+
+    async def moderate(self, ctx, chat, user, kind, secs=0):
+        """🔇 мут (тиша на час), 🚫 бан, а також зняття. user < 0 — людина пише від імені каналу (бан каналу-відправника)."""
+        from telegram import ChatPermissions
+        until = int(time.time() + secs) if secs else None
+        name = (self.person(user) or {}).get("name") or str(user)
+        bot = ctx.bot
+        if kind == "mu":
+            await bot.restrict_chat_member(chat, user, ChatPermissions(can_send_messages=False, can_send_audios=False, can_send_documents=False,
+                                           can_send_photos=False, can_send_videos=False, can_send_video_notes=False, can_send_voice_notes=False,
+                                           can_send_polls=False, can_send_other_messages=False, can_add_web_page_previews=False), until_date=until)
+        elif kind == "unmu":
+            await bot.restrict_chat_member(chat, user, ChatPermissions.all_permissions())
+        elif kind == "ban":
+            if user < 0:
+                await bot.ban_chat_sender_chat(chat, user)
+            else:
+                await bot.ban_chat_member(chat, user)
+        elif kind == "unban":
+            if user < 0:
+                await bot.unban_chat_sender_chat(chat, user)
+            else:
+                await bot.unban_chat_member(chat, user, only_if_banned=True)
+        with closing(self.db()) as con, con:
+            if kind in ("mu", "ban"):
+                con.execute("INSERT OR REPLACE INTO sanctions(chat,user,name,kind,until,at) VALUES(?,?,?,?,?,?)",
+                            (chat, user, name, kind, until, time.time()))
+            else:
+                con.execute("DELETE FROM sanctions WHERE chat=? AND user=?", (chat, user))
+        return name
+
+    def sanctions_screen(self, chat):
+        with closing(self.db()) as con:
+            rs = [dict(r) for r in con.execute("SELECT * FROM sanctions WHERE chat=? AND (until IS NULL OR until>?) ORDER BY at DESC LIMIT 40",
+                                                (int(chat), time.time()))]
+        c = self.chat_row(chat) or {}
+        lines = [f"🛡 <b>Модерація · {esc(c.get('title', chat))}</b>", ""]
+        rows = []
+        for r in rs:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            till = datetime.fromtimestamp(r["until"], ZoneInfo("Europe/Kyiv")).strftime("до %d.%m %H:%M") if r["until"] else "назавжди"
+            lines.append(f"{'🔇' if r['kind'] == 'mu' else '🚫'} {esc(r['name'])} · {till}")
+            rows.append([(f"{'🔊 Зняти мут' if r['kind'] == 'mu' else '✅ Розбанити'}: {r['name']}"[:40],
+                          self.cb("unmu" if r["kind"] == "mu" else "unban", chat, r["user"]))])
+        if not rs:
+            lines.append("Нікого не обмежено. Мут і бан — кнопками під коментарями у скриньці.")
+        rows.append([("« Канали й коментарі", self.cb("chs"))])
+        return "\n".join(lines), rows
 
     def chats_screen(self):
         cs = self.chats()
         lines = ["📣 <b>Канали й коментарі</b>",
                  "Як підключити: додайте бота <b>адміністратором</b> у ваш канал і в його групу обговорення (де коментарі). "
                  "Щойно там з'явиться перший допис чи коментар, бот спитає, чи надсилати їх у скриньку. "
-                 "Відповідь reply на коментар у скриньці бот опублікує прямо під ним.", ""]
+                 "Відповідь reply на коментар у скриньці бот опублікує прямо під ним. Щоб бот писав <b>від імені групи</b>, а не від свого: "
+                 "група → Адміністратори → бот → «Залишатися анонімним». У самому каналі бот завжди пише від імені каналу. "
+                 "Для мутів і банів боту потрібне право «Блокувати користувачів», для видалення — «Видаляти повідомлення».", ""]
         rows = []
         for c in cs:
             ch = c["type"] == "channel"
             key = "posts" if ch else "comments"
             on = c[key]
             lines.append(f"{'📣' if ch else '💬'} {esc(c['title'])} — {'дописи' if ch else 'коментарі'}: {'✅' if on else '⏸'}")
-            rows.append([(f"{'✅' if on else '⏸'} {c['title']}"[:40], self.cb("cht", c["chat"], key, 0 if on else 1))])
+            rows.append([(f"{'✅' if on else '⏸'} {c['title']}"[:40], self.cb("cht", c["chat"], key, 0 if on else 1))]
+                        + ([("🛡 Модерація", self.cb("mod", c["chat"]))] if not ch else []))
         if not cs:
             lines.append("Поки бот не бачив жодного каналу чи групи.")
         rows.append([("« Налаштування скриньки", self.cb("set"))])
@@ -429,6 +492,22 @@ class Plugin(Base):
                 con.execute(f"UPDATE chats SET {'posts' if y == 'posts' else 'comments'}=?, asked=1 WHERE chat=?",
                             (int(args[3]) if len(args) > 3 else 1, int(x)))
             return "Збережено", self.chats_screen()
+        if a in ("mu", "unmu", "ban", "unban") and x and y:
+            try:
+                name = await self.moderate(ctx, int(x), int(y), a, int(args[3]) if len(args) > 3 else 0)
+            except Exception as exc:  # noqa: BLE001
+                return f"Не вдалося: {str(exc)[:150]}", None
+            msg = {"mu": f"🔇 {name}: тиша " + ("на годину" if len(args) > 3 and args[3] == "3600" else "на добу"),
+                   "unmu": f"🔊 {name} знову може писати", "ban": f"🚫 {name} забанено", "unban": f"✅ {name} розбанено"}[a]
+            return msg, (self.sanctions_screen(int(x)) if a in ("unmu", "unban") else None)
+        if a == "del" and x and y:
+            try:
+                await ctx.bot.delete_message(int(x), int(y))
+                return "🗑 Коментар видалено", None
+            except Exception as exc:  # noqa: BLE001
+                return f"Не вдалося видалити: {str(exc)[:150]}", None
+        if a == "mod" and x:
+            return None, self.sanctions_screen(int(x))
         if a == "rc" and x and y:
             self.reply_to[chat] = (int(x), int(y))
             return None, ("↩️ Наступне ваше повідомлення бот опублікує відповіддю на цей коментар.", [[("✖️ Скасувати", self.cb("rx"))]])
