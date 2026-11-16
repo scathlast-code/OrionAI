@@ -4061,6 +4061,7 @@ class Progress:
         return False
 
 
+NOTE_SWITCH = {}  # chat -> «Gemini зараз не може (…) — відповідає OpenRouter» для останньої відповіді
 LIVE = {}  # chat -> яка модель зараз думає: для «Думаю…» у застосунку
 STICKY = {}  # chat -> {"ok": модель, що відповіла замість мовчуна, "bad": {мовчуни}, "until": до коли}
 STICKY_FOR = float(env("STICKY_MINUTES", "10")) * 60
@@ -7603,7 +7604,16 @@ async def _answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE, content, histo
             await finish_note(ctx.bot, chat_id, did, "unavailable", q=history_text)
         return None
     jid = LAST_JOURNAL.get()
-    save_message(chat_id, "assistant", text, provider=pid, dialog_id=did)
+    if preferred in PROVIDERS and pid != preferred:  # просили одну модель, а відповіла інша — чесно кажемо це в розмові (видно й у застосунку)
+        why = next((ERR_SHORT.get(a[1].get("kind"), a[1].get("kind", "")) for a in attempts if a[0] == preferred), "")
+        pu = paused_until(preferred)
+        why = why or (f"на паузі до {hhmm(pu)}" if pu else "не відповіла")
+        if preferred == "gemini" and any(t > time.time() for t in GEM_OUT.values()):
+            why = f"денний ліміт вичерпано, оновиться о {hhmm(pacific_reset())}"
+        NOTE_SWITCH[chat_id] = f"↪️ {PROVIDERS[preferred]['title']} зараз не може ({why}) — відповідає {PROVIDERS.get(pid, {}).get('title', pid)}."
+    else:
+        NOTE_SWITCH.pop(chat_id, None)
+    save_message(chat_id, "assistant", ((NOTE_SWITCH[chat_id] + "\n\n") if chat_id in NOTE_SWITCH else "") + text, provider=pid, dialog_id=did)
     outcome = answer_outcome(text)
     if jid and outcome != "done":
         journal_update(jid, status=outcome)
@@ -7614,7 +7624,9 @@ async def _answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE, content, histo
     foot = footer(pid, attempts, warnings) if show_footer else ""
     top = f"💬 «{dialog_name(did)}» · {PROVIDERS.get(pid, {}).get('title', pid)}\n\n" if head else ""
     skipped = [PROVIDERS[p]["title"] for p, i in attempts if p in PROVIDERS and p != pid]
-    if skipped:  # відповідає не та модель, що мала б — кажемо про це одразу, над відповіддю
+    if chat_id in NOTE_SWITCH:
+        top += NOTE_SWITCH[chat_id] + "\n\n"
+    elif skipped:  # відповідає не та модель, що мала б — кажемо про це одразу, над відповіддю
         top += f"↪️ Відповідає {PROVIDERS.get(pid, {}).get('title', pid)} — {', '.join(skipped)} не відповіла\n\n"
     body = text
     if jid and any(w.startswith("✂️") for w in warnings):
@@ -8709,7 +8721,8 @@ async def main():
 
     async def _sandbox_page(request):  # 🧪 демо-дані, без секретів — можна відкривати як Mini App
         page = _sbx.page_html()
-        return _HTML(page) if page else _Resp("not built", status_code=404)
+        # без кешу: Telegram інакше показує стару версію застосунку після оновлення
+        return _HTML(page, headers={"Cache-Control": "no-store, max-age=0"}) if page else _Resp("not built", status_code=404)
 
     async def _sandbox_stat(request):
         body = (await request.body())[:60].decode("utf-8", "ignore")
