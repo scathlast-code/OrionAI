@@ -3667,8 +3667,8 @@ async def complete_task(bot, task, text, pid, attempts, warnings, deferred=False
                 f"🚀 Запуск {datetime.fromtimestamp(st, TZ).strftime('%H:%M')} · 🏁 Завершено {datetime.fromtimestamp(fin, TZ).strftime('%H:%M')} · ⏱ {took_s}\n"
                 f"💬 Розмова: {d['title'] if d else '—'}\n\n")
     show_footer = prefs(task["chat_id"])["footer"] or attempts or warnings
-    tail = ("\n\n" + footer(pid, attempts, warnings)) if show_footer else ""
-    await send_long(bot, task["chat_id"], head + text + tail)
+    tail = footer(pid, attempts, warnings) if show_footer else ""
+    await send_long(bot, task["chat_id"], text, head=head, foot=tail)
     await send_media(bot, task["chat_id"], MEDIA.get())
 
 
@@ -7454,14 +7454,14 @@ async def _answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE, content, histo
     parallel = bool(busy_elsewhere(chat_id, did))
     show_footer = prefs(chat_id)["footer"] or attempts or warnings
     head = f"💬 <b>{esc(dialog_name(did))}</b>\n" if (away or parallel) else ""
-    body = text + (("\n\n" + footer(pid, attempts, warnings)) if show_footer else "")
-    if head:
-        body = f"💬 «{dialog_name(did)}» · {PROVIDERS.get(pid, {}).get('title', pid)}\n\n" + body
+    foot = footer(pid, attempts, warnings) if show_footer else ""
+    top = f"💬 «{dialog_name(did)}» · {PROVIDERS.get(pid, {}).get('title', pid)}\n\n" if head else ""
+    body = text
     if jid and any(w.startswith("✂️") for w in warnings):
-        await send_long(ctx.bot, chat_id, body)
+        await send_long(ctx.bot, chat_id, body, head=top, foot=foot)
         await ctx.bot.send_message(chat_id, "✂️ Відповідь обірвалася.", reply_markup=kb([[("▶️ Продовжити · 🔁 Авто", f"m:jrun:{jid}:auto")], [("📒 Інша модель…", f"m:j:{jid}")]]))
     else:
-        await send_long(ctx.bot, chat_id, body)
+        await send_long(ctx.bot, chat_id, body, head=top, foot=foot)
     await send_media(ctx.bot, chat_id, MEDIA.get())
     if away or (parallel and outcome != "done") or (time.time() - started > 60 and outcome == "done" and away):
         await finish_note(ctx.bot, chat_id, did, outcome, jid=jid, pid=pid, q=history_text)
