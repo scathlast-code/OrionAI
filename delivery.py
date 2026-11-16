@@ -37,8 +37,25 @@ def _tech_entities(payload, head, foot):
     return ents
 
 
-async def send(bot,chat_id,text,head='',foot='',**kw):
-    """head/foot — технічні рядки над і під відповіддю ШІ: показуються окремо, у цитаті."""
+async def send(bot,chat_id,text,head='',foot='',html=None,**kw):
+    """head/foot — технічні рядки над і під відповіддю ШІ: показуються окремо, у цитаті.
+    html — та сама відповідь, оформлена (жирне, списки, посилання); якщо Telegram її не прийме — надсилаємо звичайний text."""
+    if html and 'parse_mode' not in kw:
+        from html import escape as _e
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        h=head.strip()
+        f=foot.strip()
+        payload=(f'<blockquote><i>{_e(h)}</i></blockquote>\n' if h else '')+html.strip()+(
+            (f'\n\n<blockquote expandable><i>{_e(f)}</i></blockquote>' if f.count('\n')>=2 else f'\n\n<blockquote><i>{_e(f)}</i></blockquote>') if f else '')
+        if len(payload)<3900:
+            local_kw=dict(kw)
+            local_kw.setdefault('reply_markup',InlineKeyboardMarkup([[InlineKeyboardButton('🧹 Чистий текст',callback_data='view:toggle')]]))
+            try:
+                sent=await bot.send_message(chat_id,payload,parse_mode='HTML',disable_web_page_preview=True,**local_kw)
+                cleanview.store(os.getenv('DB_PATH','/data/bot.db'),chat_id,sent.message_id,head+text+('\n\n'+foot if foot else ''))
+                return
+            except Exception:  # noqa: BLE001 — неправильний HTML від моделі: просто текст
+                pass
     if head or foot:
         if 'parse_mode' in kw or len(split_paragraphs(head+text+('\n\n'+foot if foot else '')))>1:
             text=head+text+('\n\n'+foot if foot else '')   # довге або HTML — як раніше, одним текстом
