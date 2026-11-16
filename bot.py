@@ -1994,7 +1994,23 @@ async def deny(update: Update):
             await update.callback_query.answer()
         return await update.effective_chat.send_message(text, reply_markup=markup)
     st = member_status(update.effective_user.id)
-    if st == "pending":
+    if st in (None, "removed") and owner_id() and update.effective_user.id != owner_id():
+        # Хто натиснув «Старт» — одразу заявка власнику з кнопкою «Дати доступ». Після схвалення бот просто починає працювати.
+        user = update.effective_user
+        member_upsert(user, "pending")
+        who = esc(user.full_name) + (f" (@{esc(user.username)})" if user.username else "")
+        try:
+            await update.get_bot().send_message(
+                owner_id(), f"👥 <b>Хтось хоче користуватися ботом</b>\n{who}\nID: <code>{user.id}</code>\n\n"
+                "Натисніть «✅ Дати доступ» — бот одразу запрацює для цієї людини й привітається з нею. Нічого більше від неї не потрібно.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb([[("✅ Дати доступ", f"m:accok:{user.id}"), ("❌ Відхилити", f"m:accno:{user.id}")]]))
+        except Exception:  # noqa: BLE001
+            log.warning("не вдалося повідомити власника про заявку %s", user.id)
+        st = "pending"
+        text = ("👋 Вітаю! Це приватний бот. Я надіслав власнику заявку на ваш доступ — щойно він схвалить, "
+                "бот одразу запрацює і я вам напишу. Нічого більше робити не потрібно.")
+    elif st == "pending":
         text = "⏳ Ваш запит на доступ ще розглядається. Щойно власник підтвердить, бот напише."
     elif st == "blocked":
         text = "Доступ до бота закрито."
@@ -4268,6 +4284,68 @@ def scr_journal_item(chat_id, jid):
     return "\n".join(lines), rows
 
 
+CROSS_RE = re.compile(
+    r"(?:з|із|зі|у|в|по|для)\s+(?:сусідн\w*|інш\w*|ус\w*|вс\w*)\s+(?:чат\w*|розмов\w*)|"
+    r"(?:по|з|із|в|у)\s+(?:всьому|усьому|цілому|всього|усього|цілого)\s+проєкт\w*|(?:з|із)\s+(?:цієї\s+)?теки", re.I)
+
+
+def cross_scope(text):
+    """«бери з сусідніх чатів» / «по всьому проєкту» — розмови тієї ж теки; «з усіх чатів» — усі розмови. Без таких слів — нічого."""
+    m = CROSS_RE.search(text or "")
+    if not m:
+        return None
+    return "all" if re.search(r"\b(?:ус|вс)\w*\s+(?:чат|розмов)", m.group(0), re.I) else "folder"
+
+
+def cross_context(chat_id, did, scope, budget=12000):
+    """Короткий зміст інших розмов — лише коли ви про це попросили. Підсумок розмови, а якщо його немає — останні репліки."""
+    d = dialog_get(did) or {}
+    others = [x for x in dialogs_list(chat_id, folder_id="any" if scope == "all" else d.get("folder_id"), limit=40) if x["id"] != did]
+    if scope == "folder" and not d.get("folder_id"):
+        others = [x for x in dialogs_list(chat_id, limit=40) if x["id"] != did]
+    parts, used = [], 0
+    for x in others:
+        summary, _ = summary_get(x["id"])
+        with closing(db()) as con:
+            rows = con.execute("SELECT role, text, provider FROM messages WHERE dialog_id=? AND in_context=1 AND pending=0 ORDER BY id DESC LIMIT 12",
+                               (x["id"],)).fetchall()[::-1]
+        body = (f"Підсумок: {summary[:1500]}\n" if summary else "") + "\n".join(
+            f"{'Користувач' if r['role'] == 'user' else (PROVIDERS.get(r['provider'] or '') or CATALOG.get(r['provider'] or '') or {}).get('title', 'ШІ')}: {r['text'][:400]}" for r in rows)
+        chunk = f"### Розмова «{x['title']}»\n{body}"
+        if used + len(chunk) > budget:
+            break
+        parts.append(chunk)
+        used += len(chunk)
+    if not parts:
+        return ""
+    where = "усіх ваших розмов" if scope == "all" else "сусідніх розмов цієї теки (проєкту)"
+    return (f"Користувач дозволив узяти до уваги зміст {where}. Ось вони:\n\n" + "\n\n".join(parts)
+            + "\n\n---\nКінець вмісту інших розмов. Відповідай у поточній розмові.\n\n")
+
+
+def quote_note(quote):
+    return f"Користувач відповідає на це повідомлення:\n«{quote[:1500]}»\n\n" if quote else ""
+
+
+def dialog_branch(chat_id, src_did, upto_id=None, title=None):
+    """🌿 Гілка: нова розмова в тій самій теці з копією історії до потрібного повідомлення включно."""
+    src = dialog_get(src_did) or {}
+    new = dialog_create(chat_id, (title or ("🌿 " + (src.get("title") or "Розмова")))[:60], src.get("folder_id"))
+    with closing(db()) as con, con:
+        rows = con.execute("SELECT role, text, source, provider, ts FROM messages WHERE dialog_id=? AND in_context=1 AND pending=0 AND id<=? ORDER BY id",
+                           (src_did, upto_id or 2**62)).fetchall()[-200:]
+        con.executemany("INSERT INTO messages(chat_id, role, text, source, provider, ts, dialog_id) VALUES (?,?,?,?,?,?,?)",
+                        [(chat_id, r["role"], r["text"], r["source"], r["provider"], r["ts"], new) for r in rows])
+        s, _ = (con.execute("SELECT summary, summary_upto FROM dialogs WHERE id=?", (src_did,)).fetchone() or (None, 0))
+        if s:
+            con.execute("UPDATE dialogs SET summary=?, summary_upto=0 WHERE id=?", (s, new))
+    return new
+
+
+APP_REPLY = {}  # чат -> цитата повідомлення, на яке відповідають у застосунку
+BRANCH_RE = re.compile(r"^\s*(?:🌿|(?:нова\s+)?гілка\b|(?:у|в)\s+нов(?:ий|у)\s+(?:чат|розмову)\b)[\s:,.—-]*", re.I)
+
+
 def summary_get(dialog_id):
     with closing(db()) as con:
         r = con.execute("SELECT summary, summary_upto FROM dialogs WHERE id=?", (dialog_id,)).fetchone()
@@ -5304,14 +5382,16 @@ def _utm_state(chat_id, **kw):
     return st
 
 
-UTM_MENU = [[("📋 Реєстр за 3 дні", "m:utmreg"), ("📊 Статистика", "m:utmst")],
+UTM_MENU = [[("➕ Додати посилання", "m:utmadd")], [("📋 Реєстр за 3 дні", "m:utmreg"), ("📊 Статистика", "m:utmst")],
             [("📗 Excel", "m:utmx"), ("📘 Word", "m:utmd")], [("🗂 Резервні формати", "m:utmres")]]
 
 
 def scr_utm(chat_id):
     text = ("🔗 <b>UTM-мітки GreenPost</b>\n"
-            "Надішліть <code>/utm посилання</code> — запропоную теги, а після вибору дам одразу всі 9 міток: Telegram (пост і сторіс), "
-            "Tumblr, Facebook (пост, історії, Reels), Threads, Instagram сторіс, Twitter/X. Кожна в окремому блоці: торкніться, щоб скопіювати.\n\n"
+            "Натисніть <b>➕ Додати посилання</b> і вставте посилання на новину — запропоную теги, а після вибору дам одразу всі 9 міток: "
+            "Telegram (пост і сторіс), Tumblr, Facebook (пост, історії, Reels), Threads, Instagram сторіс, Twitter/X. "
+            "Кожна в окремому блоці: торкніться, щоб скопіювати.\n\n"
+            "<blockquote expandable>Те саме командами:\n<code>/utm посилання</code> — з вибором тегу\n"
             "<code>/utm посилання тег</code> — одразу з вашим тегом\n"
             "<code>/utm посилання тег telegram</code> — лише один формат\n"
             "<code>/utm реєстр</code> — усі мітки за 3 дні за датами й тегами\n"
@@ -5319,7 +5399,7 @@ def scr_utm(chat_id):
             "<code>/utm excel</code> · <code>/utm word</code> — файли зі статистикою\n"
             "<code>/utm резервні</code> — YouTube, шапки профілів, коментарі\n"
             "<code>/utm clicks</code> — кліки Short.io (якщо задано SHORTIO_API_KEY)\n\n"
-            "Будова: <code>посилання?utm_content=тег&amp;utm_medium=формат&amp;utm_campaign=news&amp;utm_source=платформа</code>")
+            "Будова: <code>посилання?utm_content=тег&amp;utm_medium=формат&amp;utm_campaign=news&amp;utm_source=платформа</code></blockquote>")
     return text, [list(r) for r in UTM_MENU]
 
 
@@ -6384,11 +6464,11 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         uid = int(arg)
         member_set(uid, {"accok": "approved", "accno": "blocked", "accrm": "removed"}[a])
         if a == "accok":
-            toast = "✅ Доступ надано"
+            toast = "✅ Доступ надано — людина вже отримала привітання"
             try:
                 await ctx.bot.send_message(
                     uid,
-                    "✅ Власник підтвердив ваш доступ. Ласкаво просимо!",
+                    "🎉 Власник схвалив вашу заявку — бот уже працює для вас!\nПишіть будь-яке питання або користуйтеся меню нижче.",
                     reply_markup=menu_kb(uid),
                 )
                 t, r = scr_home(uid)
@@ -6542,10 +6622,14 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         screen = ("✏️ <b>Адреса Ollama</b>\nНа тому ж сервері Oracle (docker compose): <code>http://ollama:11434</code>\n"
                   "Домашній ПК через Tailscale чи Cloudflare Tunnel: його адреса.\n«-» — як у змінній OLLAMA_URL.\nЗараз: <code>"
                   + esc(ollama_url() or "—") + "</code>", [CANCEL_ROW])
-    elif a in ("utmt", "utmown", "utmold", "utmres", "utmrs", "utmreg", "utmst", "utmx", "utmd", "utm"):
+    elif a in ("utmt", "utmown", "utmold", "utmres", "utmrs", "utmreg", "utmst", "utmx", "utmd", "utm", "utmadd"):
         st = _utm_state(chat_id)
         if a == "utm":
             screen = scr_utm(chat_id)
+        elif a == "utmadd":
+            ask_input(chat_id, "utmurl")
+            screen = ("🔗 <b>Вставте посилання на новину</b>\n\nМожна одразу з тегом через пробіл: <code>https://greenpost.ua/news/… zubr_lviv</code>. "
+                      "Без тегу — запропоную варіанти на вибір.", [CANCEL_ROW])
         elif a == "utmst":
             screen = scr_utm_stats()
         elif a == "utmres":
@@ -7094,6 +7178,18 @@ async def _handle_awaited(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text):
             return await reply("Не схоже на назву моделі. Приклад: qwen2.5:7b", reply_markup=kb([CANCEL_ROW]))
         asyncio.get_running_loop().create_task(ollama_pull_job(chat_id, name))
         return await show(update, *(await scr_ollama(chat_id)), edit=False)
+    if action == "utmurl":
+        parts = text.split()
+        url = UTM.clean_url(parts[0]) if parts else ""
+        if not url.startswith(("http://", "https://")):
+            ask_input(chat_id, "utmurl")
+            return await reply("Це не схоже на посилання. Вставте адресу новини, що починається з https://", reply_markup=kb([CANCEL_ROW]))
+        if len(parts) > 1:
+            try:
+                return await utm_output(update, chat_id, url, parts[1])
+            except ValueError as exc:
+                return await reply(str(exc))
+        return await show(update, *scr_utm_tags(chat_id, url), edit=False)
     if action == "utmtag":
         tag = UTM.clean_tag(text)
         st = _utm_state(chat_id)
@@ -8017,7 +8113,26 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ]
         await answer(update, ctx, content, f"[фото] {caption}", preferred)
     else:
-        await answer(update, ctx, msg.text, msg.text, preferred)
+        text = msg.text
+        quote = APP_REPLY.pop(chat_id, None)
+        r = msg.reply_to_message
+        if quote is None and r is not None and (r.text or r.caption):
+            quote = (r.text or r.caption)
+        if quote and BRANCH_RE.match(text):  # «🌿 …» у відповідь на повідомлення — продовжити з нього в новій розмові
+            text = BRANCH_RE.sub("", text, count=1).strip() or "Продовжимо звідси."
+            did = current_dialog(chat_id)
+            new = dialog_create(chat_id, "🌿 " + short_q(quote.replace("\n", " "), 40), (dialog_get(did) or {}).get("folder_id"))
+            save_message(chat_id, "assistant", quote, dialog_id=new)
+            await msg.reply_text(f"🌿 Нова гілка «{dialog_name(new)}» — продовжую в ній. Попередня розмова лишилась як була.")
+        content = text
+        scope = cross_scope(text)
+        if scope:
+            note = cross_context(chat_id, current_dialog(chat_id), scope)
+            content = (note or "Інших розмов поки немає.\n\n") + content
+        if quote:
+            content = quote_note(quote) + content
+            text = f"↩️ «{short_q(quote.replace(chr(10), ' '), 120)}»\n{text}"
+        await answer(update, ctx, content, text, preferred)
 
 
 async def notify_chat(chat_id, text):
@@ -8821,6 +8936,10 @@ async def main():
         if op == "tabs":  # ☰ → «✏️ Панель унизу»: які кнопки показувати внизу застосунку
             res = _mini.save_tabs(sys.modules[__name__], uid, body.get("tabs"))
             return _Resp(json.dumps(res, ensure_ascii=False), media_type="application/json")
+        if op == "chats":  # 💬 перемикач розмов і тек у застосунку
+            return _Resp(json.dumps(_mini.chats(sys.modules[__name__], uid), ensure_ascii=False), media_type="application/json")
+        if op == "chat":
+            return _Resp(json.dumps(_mini.chat_action(sys.modules[__name__], uid, body), ensure_ascii=False), media_type="application/json")
         if op in ("say", "file", "history", "menu"):
             f = None
             if op == "file":

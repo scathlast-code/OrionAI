@@ -199,13 +199,63 @@ def history(B, uid, limit=40):
     """Поточна розмова з ШІ — та сама, що в чаті."""
     did = B.current_dialog(uid)
     with B.closing(B.db()) as con:
-        rows = con.execute("SELECT role, text, provider, ts FROM messages WHERE dialog_id=? AND pending=0 ORDER BY id DESC LIMIT ?",
+        rows = con.execute("SELECT id, role, text, provider, ts FROM messages WHERE dialog_id=? AND pending=0 ORDER BY id DESC LIMIT ?",
                            (did, limit)).fetchall()
     title = B.dialog_name(did) if did else "Нова розмова"
+    d = B.dialog_get(did) or {}
+    f = B.folder_get(d["folder_id"]) if d.get("folder_id") else None
     ch = B.get_choice(uid)
     models = [{"id": "auto", "title": "🔁 Авто", "on": ch == "auto"}] + [
         {"id": k, "title": f"{B.BADGE.get(k, '🤖')} {v['title']}", "on": ch == k} for k, v in B.PROVIDERS.items()]
-    return {"dialog": title, "limits": B.limits_brief(short=True), "models": models, "messages": [{"role": r["role"], "text": r["text"][:6000], "provider": r["provider"] or "", "ts": r["ts"]} for r in rows[::-1]]}
+    return {"dialog": title, "limits": B.limits_brief(short=True), "models": models, "did": did, "folder": f["name"] if f else "",
+            "reply": (B.APP_REPLY.get(uid) or "")[:300],
+            "messages": [{"id": r["id"], "role": r["role"], "text": r["text"][:6000], "provider": r["provider"] or "", "ts": r["ts"]} for r in rows[::-1]]}
+
+
+def chats(B, uid):
+    """Усі розмови й теки — для перемикача в застосунку."""
+    cur = B.current_dialog(uid)
+    return {"current": cur, "folders": [{"id": f["id"], "name": f["name"]} for f in B.folders_list(uid)],
+            "dialogs": [{"id": d["id"], "title": d["title"], "folder": d["folder_id"], "n": d["n"], "updated": d["updated"], "pinned": bool(d.get("pinned_at"))}
+                        for d in B.dialogs_list(uid, limit=200)]}
+
+
+def chat_action(B, uid, body):
+    """Дії з розмовами в застосунку: нова, перейти, у теку, перейменувати, нова тека, гілка, відповідь на повідомлення."""
+    act = str(body.get("act") or "")
+    did = int(body.get("did") or 0) or None
+    own = lambda x: (B.dialog_get(x) or {}).get("chat_id") == uid  # noqa: E731
+    name = str(body.get("name") or "").strip()[:60]
+    fid = body.get("folder")
+    fid = int(fid) if str(fid or "").isdigit() and (B.folder_get(int(fid)) or {}).get("chat_id") == uid else None
+    if act == "new":
+        B.dialog_create(uid, name or "Нова розмова", fid)
+    elif act == "switch" and did and own(did):
+        B.set_pref(uid, "dialog", did)
+    elif act == "move" and did and own(did):
+        B.dialog_update(did, folder_id=fid)
+    elif act == "rename" and did and own(did) and name:
+        B.dialog_update(did, title=name)
+    elif act == "folder" and name:
+        new = B.folder_create(uid, name)
+        if did and own(did):
+            B.dialog_update(did, folder_id=new)
+    elif act in ("branch", "reply"):
+        mid = int(body.get("mid") or 0)
+        with B.closing(B.db()) as con:
+            m = con.execute("SELECT dialog_id, text FROM messages WHERE id=? AND chat_id=?", (mid, uid)).fetchone()
+        if not m:
+            return {"error": "Повідомлення не знайдено"}
+        if act == "branch":  # 🌿 нова розмова з історією до цього повідомлення
+            B.dialog_branch(uid, m["dialog_id"], mid)
+        else:  # ↩️ відповісти: у цій розмові або в іншій (target)
+            target = int(body.get("target") or 0) or m["dialog_id"]
+            if own(target):
+                B.set_pref(uid, "dialog", target)
+            B.APP_REPLY[uid] = m["text"][:1500]
+    elif act == "noreply":
+        B.APP_REPLY.pop(uid, None)
+    return chats(B, uid)
 
 
 def menu(B, uid):
