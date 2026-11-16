@@ -87,6 +87,7 @@ TELEGRAM_TOKEN = env("TELEGRAM_TOKEN", "")
 ALLOWED_USERS = [int(x) for x in env("ALLOWED_USERS", "").replace(" ", "").split(",") if x]
 MCP_SECRET = env("MCP_SECRET", "")
 DB_PATH = env("DB_PATH", "data/bot.db")
+DB_EXISTED = os.path.exists(DB_PATH)  # 🛟 щойно створена база після оновлення — привід відновитися з рятувальної копії
 HISTORY_LIMIT = int(env("HISTORY_LIMIT", "30"))
 MAX_TOKENS = int(env("MAX_TOKENS", "2000"))
 REQUEST_TIMEOUT = float(env("REQUEST_TIMEOUT", "45"))  # довше — краще одразу спитати іншу модель
@@ -3325,11 +3326,12 @@ def scr_member(user_id):
     n = len(member_dialogs(user_id))
     view = bool(m.get("can_view"))
     text += f"\n👁 Перегляд розмов: {'дозволено' if view else 'вимкнено'}"
-    rows = [
-        [("👁 Вимкнути перегляд розмов" if view else "👁 Увімкнути перегляд розмов", f"m:mview:{user_id}")],
-    ]
-    if view:
-        rows.append([(f"💬 Розмови учасника · {n}", f"m:mdl:{user_id}")])
+    rows = []
+    if CHAT.get() in ALLOWED_USERS:  # історію інших людей бачить лише власник
+        rows.append([("👁 Вимкнути перегляд розмов" if view else "👁 Увімкнути перегляд розмов", f"m:mview:{user_id}")])
+        if view:
+            rows.append([(f"💬 Розмови учасника · {n}", f"m:mdl:{user_id}")])
+    rows += punish_rows(user_id)
     rows += [
         [("🚫 Забрати доступ", f"m:accno:{user_id}"), ("🗑 Видалити зі списку", f"m:accrm:{user_id}")],
         [("« Доступ", "m:acc"), HOME],
@@ -4448,6 +4450,19 @@ def dialog_branch(chat_id, src_did, upto_id=None, title=None):
 
 
 APP_REPLY = {}  # чат -> цитата повідомлення, на яке відповідають у застосунку
+
+
+def _register_state():
+    """Що з пам'яті пережити перезапуск."""
+    def put_dict(target, conv=lambda v: v):
+        def put(d):
+            target.update({int(k) if str(k).lstrip("-").isdigit() else k: conv(v) for k, v in (d or {}).items()})
+        return put
+    RSTATE.register("await", lambda: {str(k): list(v) for k, v in AWAIT.items()}, put_dict(AWAIT, tuple))
+    RSTATE.register("sticky", lambda: {str(k): {**v, "bad": list(v.get("bad") or [])} for k, v in STICKY.items() if v.get("until", 0) > time.time()},
+                    put_dict(STICKY, lambda v: {**v, "bad": set(v.get("bad") or [])}))
+    RSTATE.register("gem_out", lambda: {k: v for k, v in GEM_OUT.items() if v > time.time()}, lambda d: GEM_OUT.update(d or {}))
+    RSTATE.register("app_reply", lambda: {str(k): v for k, v in APP_REPLY.items()}, put_dict(APP_REPLY))
 BRANCH_RE = re.compile(r"^\s*(?:🌿|(?:нова\s+)?гілка\b|(?:у|в)\s+нов(?:ий|у)\s+(?:чат|розмову)\b)[\s:,.—-]*", re.I)
 
 
@@ -4940,7 +4955,205 @@ async def auto_backup():
 
 
 def scr_backups(chat_id):
-    return bkui.scr_backups(BK, TZ)
+    t, rows = bkui.scr_backups(BK, TZ)
+    return t, [[("🛟 Збереження під час оновлень", "m:lb")]] + rows
+
+
+# ---------------------------------------------------------------- 🛟 нічого не губиться під час оновлень (lifeboat.py)
+import lifeboat  # noqa: E402
+
+JOURNAL = lifeboat.Journal(__import__("datadir").base())
+RSTATE = lifeboat.RuntimeState(__import__("datadir").base())
+LIFEBOAT_HOURS = float(env("LIFEBOAT_HOURS", "24"))
+
+
+def lb_on():
+    return (kv_get("lifeboat_auto") or "1") == "1"
+
+
+async def lifeboat_make(bot, reason="щоденна"):
+    """Свіжа копія всіх даних → власнику в чат (без звуку), закріпити; попередню — прибрати."""
+    if not owner_id():
+        return "немає власника (ALLOWED_USERS)"
+    name, data = await asyncio.to_thread(BK.make_format, "zip", "data")
+    name = "lifeboat-" + name
+    if len(data) > 49 * 1024 * 1024:
+        return f"копія завелика для Telegram ({len(data) // 1048576} МБ)"
+    cap = (f"🛟 Рятувальна копія ({reason}) · {datetime.now(TZ):%d.%m %H:%M} · {len(data) // 1024} КБ\n"
+           "Не відкріплюйте: якщо після оновлення бот прокинеться з порожніми даними, він сам відновиться з неї.")
+    m = await bot.send_document(owner_id(), InputFile(io.BytesIO(data), filename=name), caption=cap, disable_notification=True)
+    try:
+        await bot.pin_chat_message(owner_id(), m.message_id, disable_notification=True)
+    except Exception:  # noqa: BLE001
+        pass
+    old = kv_get("lifeboat_msg")
+    if old and str(old) != str(m.message_id):
+        for fn in (bot.unpin_chat_message, bot.delete_message):
+            try:
+                await fn(owner_id(), int(old))
+            except Exception:  # noqa: BLE001
+                pass
+    kv_set("lifeboat_msg", str(m.message_id))
+    kv_set("lifeboat_t", str(time.time()))
+    kv_set("lifeboat_size", str(len(data)))
+    return ""
+
+
+async def lifeboat_restore(bot):
+    """База порожня після запуску — шукаємо закріплену рятувальну копію в чаті власника й відновлюємося з неї."""
+    if not owner_id():
+        return None
+    try:
+        chat = await bot.get_chat(owner_id())
+        pm = chat.pinned_message
+        doc = getattr(pm, "document", None)
+        if not doc or "backup" not in (doc.file_name or ""):
+            return None
+        if (doc.file_size or 0) > 20 * 1024 * 1024:
+            await bot.send_message(owner_id(), "🛟 Дані після оновлення порожні, а рятувальна копія більша за 20 МБ — Telegram не дає боту "
+                                   "її скачати. Відновіть вручну: 💾 Копії → Відновити, надішліть закріплений файл.")
+            return None
+        blob = bytes(await (await bot.get_file(doc.file_id)).download_as_bytearray())
+        await asyncio.to_thread(BK.restore, blob)
+        when = pm.date.astimezone(TZ).strftime("%d.%m %H:%M") if pm.date else "?"
+        await bot.send_message(owner_id(), f"🛟 Після оновлення дані були порожні — я відновив усе з рятувальної копії від {when}.\n"
+                               "Розмови, налаштування, доступи, мітки, статистика повернулися. Підключення до сервісів, "
+                               "які зберігались лише в базі (входи в Canva, хмари), можливо, треба буде повторити.")
+        JOURNAL.add(0, "система", "відновлення з рятувальної копії", when)
+        return when
+    except Exception as exc:  # noqa: BLE001
+        log.warning("рятувальна копія: не вдалося відновитися: %s", exc)
+        return None
+
+
+async def lifeboat_loop():
+    """Щохвилини зберігаємо стан у пам'яті; раз на LIFEBOAT_HOURS — рятувальна копія."""
+    while True:
+        await asyncio.sleep(60)
+        RSTATE.save()
+        try:
+            if tg_app and lb_on() and time.time() - float(kv_get("lifeboat_t") or 0) > LIFEBOAT_HOURS * 3600:
+                await lifeboat_make(tg_app.bot)
+                JOURNAL.prune()
+        except Exception as exc:  # noqa: BLE001
+            log.info("рятувальна копія: %s", exc)
+
+
+def scr_lb(chat_id):
+    t = float(kv_get("lifeboat_t") or 0)
+    sw = storage_warning()
+    lines = ["🛟 <b>Збереження під час оновлень</b>",
+             "<blockquote expandable>ℹ️ Як це працює\n"
+             "1. Усі дані бота й застосунку лежать на диску Railway (Volume) — оновлення коду з GitHub їх не чіпає.\n"
+             "2. 🧾 Журнал дій записує все, що роблять у боті й застосунку (без паролів і ключів).\n"
+             "3. Стан у пам'яті (на що бот чекає відповіді, ліміти моделей…) зберігається щохвилини й повертається після запуску.\n"
+             "4. 🛟 Рятувальна копія раз на добу тихо приходить вам у чат і закріплюється. Якщо бот колись прокинеться з порожніми "
+             "даними — він сам відновиться з неї й напише вам.</blockquote>",
+             "",
+             ("✅ Диск Railway підключено — дані переживають оновлення." if not sw else "⚠️ " + re.sub(r"<[^>]+>", "", sw)),
+             f"🛟 Остання рятувальна копія: {datetime.fromtimestamp(t, TZ).strftime('%d.%m %H:%M') if t else 'ще не було'}"
+             + (f" · {int(kv_get('lifeboat_size') or 0) // 1024} КБ" if t else ""),
+             f"🔁 Автоматично: {'щодня ✅' if lb_on() else 'вимкнено ⏹'}",
+             f"🧾 Журнал дій: {JOURNAL.size() // 1024} КБ (зберігаються останні {lifeboat.KEEP_MONTHS} міс.)"]
+    rows = [[("🛟 Зробити копію зараз", "m:lbnow"), ("⏹ Вимкнути авто" if lb_on() else "🔁 Увімкнути авто", "m:lbauto")],
+            [("🧾 Журнал дій", "m:lbj"), ("💾 Копії", "m:backup")]]
+    return "\n".join(lines), rows
+
+
+def scr_lbj(chat_id, part="me"):
+    """Кожен бачить лише свою історію; власник (ALLOWED_USERS) — спершу свою, а кнопкою — усіх."""
+    owner = chat_id in ALLOWED_USERS
+    every = owner and part == "all"
+    recs = JOURNAL.tail(60, None) if every else JOURNAL.tail(40, chat_id)
+    names = {m["user_id"]: m["name"] for m in members_list("approved")}
+
+    def who(u):
+        return "система" if not u else ("ви" if u == chat_id else names.get(u) or str(u))
+    lines = ["🧾 <b>Журнал дій</b> — " + ("усі користувачі, останні 60" if every else "ваша історія, останні 40"), ""]
+    for r in recs:
+        lines.append(f"{datetime.fromtimestamp(r['t'], TZ):%d.%m %H:%M}" + (f" · {esc(who(r['u']))}" if every else "")
+                     + f" · {esc(r['k'])}: {esc(r['w'])[:70]}" + (f" — {esc(r['d'])[:60]}" if r.get("d") else ""))
+    if not recs:
+        lines.append("Поки порожньо.")
+    rows = []
+    if owner:
+        rows.append([("👤 Моя історія", "m:lbj:me") if every else ("👥 Історія всіх користувачів", "m:lbj:all")])
+    rows.append([("« Збереження", "m:lb")])
+    return "\n".join(lines)[:4000], rows
+
+
+def bot_mute_until(uid):
+    return float(kv_get(f"bot_mute:{uid}") or 0)
+
+
+async def mute_guard(update: Update, ctx):
+    """🔇 Людина на «тиші» — бот її мовчки не слухає до кінця строку (власників це не стосується)."""
+    u = update.effective_user
+    if not u or u.id in ALLOWED_USERS:
+        return
+    until = bot_mute_until(u.id)
+    if until > time.time():
+        if update.callback_query:
+            await update.callback_query.answer("🔇 Вам тимчасово обмежено користування ботом", show_alert=True)
+        elif update.message and update.message.chat.type == "private" and not kv_get(f"bot_mute_told:{u.id}:{int(until)}"):
+            kv_set(f"bot_mute_told:{u.id}:{int(until)}", "1")
+            await update.message.reply_text(f"🔇 Вам тимчасово обмежено користування ботом — до {datetime.fromtimestamp(until, TZ):%d.%m %H:%M}.")
+        from telegram.ext import ApplicationHandlerStop
+        raise ApplicationHandlerStop
+
+
+def bot_punish(uid, kind, secs=0):
+    """mute — тиша на час; unmute; ban — закрити доступ і скриньку назавжди; unban."""
+    if kind == "mute":
+        kv_set(f"bot_mute:{uid}", str(time.time() + secs))
+    elif kind == "unmute":
+        kv_set(f"bot_mute:{uid}", None)
+    elif kind == "ban":
+        if member_get(uid):
+            member_set(uid, "blocked")
+        else:
+            with closing(db()) as con, con:
+                con.execute("INSERT OR REPLACE INTO members(user_id, name, username, status, created) VALUES (?,?,?,?,?)",
+                            (uid, str(uid), "", "blocked", time.time()))
+        inb = PLUGINS.get("inb")
+        if inb:
+            with closing(inb.db()) as con, con:
+                con.execute("UPDATE people SET blocked=1 WHERE user=?", (uid,))
+    elif kind == "unban":
+        member_set(uid, "removed")
+        inb = PLUGINS.get("inb")
+        if inb:
+            with closing(inb.db()) as con, con:
+                con.execute("UPDATE people SET blocked=0 WHERE user=?", (uid,))
+    JOURNAL.add(CHAT.get() or 0, "модерація", kind, str(uid))
+
+
+def punish_rows(uid):
+    m = bot_mute_until(uid) > time.time()
+    st = member_status(uid)
+    return [[("🔊 Зняти мут", f"m:bpn:{uid}:unmute")] if m else [("🔇 Мут 1 год", f"m:bpn:{uid}:mute:3600"), ("🔇 Мут 1 добу", f"m:bpn:{uid}:mute:86400")],
+            [("✅ Розбанити", f"m:bpn:{uid}:unban")] if st == "blocked" else [("🚫 Забанити в боті", f"m:bpn:{uid}:ban")]]
+
+
+async def log_activity(update: Update, ctx):
+    """🧾 Кожна дія в боті — у журнал (секретні введення приховуються)."""
+    u = update.effective_user
+    if not u:
+        return
+    q = update.callback_query
+    if q:
+        return JOURNAL.add(u.id, "кнопка", q.data or "")
+    m = update.message
+    if not m or (m.chat and m.chat.type != "private"):
+        return
+    waiting = (AWAIT.get(m.chat_id) or ("",))[0] or ""
+    if m.text:
+        kind = "команда" if m.text.startswith("/") else ("введення " + waiting if waiting else "повідомлення")
+        JOURNAL.add(u.id, kind, m.text.split()[0] if kind == "команда" else waiting or "текст", m.text,
+                    secret=bool(waiting and lifeboat.SECRET_HINT.search(waiting)))
+    else:
+        JOURNAL.add(u.id, "файл", next((k for k in ("photo", "document", "voice", "video", "sticker", "audio") if getattr(m, k, None)), "інше"),
+                    m.caption or "")
 
 
 def scr_backup_target(chat_id, t):
@@ -6948,7 +7161,7 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         tid = create_planned_task(chat_id, old["history_text"], old.get("dialog_id"), old.get("folder_id"))
         screen = scr_when(tid)
     # спільний доступ (лише власник)
-    elif (a in ("acc", "inv", "invx", "accok", "accno", "accrm", "accfull", "mem", "mdl", "mdv", "mdc", "addmem", "prex", "backup", "mview") or a.startswith("bk")) and not is_admin_id(chat_id):
+    elif (a in ("acc", "inv", "invx", "accok", "accno", "accrm", "accfull", "bpn", "lb", "lbnow", "lbauto", "lbj", "mem", "mdl", "mdv", "mdc", "addmem", "prex", "backup", "mview") or a.startswith("bk")) and not is_admin_id(chat_id):
         toast = "Лише для власника бота"
         screen = scr_home(chat_id)
     elif a == "acc":
@@ -6966,6 +7179,24 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         invite_revoke(arg)
         toast = "Запрошення скасовано"
         screen = scr_access()
+    elif a in ("lb", "lbnow", "lbauto", "lbj"):
+        if a == "lbnow":
+            if q:
+                await q.answer("Роблю копію…")
+            err = await lifeboat_make(ctx.bot, "вручну")
+            toast = ("🛟 " + err) if err else "🛟 Готово — закріплено у вашому чаті з ботом"
+        elif a == "lbauto":
+            kv_set("lifeboat_auto", "0" if lb_on() else "1")
+        screen = scr_lbj(chat_id, arg or "me") if a == "lbj" else scr_lb(chat_id)
+    elif a == "bpn" and len(parts) > 3 and parts[3] in ("mute", "unmute", "ban", "unban"):
+        uid = int(arg)
+        if uid in ALLOWED_USERS:
+            toast = "Власника бота обмежити не можна"
+        else:
+            bot_punish(uid, parts[3], int(parts[4]) if len(parts) > 4 else 0)
+            toast = {"mute": "🔇 Тиша " + ("на годину" if len(parts) > 4 and parts[4] == "3600" else "на добу"), "unmute": "🔊 Мут знято",
+                     "ban": "🚫 Забанено: бот і скринька для цієї людини закриті", "unban": "✅ Розбанено"}[parts[3]]
+        screen = scr_member(uid) if member_get(uid) else None
     elif a == "accfull":
         kv_set("members_full", "0" if members_full() else "1")
         toast, screen = ("Усім учасникам — усі права" if members_full() else "Права лише власнику"), scr_access()
@@ -7649,6 +7880,9 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
     elif a == "prex":
         preinvite_remove(data.split(":", 2)[2])
         toast = "Скасовано"
+        screen = scr_access()
+    elif a in ("mview", "mdl", "mdv", "mdc") and chat_id not in ALLOWED_USERS:
+        toast = "Історію інших людей бачить лише власник бота"
         screen = scr_access()
     elif a == "mview":
         uid = int(arg)
@@ -8926,6 +9160,8 @@ if TELEGRAM_TOKEN:
     from security_policy import telegram_guard
     from functools import partial
     tg_app.add_handler(TypeHandler(Update, partial(telegram_guard, scope="orion")), group=-100)
+    tg_app.add_handler(TypeHandler(Update, log_activity), group=-99)  # 🧾 журнал дій
+    tg_app.add_handler(TypeHandler(Update, mute_guard), group=-98)  # 🔇 тиша для обмежених
     from reliability_telegram import install as install_reliability
     install_reliability(tg_app, "orion")
     from notification_telegram import install as install_notifications
@@ -9589,6 +9825,9 @@ async def main():
             if host and not host.startswith(("localhost", "127.", "0.0.0.0")):
                 NODE.set("public_url", "https://" + host.split(",")[0].strip())
         op, data = str(body.get("op") or "screen"), str(body.get("data") or "m:home")[:64]
+        if op not in ("progress", "history", "menu", "chats"):  # 🧾 дії застосунку — у журнал (без частих службових запитів)
+            JOURNAL.add(uid, "застосунок", f"{op} {data}", str(body.get("text") or "")[:200],
+                        secret=op == "text" and bool(lifeboat.SECRET_HINT.search(str((AWAIT.get(uid) or ("",))[0] or ""))))
         if op in ("screen", "tochat") and not data.startswith(("m:", "help:")):
             data = "m:home"
         if op == "tochat":  # «💬 Продовжити в чаті»: той самий екран — повідомленням у чат
@@ -9709,6 +9948,16 @@ async def main():
             log.info("кластер: «%s» %s", NODE.name, "активний" if NODE.active else "у резерві")
         await apply_receiving()
         BACKGROUND.add(asyncio.create_task(task_worker()))
+        _register_state()
+        n_state = RSTATE.load()
+        if n_state:
+            log.info("🛟 стан у пам'яті повернуто: %s частин", n_state)
+        with closing(db()) as _con:
+            empty = lifeboat.db_is_empty(_con)
+        if not DB_EXISTED or empty:
+            await lifeboat_restore(tg_app.bot)
+        BACKGROUND.add(asyncio.create_task(lifeboat_loop()))
+        JOURNAL.add(0, "система", "запуск бота", "нова база" if not DB_EXISTED else "")
         await PLUGINS.start()
         log.info("Telegram-бот запущено; плагіни: %s", ", ".join(p.title for p in PLUGINS.active()) or "немає")
         sw = storage_warning()
@@ -9727,6 +9976,8 @@ async def main():
     try:
         await server.serve()
     finally:
+        RSTATE.save()  # 🛟 зупинка (оновлення) — зберегти стан у пам'яті
+        JOURNAL.add(0, "система", "зупинка бота")
         if tg_app:
             if tg_app.updater and tg_app.updater.running:
                 await tg_app.updater.stop()
