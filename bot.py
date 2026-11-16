@@ -2303,6 +2303,10 @@ async def show(update: Update, text, rows, edit=True, nav=True):
     chat = update.effective_chat.id
     rows = fold_rows(chat, rows)
     rows = L.decorate(chat, rows, nav=nav, current=L.current(chat))
+    wk = why_key(SCREEN.get())
+    if wk and not any(d.startswith("m:why:") for r in rows for _, d in r):  # «❔ Що це» — пояснення розділу
+        rows = [list(r) for r in rows] or [[]]
+        rows[-1].insert(0, ("❔ Що це", f"m:why:{wk}"))
     import miniapp
     cap = miniapp.CAPTURE.get()
     if cap is not None:  # запит із Mini App: віддаємо екран застосунку, а не в чат
@@ -5422,7 +5426,7 @@ async def finish_wizard(update, ctx, chat_id):
 
 EDITOR_ACTIONS = {"btn", "bi", "bmv", "bup", "bdn", "bset", "lren", "lunren", "bgnew", "bgdel", "brl", "brldel", "breset"}
 VIEW_ACTIONS = {"appm", "sbx", "imp", "home", "dl", "d", "f", "tl", "t", "md", "lim", "st", "nt", "cr", "canva", "pins", "box", "it", "acc",
-                "mem", "mdl", "mdv", "btn", "bi", "brl", "voice", "cpl", "cp", "bk", "fr", "svc", "sv", "svls", "diag", "jl", "j", "bks", "bkt", "bkls", "bkrs", "bkfmt", "bkscope", "lib", "mi", "note", "bl", "pr", "pri", "backup", "qask", "rm", "rw", "cl"}
+                "mem", "mdl", "mdv", "btn", "bi", "brl", "voice", "cpl", "cp", "bk", "fr", "svc", "sv", "svls", "diag", "jl", "j", "bks", "bkt", "bkls", "bkrs", "bkfmt", "bkscope", "lib", "mi", "note", "bl", "pr", "pri", "backup", "qask", "rm", "rw", "cl", "why"}
 
 
 def is_view(data):
@@ -5437,9 +5441,24 @@ def is_view(data):
     return len(parts) > 1 and parts[1] in VIEW_ACTIONS
 
 
+SCREEN = contextvars.ContextVar("screen", default="")
+
+
+def why_key(data):
+    """Ключ пояснення (explain.E) для екрана розділу меню, якщо воно є."""
+    import explain
+    for k, (_, target) in ITEMS.items():
+        if target == data and k in explain.E:
+            return k
+    if data.startswith("m:grp:") and "g:" + data[6:] in explain.E:
+        return "g:" + data[6:]
+    return None
+
+
 async def open_data(update, ctx, data, edit=True, record=True):
     """Відкриває екран за даними кнопки (m:… або help:…)."""
     chat = update.effective_chat.id
+    SCREEN.set(data)
     if data.startswith("help:"):
         if record:
             L.visit(chat, data.replace("help:pick:", "help:m:"))
@@ -5456,6 +5475,8 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
     arg = parts[2] if len(parts) > 2 else None
     toast = None
     screen = None
+    if a not in ("more", "nav", "noop"):
+        SCREEN.set(data)
 
     if a == "noop":
         return await q.answer() if q else None
@@ -5480,6 +5501,16 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         screen = scr_home(chat_id)
     elif a == "home":
         screen = scr_home(chat_id)
+    elif a == "why" and arg:
+        import explain
+        key = ":".join(parts[2:])
+        if key.startswith("g:"):
+            title, target = L.label(chat_id, key), f"m:grp:{key[2:]}"
+        else:
+            title, target = (L.label(chat_id, key), ITEMS[key][1]) if key in ITEMS else ("", "")
+        body = explain.text(key, title, esc)
+        screen = (body or "Для цього розділу пояснення ще немає.",
+                  [[(f"▶️ Відкрити «{title}»", target)]] if target and body else [])
     elif a in ("appm", "appbtn"):
         url = miniapp_url()
         cur = prefs(chat_id).get("menu_button", "commands")
@@ -8197,6 +8228,9 @@ async def main():
                 rows = L.decorate(uid, res["rows"], nav=True, current=data)
                 await tg_app.bot.send_message(uid, res["text"][:4096], parse_mode=ParseMode.HTML, reply_markup=kb(rows), link_preview_options=NO_PREVIEW)
             return _Resp(json.dumps({"ok": True}), media_type="application/json")
+        if op == "tabs":  # ☰ → «✏️ Панель унизу»: які кнопки показувати внизу застосунку
+            res = _mini.save_tabs(sys.modules[__name__], uid, body.get("tabs"))
+            return _Resp(json.dumps(res, ensure_ascii=False), media_type="application/json")
         if op in ("say", "file", "history", "menu"):
             f = None
             if op == "file":
