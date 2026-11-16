@@ -216,7 +216,7 @@ async function openChats(){haptic();const r=await call('chats','chat');if(!r)ret
 async function say(){const ta=document.querySelector('#composer textarea');const t=ta.value.trim();if(!t||busy)return;ta.value='';
   const h=await call('history','chat');if(h){h.messages.push({role:'user',text:t});renderChat(h,true)}
   const tick=setInterval(async()=>{const p=await call('progress','chat');const el=document.getElementById('typing');if(!el||!p||!p.title)return;
-    el.textContent='🤖 '+p.title+' ('+p.model+') думає · '+p.sec+' с з '+p.limit+(p.of>1?' · спроба '+p.try+' з '+p.of:'')+(p.prev?'\n↪️ '+p.prev:'')},1000);
+    el.textContent='🤖 '+p.title+' ('+p.model+') думає · '+p.sec+' с з '+p.limit+(p.of>1?' · спроба '+p.try+' з '+p.of:'')+(p.prev?'\n↪️ '+p.prev:'')+(p.partial?'\n\n✍️ '+p.partial.slice(-600):'')},1000);
   const res=await call('say','chat',{text:t,user:userInfo()});clearInterval(tick);if(!res)return;showResult(res)}
 function showResult(res){
   if(res.text){hist.push('chat');cur=null;render(res);return}   // плагін показав екран (ньюзрум, стікери, імпорт…)

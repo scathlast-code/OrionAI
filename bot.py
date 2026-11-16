@@ -1408,10 +1408,22 @@ async def post_chat(client, p, messages, use_tools):
     if use_tools:
         own = CHAT.get() is None or is_admin_id(CHAT.get())  # Canva підключена до акаунта власника — лише для нього
         body["tools"] = TOOLS + ((await canva.openai_tools()) + (SVC_TOOLS if any(SVC.connected(x) for x in SERVICES) else []) if own else [])
+    prog = PROGRESS.get()
+    stream = bool(prog) and STREAMING and p["id"] not in NO_STREAM and not IN_BRIDGE
+    if stream:
+        body["stream"] = True
+        prog.partial = ""  # інша модель починає з чистого аркуша
     try:
-        r = await client.post(
-            f"{p['base_url']}/chat/completions", headers={"Authorization": f"Bearer {p['key']}"}, json=body
-        )
+        if stream:  # ✍️ текст з'являється, щойно модель почала писати
+            r = await client.send(client.build_request("POST", f"{p['base_url']}/chat/completions",
+                                                       headers={"Authorization": f"Bearer {p['key']}"}, json=body), stream=True)
+            if r.status_code != 200:
+                await r.aread()
+                await r.aclose()
+        else:
+            r = await client.post(
+                f"{p['base_url']}/chat/completions", headers={"Authorization": f"Bearer {p['key']}"}, json=body
+            )
     except httpx.TimeoutException:
         count_request(p["id"], error=True)
         raise ProviderError("timeout", f"не відповів за {int(OLLAMA_TIMEOUT if p['id'] == 'ollama_local' else REQUEST_TIMEOUT)} с", 15)  # коротка пауза: наступне повідомлення вже знову спробує
@@ -1436,6 +1448,9 @@ async def post_chat(client, p, messages, use_tools):
     if r.status_code == 400 and effort and "reasoning" in r.text.lower():  # модель не приймає цей рівень — без нього
         NO_REASONING.add(p["id"])
         return await post_chat(client, p, messages, use_tools)
+    if stream and r.status_code == 400 and "stream" in r.text.lower():  # сервіс не вміє потоково — звичайний запит
+        NO_STREAM.add(p["id"])
+        return await post_chat(client, p, messages, use_tools)
     if r.status_code >= 400:
         count_request(p["id"], error=True)
         kind, cooldown = classify(r.status_code, r.text, r.headers)
@@ -1445,11 +1460,60 @@ async def post_chat(client, p, messages, use_tools):
     ACTUAL_BY_PID[p["id"]] = p["model"]
     if p["id"] == "gemini":
         count_request(f"gemini:{p['model']}")
+    if stream:
+        return await read_stream(r, prog, p)
     try:
         choice = r.json()["choices"][0]
         return choice["message"], choice.get("finish_reason")
     except (ValueError, KeyError, IndexError, TypeError):
         raise ProviderError("bad_response", r.text[:300])
+
+
+STREAMING = env("STREAMING", "1") != "0"
+NO_STREAM = set()  # сервіси, що не вміють потокові відповіді
+
+
+async def read_stream(r, prog, p):
+    """Читає відповідь частинами (SSE): текст одразу показуємо в «Думаю…», виклики інструментів збираємо."""
+    text, calls, finish = "", {}, None
+    try:
+        async for line in r.aiter_lines():
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                ch = (json.loads(data).get("choices") or [{}])[0]
+            except (ValueError, AttributeError):
+                continue
+            d = ch.get("delta") or ch.get("message") or {}
+            finish = ch.get("finish_reason") or finish
+            if d.get("content"):
+                text += d["content"]
+                prog.partial, prog.partial_by = text, p["title"]
+                lv = LIVE.get(prog.chat_id)
+                if lv is not None:
+                    lv["partial"] = text[-1500:]
+            for i, tc in enumerate(d.get("tool_calls") or []):
+                k = tc.get("index", i)
+                cur = calls.setdefault(k, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                cur["id"] = tc.get("id") or cur["id"]
+                fn = tc.get("function") or {}
+                cur["function"]["name"] += fn.get("name") or ""
+                cur["function"]["arguments"] += fn.get("arguments") or ""
+    except httpx.HTTPError as e:
+        if not text and not calls:
+            raise ProviderError("network", str(e) or type(e).__name__, 120)
+    finally:
+        await r.aclose()
+    msg = {"role": "assistant", "content": text or None}
+    if calls:
+        msg["tool_calls"] = [{**c, "id": c["id"] or f"call_{k}"} for k, c in sorted(calls.items())]
+        prog.partial = ""  # це був лише виклик інструмента — чекаємо справжню відповідь
+    elif not text:
+        raise ProviderError("bad_response", "порожня відповідь")
+    return msg, finish
 
 
 async def ask_provider(p, messages):
@@ -4021,6 +4085,7 @@ class Progress:
         self.cancelled = False
         self.step_i, self.step_n = 0, 0
         self.typical = typical_time(title)
+        self.partial, self.partial_by, self._shown = "", "", 0
 
     def set(self, stage):
         self.stage = stage
@@ -4053,22 +4118,39 @@ class Progress:
         return (f"⏳ <b>{esc(self.title)}</b> · {dur}" + (f"\n{bar}" if bar else "")
                 + (f"\n{steps}{esc(self.stage)}" if self.stage else "") + eta + "\n<i>Працюю — відповідь прийде сюди.</i>")
 
+    def _live(self):
+        """Текст, який модель пише просто зараз (останні ~3500 символів)."""
+        if not self.partial:
+            return ""
+        body = demarkdown(self.partial)
+        body = ("…" + body[-3500:]) if len(body) > 3500 else body
+        return f"<i>✍️ {esc(self.partial_by or 'ШІ')} пише…</i>\n\n{esc(body)} ▍"
+
     async def _tick(self):
         try:
-            await asyncio.sleep(self.delay)
+            await asyncio.sleep(0.6 if STREAMING else self.delay)
+            while not self.partial and time.time() - self.started < self.delay:
+                await asyncio.sleep(0.2)
             markup = kb([[("✖️ Зупинити", f"m:stop:{self.pid}")]]) if self.stop and not IN_BRIDGE else None
             if IN_BRIDGE:  # без редагувань: одне повідомлення, лише якщо робота довга
                 await asyncio.sleep(6)
                 await self.bot.send_message(self.chat_id, f"⏳ {self.title}… це займе трохи часу, відповідь прийде сюди.")
                 return
-            m = await self.bot.send_message(self.chat_id, self._text(), parse_mode=ParseMode.HTML, reply_markup=markup)
+            m = await self.bot.send_message(self.chat_id, self._live() or self._text(), parse_mode=ParseMode.HTML, reply_markup=markup)
             self.msg_id = m.message_id
             self._last_text = self._text()
             n = 0
             while True:
-                await asyncio.sleep(3)
+                await asyncio.sleep(1.3 if self.partial else 3)
                 n += 1
                 try:
+                    if self.partial:  # ✍️ модель пише — показуємо текст наживо (не частіше ніж раз на ~1,3 с)
+                        t = self._live()
+                        if t != self._last_text:
+                            await self.bot.edit_message_text(t, chat_id=self.chat_id, message_id=self.msg_id, parse_mode=ParseMode.HTML,
+                                                             reply_markup=markup, disable_web_page_preview=True)
+                            self._last_text = t
+                        continue
                     await self.bot.send_chat_action(self.chat_id, ChatAction.TYPING)
                     t = self._text()
                     if n % 2 == 0 and t != self._last_text:  # оновлюємо раз на ~6 с, щоб не впертися в ліміти Telegram
