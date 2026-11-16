@@ -203,6 +203,7 @@ def history(B, uid, limit=40):
 
 def menu(B, uid):
     """Меню для застосунку: усі розділи одразу розгорнуті (без ▼/▲ і зайвих запитів), з тими ж назвами й порядком, що в чаті."""
+    import explain
     from uilayout import PLACE_HOME
     L = B.L
 
@@ -212,7 +213,7 @@ def menu(B, uid):
             if i.startswith("g:"):
                 subs += items(i, path + [L.label(uid, i)])
             elif i not in ("menu", "app"):
-                own.append({"label": L.label(uid, i), "data": L.target(i)})
+                own.append({"label": L.label(uid, i), "data": L.target(i), "hint": explain.short(i), "why": f"m:why:{i}" if i in explain.E else ""})
         return ([{"title": " › ".join(path), "items": own}] if own else []) + subs
 
     sections = items(PLACE_HOME, [])
