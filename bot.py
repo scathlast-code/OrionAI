@@ -5641,10 +5641,37 @@ def sl_apply(code, field, text):
     return code, "✅ Збережено"
 
 
+async def shortio_domain_id():
+    """SHORTIO_DOMAIN_ID не обов'язковий: бот сам дізнається ID домену через API Short.io (лише читання) і запам'ятовує."""
+    if os.getenv("SHORTIO_DOMAIN_ID"):
+        return os.environ["SHORTIO_DOMAIN_ID"]
+    saved = kv_get("shortio_domain_id")
+    if not saved and os.getenv("SHORTIO_API_KEY"):
+        try:
+            from plugins.newsroom.shortio import ShortIO
+            want = os.getenv("SHORTIO_DOMAIN", "").lower()
+            doms = await ShortIO().request("GET", "https://api.short.io/api/domains")
+            doms = doms if isinstance(doms, list) else (doms or {}).get("domains", [])
+            match = [d for d in doms if isinstance(d, dict) and (not want or str(d.get("hostname", "")).lower() == want)]
+            if match:
+                saved = str(match[0].get("id") or "")
+                if saved:
+                    kv_set("shortio_domain_id", saved)
+                    if not want:
+                        os.environ["SHORTIO_DOMAIN"] = match[0].get("hostname", "")
+        except Exception as exc:  # noqa: BLE001
+            log.info("Short.io: не вдалося дізнатися ID домену: %s", exc)
+    if saved:
+        os.environ["SHORTIO_DOMAIN_ID"] = saved
+    return saved or ""
+
+
 async def shortio_sync(force=False):
     """Підтягує статистику Short.io (кліки, країни, міста, браузери, системи, джерела) для посилань за 90 днів."""
+    if os.getenv("SHORTIO_API_KEY"):
+        await shortio_domain_id()
     if not os.getenv("SHORTIO_API_KEY") or not os.getenv("SHORTIO_DOMAIN_ID"):
-        return "Short.io не підключено (потрібні SHORTIO_API_KEY і SHORTIO_DOMAIN_ID)."
+        return "Short.io не підключено (потрібен SHORTIO_API_KEY)."
     last = float(kv_get("shortio_sync") or 0)
     if not force and time.time() - last < 1800:
         return ""
@@ -6917,7 +6944,8 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
             if not os.getenv("SHORTIO_API_KEY"):
                 toast = "Потрібен SHORTIO_API_KEY (лише читання — у Short.io нічого не змінюється)"
             else:
-                from plugins.newsroom.shortio import ShortIO, normalize_link_rows
+                from plugins.newsroom.shortio import ShortIO
+                await shortio_domain_id()
                 try:
                     raw = await ShortIO().request("GET", "https://api.short.io/api/links",
                                                   params={"domain_id": os.getenv("SHORTIO_DOMAIN_ID", ""), "limit": 150})
