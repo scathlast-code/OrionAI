@@ -7426,9 +7426,13 @@ async def send_media(bot, chat_id, items):
 
 def footer(pid, attempts, warnings):
     real = ACTUAL_BY_PID.get(pid) or PROVIDERS[pid]["model"]  # модель, що справді відповіла (може бути запасна)
-    lines = [f"— {PROVIDERS[pid]['title']} · {real}"]
+    main = PROVIDERS[pid]["model"]
+    lines = [f"🤖 Відповіла: {PROVIDERS[pid]['title']} · {real}"]
+    if real != main:  # відповіла запасна модель того самого сервісу — один рядок, чому
+        why = (f"денний ліміт вичерпано, оновиться о {hhmm(GEM_OUT[main])}" if GEM_OUT.get(main, 0) > time.time() else "перевантажена")
+        lines.append(f"⚡ Основна {main} — {why}, тому відповіла запасна {real}")
     lines += [attempt_line(p, i) for p, i in attempts]
-    lines += [w for w in warnings if not (pid == "gemini" and "вичерпала денний ліміт — відповідає" in w and real in w)]
+    lines += [w for w in warnings if not (w.startswith("⚡") and ("відповіла" in w or "відповідає" in w))]
     if attempts:
         lines.append("Деталі: /limits")
     return "\n".join(dict.fromkeys(l for l in lines if l))  # без повторів
