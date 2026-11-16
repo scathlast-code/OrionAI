@@ -47,7 +47,7 @@ def test_stranger_to_owner_and_reply(tmp_path):
     p = Inbox(h)
     ctx = types.SimpleNamespace(bot=bot)
     m, rep = msg(55, "/start", 1)
-    assert asyncio.run(p.on_private(upd(55, m), ctx)) and "Вітаю" in rep[0]
+    assert not asyncio.run(p.on_private(upd(55, m), ctx))  # «Старт» — заявка на доступ власнику (потік бота), не скринька
     m, rep = msg(55, "У нас у селі зрізали парк", 2)
     assert asyncio.run(p.on_private(upd(55, m), ctx))
     assert bot.copied[-1] == (1, 55, 2) and "Олена" in bot.sent[-1][1] and "Передав" in rep[0]

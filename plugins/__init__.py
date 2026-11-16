@@ -227,6 +227,10 @@ class Registry:
             rows.append([(f"{p.icon} {p.title}", f"m:pl:{pid}")] if on else [(f"⏸ {p.title} (вимкнено)", f"m:pl:info:{pid}")])
         for pid, err in self.errors.items():
             lines.append(f"⚠️ {esc(pid)}: не завантажився — {esc(err)[:200]}")
+        hidden = [p.title for p in self.plugins.values() if p.admin_only and p.id != "hub"]
+        if hidden and not self.host.is_admin(chat):
+            lines.append(f"\n🔒 {esc(', '.join(hidden))} — лише для власника бота. Якщо власник — ви, додайте свій ID "
+                         f"<code>{chat}</code> у змінну ALLOWED_USERS у Railway (через кому, якщо там уже є інші).")
         tail = [("ℹ️ Як це влаштовано", "m:pl:info")]
         if self.host.is_admin(chat):
             tail.insert(0, ("🔀 Увімкнути / вимкнути", "m:pl:mgr"))

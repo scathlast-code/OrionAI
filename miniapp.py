@@ -299,6 +299,8 @@ def tabs(B, uid):
     for k in keys:
         if k == "chat":
             out.append({"key": "chat", "label": "💬 Розмова", "data": "chat"})
+        elif k in getattr(B.L, "admin_items", set()) and not B.is_admin_id(uid):
+            continue  # розділи лише для власника (📰 Ньюзрум тощо) учаснику не показуємо
         elif k in B.ITEMS and k not in ("menu", "app") and B.ITEMS[k][1].startswith(("m:", "help:")):
             out.append({"key": k, "label": B.L.label(uid, k), "data": B.ITEMS[k][1]})
     return out[:TABS_MAX]

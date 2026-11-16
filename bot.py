@@ -2065,7 +2065,7 @@ async def deny(update: Update):
         who = esc(user.full_name) + (f" (@{esc(user.username)})" if user.username else "")
         try:
             await update.get_bot().send_message(
-                owner_id(), f"👥 <b>Хтось хоче користуватися ботом</b>\n{who}\nID: <code>{user.id}</code>\n\n"
+                owner_id(), f"👥 <b>{who} просить доступ до бота й застосунку</b>\nID: <code>{user.id}</code>\n\n"
                 "Натисніть «✅ Дати доступ» — бот одразу запрацює для цієї людини й привітається з нею. Нічого більше від неї не потрібно.",
                 parse_mode=ParseMode.HTML,
                 reply_markup=kb([[("✅ Дати доступ", f"m:accok:{user.id}"), ("❌ Відхилити", f"m:accno:{user.id}")]]))
@@ -5469,9 +5469,9 @@ UTM_MENU = [[("➕ Додати посилання", "m:utmadd")], [("📈 Кл�
 
 
 def scr_utm(chat_id):
-    text = ("🔗 <b>UTM-мітки GreenPost</b>\n"
+    text = ("🔗 <b>UTM-мітки</b>\n"
             "<blockquote expandable>ℹ️ Довідка\n"
-            "Натисніть <b>➕ Додати посилання</b> і вставте посилання на новину — запропоную теги (кирилицею й латиницею; кирилицю бот сам "
+            "Натисніть <b>➕ Додати посилання</b> і вставте посилання з будь-якого сайту — запропоную теги (кирилицею й латиницею; кирилицю бот сам "
             "перекладе латиницею для посилання), а після вибору дам одразу всі 9 міток: Telegram (пост і сторіс), Tumblr, "
             "Facebook (пост, історії, Reels), Threads, Instagram сторіс, Twitter/X — кожна в окремому віконці з кнопкою «Скопіювати».\n"
             "📚 Набори шаблонів тегів — ваші готові теги; їх можна додавати самому або взяти з наявних посилань Short.io.\n\n"
@@ -5788,42 +5788,93 @@ def sl_apply(code, field, text):
     return code, "✅ Збережено"
 
 
+async def shortio_all_links(max_pages=20):
+    """Усі посилання з Short.io сторінками по 150 — лише читання. Повертає (список, помилка)."""
+    from plugins.newsroom.shortio import ShortIO
+    did = await shortio_domain_id()
+    if not did:
+        return [], "не вдалося дізнатися ID домену — перевірте SHORTIO_DOMAIN (наприклад greenpost.s.gy)"
+    out, token = [], None
+    try:
+        sio = ShortIO()
+        for _ in range(max_pages):
+            params = {"domain_id": did, "limit": 150}
+            if token:
+                params["pageToken"] = token
+            raw = await sio.request("GET", "https://api.short.io/api/links", params=params)
+            items = raw.get("links", []) if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
+            out += [x for x in items if isinstance(x, dict)]
+            token = raw.get("nextPageToken") if isinstance(raw, dict) else None
+            if not token or not items:
+                break
+    except Exception as exc:  # noqa: BLE001
+        return out, f"{type(exc).__name__}: {str(exc)[:150]}"
+    return out, ""
+
+
 async def tag_sets_from_shortio():
-    """Набори тегів із наявних посилань Short.io — лише читання: теги (мітки) посилань і їхні utm_content."""
+    """Шаблони тегів із Short.io — лише читання: мітки (tags) посилань і utm_content з їхніх адрес."""
     if not os.getenv("SHORTIO_API_KEY"):
         return "Потрібен SHORTIO_API_KEY"
     from urllib.parse import parse_qs, urlsplit
-    from plugins.newsroom.shortio import ShortIO
-    did = await shortio_domain_id()
-    try:
-        raw = await ShortIO().request("GET", "https://api.short.io/api/links", params={"domain_id": did, "limit": 150})
-    except Exception as exc:  # noqa: BLE001
-        return f"Short.io: {str(exc)[:150]}"
-    items = raw.get("links", raw) if isinstance(raw, dict) else raw
-    by_set, every = {}, {}
-    for x in items or []:
-        if not isinstance(x, dict):
-            continue
+    links, err = await shortio_all_links()
+    if not links:
+        return f"Short.io: {err or 'посилань не знайдено'}"
+    labels, by_label, contents = {}, {}, {}
+    for x in links:
+        tags = [str(t.get("name") if isinstance(t, dict) else t) for t in (x.get("tags") or []) if t]
         content = (parse_qs(urlsplit(x.get("originalURL") or "").query).get("utm_content") or [""])[0]
-        if not content:
-            continue
-        every[content] = every.get(content, 0) + 1
-        for t in x.get("tags") or []:
-            by_set.setdefault(f"Short.io: {t}"[:40], []).append(content)
-    if not every:
-        return "У посиланнях Short.io не знайшов жодного utm_content"
+        for t in tags:
+            labels[t] = labels.get(t, 0) + 1
+            if content:
+                by_label.setdefault(t, []).append(content)
+        if content:
+            contents[content] = contents.get(content, 0) + 1
+    if not labels and not contents:
+        return f"У {len(links)} посиланнях Short.io немає ні міток, ні utm_content"
     sets = tag_sets()
-    sets["Short.io: усі теги"] = [k for k, _ in sorted(every.items(), key=lambda kv: -kv[1])][:100]
-    for name, tags in by_set.items():
-        sets[name] = list(dict.fromkeys(sets.get(name, []) + tags))[:100]
+    top = lambda d: [k for k, _ in sorted(d.items(), key=lambda kv: -kv[1])][:100]  # noqa: E731
+    if labels:
+        sets["Short.io: мітки посилань"] = top(labels)
+    if contents:
+        sets["Short.io: utm_content"] = top(contents)
+    for t, cs in by_label.items():
+        sets[f"Short.io › {t}"[:40]] = list(dict.fromkeys(cs))[:100]
     tag_sets_save(sets)
-    return f"📥 Набори з Short.io: {1 + len(by_set)}, тегів: {len(every)}"
+    return f"📥 З {len(links)} посилань Short.io: міток {len(labels)}, utm_content {len(contents)}" + (f" ({err})" if err else "")
+
+
+async def shortio_domain_id():
+    """SHORTIO_DOMAIN_ID не обов'язковий: бот сам дізнається ID домену через API Short.io (лише читання) і запам'ятовує."""
+    if os.getenv("SHORTIO_DOMAIN_ID"):
+        return os.environ["SHORTIO_DOMAIN_ID"]
+    saved = kv_get("shortio_domain_id")
+    if not saved and os.getenv("SHORTIO_API_KEY"):
+        try:
+            from plugins.newsroom.shortio import ShortIO
+            want = os.getenv("SHORTIO_DOMAIN", "").lower()
+            doms = await ShortIO().request("GET", "https://api.short.io/api/domains")
+            doms = doms if isinstance(doms, list) else (doms or {}).get("domains", [])
+            match = [d for d in doms if isinstance(d, dict) and (not want or str(d.get("hostname", "")).lower() == want)]
+            if match:
+                saved = str(match[0].get("id") or "")
+                if saved:
+                    kv_set("shortio_domain_id", saved)
+                    if not want:
+                        os.environ["SHORTIO_DOMAIN"] = match[0].get("hostname", "")
+        except Exception as exc:  # noqa: BLE001
+            log.info("Short.io: не вдалося дізнатися ID домену: %s", exc)
+    if saved:
+        os.environ["SHORTIO_DOMAIN_ID"] = saved
+    return saved or ""
 
 
 async def shortio_sync(force=False):
     """Підтягує статистику Short.io (кліки, країни, міста, браузери, системи, джерела) для посилань за 90 днів."""
+    if os.getenv("SHORTIO_API_KEY"):
+        await shortio_domain_id()
     if not os.getenv("SHORTIO_API_KEY") or not os.getenv("SHORTIO_DOMAIN_ID"):
-        return "Short.io не підключено (потрібні SHORTIO_API_KEY і SHORTIO_DOMAIN_ID)."
+        return "Short.io не підключено (потрібен SHORTIO_API_KEY)."
     last = float(kv_get("shortio_sync") or 0)
     if not force and time.time() - last < 1800:
         return ""
@@ -5886,7 +5937,8 @@ async def utm_output(update, chat_id, url, tag, reserve=False, only=None):
     blocks = [f"<b>{esc(label)}</b> {'✅' if ok_ else '⚠️ не пройшла перевірку'}\n"
               + (f"<pre>{esc(shorts[key])}</pre>\n<blockquote expandable>Повне: <code>{esc(link)}</code></blockquote>" if key in shorts else f"<pre>{esc(link)}</pre>")
               for key, label, link, ok_ in res["items"]]
-    rows = [[("📈 Кліки й переходи", "m:utmclk"), ("📋 Реєстр за 3 дні", "m:utmreg")], [("🗂 Резервні формати", "m:utmres")]]
+    rows = [[("➕ Ще посилання", "m:utmadd"), ("🏷 Інший тег", "m:utmagain")],
+            [("📈 Кліки й переходи", "m:utmclk"), ("📋 Реєстр за 3 дні", "m:utmreg")], [("🗂 Резервні формати", "m:utmres"), ("🔗 Меню міток", "m:utm")]]
     if os.getenv("SHORTIO_API_KEY") and shortio_policy() == "ask":  # 🙋 запис у Short.io — лише з вашого дозволу на кожен
         _utm_state(chat_id, sio_items=[[k, lbl, link] for k, lbl, link, _ in res["items"]])
         head += "🙋 У Short.io нічого не записано. Дозвольте запис для потрібних міток кнопками нижче.\n"
@@ -7132,17 +7184,11 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
             if not os.getenv("SHORTIO_API_KEY"):
                 toast = "Потрібен SHORTIO_API_KEY (лише читання — у Short.io нічого не змінюється)"
             else:
-                from plugins.newsroom.shortio import ShortIO, normalize_link_rows
-                try:
-                    raw = await ShortIO().request("GET", "https://api.short.io/api/links",
-                                                  params={"domain_id": os.getenv("SHORTIO_DOMAIN_ID", ""), "limit": 150})
-                    items = raw.get("links", raw) if isinstance(raw, dict) else raw
-                    rows_ = [(x.get("originalURL"), x.get("path"), x.get("title") or "") for x in items or [] if isinstance(x, dict)]
-                    toast = f"📥 Перенесено нових: {ct.import_rows(rows_)} з {len(rows_)}"
-                except Exception as exc:  # noqa: BLE001
-                    toast = f"Short.io: {str(exc)[:150]}"
+                items, err = await shortio_all_links()
+                rows_ = [(x.get("originalURL"), x.get("path"), x.get("title") or "") for x in items]
+                toast = (f"📥 Перенесено нових: {ct.import_rows(rows_)} з {len(rows_)}" if rows_ else "") + (f" · Short.io: {err}" if err else "")
             screen = scr_sl(chat_id)
-    elif a in ("utmt", "utmown", "utmold", "utmres", "utmrs", "utmreg", "utmst", "utmx", "utmd", "utm", "utmadd", "utmclk", "utmclx", "utmsync", "utmsio", "utmsx"):
+    elif a in ("utmt", "utmown", "utmold", "utmres", "utmrs", "utmreg", "utmst", "utmx", "utmd", "utm", "utmadd", "utmclk", "utmclx", "utmsync", "utmsio", "utmsx", "utmagain"):
         st = _utm_state(chat_id)
         if a == "utm":
             screen = scr_utm(chat_id)
@@ -7185,9 +7231,11 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
             data = await asyncio.to_thread(clicktrack.export_xlsx, clicks().report(days=d or None), UTM.LABELS)
             await update.effective_chat.send_document(InputFile(io.BytesIO(data), filename=f"GreenPost-clicks-{datetime.now(TZ):%Y-%m-%d}.xlsx"),
                                                       caption="📗 Кліки за UTM: огляд, по днях, соцмережі, теги, статті, країни, міста, пристрої, системи, браузери.")
+        elif a == "utmagain" and st.get("url"):
+            screen = scr_utm_tags(chat_id, st["url"], await page_title(st["url"]))
         elif a == "utmadd":
             ask_input(chat_id, "utmurl")
-            screen = ("🔗 <b>Вставте посилання на новину</b>\n\nМожна одразу з тегом через пробіл: <code>https://greenpost.ua/news/… zubr_lviv</code>. "
+            screen = ("🔗 <b>Вставте посилання</b> — з будь-якого сайту\n\nМожна одразу з тегом через пробіл: <code>https://сайт/сторінка zubr_lviv</code>. "
                       "Без тегу — запропоную варіанти на вибір.", [CANCEL_ROW])
         elif a == "utmst":
             screen = scr_utm_stats()
@@ -7779,7 +7827,7 @@ async def _handle_awaited(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text):
         url = UTM.clean_url(parts[0]) if parts else ""
         if not url.startswith(("http://", "https://")):
             ask_input(chat_id, "utmurl")
-            return await reply("Це не схоже на посилання. Вставте адресу новини, що починається з https://", reply_markup=kb([CANCEL_ROW]))
+            return await reply("Це не схоже на посилання. Вставте адресу, що починається з https://", reply_markup=kb([CANCEL_ROW]))
         if len(parts) > 1:
             try:
                 return await utm_output(update, chat_id, url, parts[1])
