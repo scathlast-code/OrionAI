@@ -5382,7 +5382,7 @@ def _utm_state(chat_id, **kw):
     return st
 
 
-UTM_MENU = [[("➕ Додати посилання", "m:utmadd")], [("📈 Кліки й переходи", "m:utmclk")], [("📋 Реєстр за 3 дні", "m:utmreg"), ("📊 Створені мітки", "m:utmst")],
+UTM_MENU = [[("➕ Додати посилання", "m:utmadd")], [("📈 Кліки й переходи", "m:utmclk"), ("🔗 Мої короткі", "m:sl")], [("📋 Реєстр за 3 дні", "m:utmreg"), ("📊 Створені мітки", "m:utmst")],
             [("📗 Excel", "m:utmx"), ("📘 Word", "m:utmd")], [("🗂 Резервні формати", "m:utmres")]]
 
 
@@ -5494,9 +5494,151 @@ async def short_links(items, tag):
                 continue
             except Exception as exc:  # noqa: BLE001 — Short.io недоступний: даємо власне посилання
                 log.info("Short.io: %s", exc)
-        if public_base():
-            out[key] = f"{public_base()}/r/{ct.link_for(link, base, key, tag)}"
+        if short_base():
+            out[key] = short_url(ct.link_for(link, base, key, tag))
     return out
+
+
+def short_base():
+    """Адреса коротких посилань: власний домен (SHORT_DOMAIN) → домен/код; інакше домен бота → /r/код."""
+    d = os.getenv("SHORT_DOMAIN", "").strip().rstrip("/")
+    if d:
+        return (d if d.startswith("http") else "https://" + d) + "/"
+    return (public_base() + "/r/") if public_base() else ""
+
+
+def short_url(code):
+    return short_base() + code if short_base() else f"/r/{code}"
+
+
+SL_FIELDS = {  # що можна змінити в посиланні: (назва, підказка для введення)
+    "url": ("🎯 Куди веде", "Надішліть нову адресу (https://…). Коротке посилання не зміниться — люди потраплять на нову сторінку."),
+    "slug": ("🔤 Свій кінець адреси", "Надішліть кінець адреси: латиниця, цифри, - або _ (наприклад zubr-lviv). Старий перестане працювати."),
+    "title": ("🏷 Назва", "Надішліть назву — щоб легко знайти посилання у списку."),
+    "note": ("📝 Нотатка", "Надішліть нотатку для себе."),
+    "folder": ("📁 Тека", "Надішліть назву теки (наприклад «Екологія»). «-» — без теки."),
+    "exp": ("⏳ Термін дії", "Через скільки днів посилання перестане працювати? Надішліть число днів або дату 31.12.2026. «-» — без терміну."),
+    "max": ("🔢 Ліміт переходів", "Скільки переходів дозволити? Надішліть число. «-» — без ліміту."),
+    "pw": ("🔒 Пароль", "Надішліть пароль — перед переходом людина вводитиме його. «-» — прибрати пароль."),
+    "og": ("🖼 Картка прев'ю", "Надішліть три рядки: назва, опис, посилання на картинку. Так виглядатиме прев'ю в соцмережах. «-» — як у самої статті."),
+    "geo": ("🌍 За країною", "Кожен рядок: країна і адреса. Наприклад:\nПольща https://greenpost.ua/pl\nUSA https://greenpost.ua/en\n«-» — прибрати."),
+    "dev": ("📱 За пристроєм", "Кожен рядок: ios / android / mobile / desktop і адреса. Наприклад:\nios https://apps.apple.com/…\n«-» — прибрати."),
+    "ab": ("🔀 A/B-тест", "Кожен рядок: інша адреса і частка у %. Основна адреса отримає решту. Наприклад:\nhttps://greenpost.ua/v2 50\n«-» — прибрати."),
+}
+
+
+def scr_sl(chat_id, page=0, query=""):
+    """🔗 Мої короткі посилання — власний скорочувач замість платного Short.io."""
+    ct = clicks()
+    rows_, total = ct.listing(query=query, limit=10, offset=page * 10)
+    lines = ["🔗 <b>Мої короткі посилання</b>" + (f" · пошук «{esc(query)}»" if query else ""),
+             "Власний скорочувач бота: кліки, країни, пристрої, QR, свій кінець адреси, пароль, термін, ліміт, прев'ю, "
+             "правила за країною чи пристроєм, A/B-тест. Безкоштовно й без лімітів.",
+             f"Усього: {total}" + ("" if short_base() else "\n⚠️ Бот ще не знає своєї адреси — відкрийте застосунок один раз.")]
+    rows = [[("➕ Скоротити посилання", "m:slnew")], [("🔍 Пошук", "m:slq"), ("📈 Усі кліки", "m:utmclk")]]
+    for r in rows_:
+        icon = "⏸" if not r["active"] else "🔒" if r["pw_hash"] else "🔗"
+        name = r["title"] or (r["tag"] and f"{r['tag']} · {UTM.LABELS.get(r['platform'], r['platform'])}") or r["full_url"].split("//")[-1]
+        rows.append([(f"{icon} {name}"[:44] + f" · {r['n']}", f"m:sli:{r['code']}")])
+    nav = []
+    if page:
+        nav.append(("◀️", f"m:sl:{page - 1}"))
+    if (page + 1) * 10 < total:
+        nav.append(("▶️", f"m:sl:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([("📤 CSV", "m:slcsv"), ("📥 Імпорт зі Short.io", "m:slimp")])
+    return "\n".join(lines), rows
+
+
+def scr_sli(chat_id, code):
+    ct = clicks()
+    r = ct.get(code)
+    if not r:
+        return "Посилання не знайдено.", [[("🔗 Мої посилання", "m:sl")]]
+    n, u = ct.link_counts(code)
+    try:
+        rules = json.loads(r["rules"] or "{}")
+    except ValueError:
+        rules = {}
+    lines = [f"🔗 <b>{esc(r['title'] or 'Коротке посилання')}</b>", f"<pre>{esc(short_url(code))}</pre>",
+             f"🎯 {esc(r['full_url'])}", f"📈 Переходів: <b>{n}</b> · унікальних: <b>{u}</b>",
+             "Стан: " + ("✅ працює" if r["active"] else "⏸ вимкнено")]
+    if r["tag"]:
+        lines.append(f"🏷 Тег: <code>{esc(r['tag'])}</code> · {esc(UTM.LABELS.get(r['platform'], r['platform']))}")
+    for label, val in (("📁 Тека", r["folder"]), ("📝", r["note"]),
+                       ("⏳ Діє до", r["expires"] and datetime.fromtimestamp(r["expires"], TZ).strftime("%d.%m.%Y %H:%M")),
+                       ("🔢 Ліміт", r["max_clicks"]), ("🔒 Пароль", r["pw_hash"] and "встановлено"),
+                       ("🖼 Прев'ю", r["og_title"]), ("🌍 Країни", ", ".join((rules.get("geo") or {}).keys())),
+                       ("📱 Пристрої", ", ".join((rules.get("device") or {}).keys())),
+                       ("🔀 A/B", rules.get("ab") and f"{len(rules['ab']) + 1} варіанти")):
+        if val:
+            lines.append(f"{label}: {esc(str(val))}")
+    e = lambda f: (SL_FIELDS[f][0], f"m:sle:{code}:{f}")  # noqa: E731
+    rows = [[("📈 Статистика", f"m:slst:{code}"), ("🔳 QR-код", f"m:slqr:{code}")],
+            [e("url"), e("slug")], [e("title"), e("folder")], [e("exp"), e("max")], [e("pw"), e("og")], [e("geo"), e("dev")], [e("ab"), e("note")],
+            [("⏸ Вимкнути" if r["active"] else "▶️ Увімкнути", f"m:slt:{code}"), ("🗑 Видалити", f"m:sldel:{code}")],
+            [("🔗 Мої посилання", "m:sl")]]
+    return "\n".join(lines), rows
+
+
+def sl_apply(code, field, text):
+    """Зберігає зміну з SL_FIELDS. Повертає (новий код, підтвердження)."""
+    ct, t = clicks(), text.strip()
+    clear = t in ("-", "—", "–")
+    if field == "url":
+        ct.update(code, full_url=t)
+    elif field == "slug":
+        code = ct.rename(code, t)
+    elif field in ("title", "note", "folder"):
+        ct.update(code, **{field: "" if clear else t[:200]})
+    elif field == "exp":
+        if clear:
+            ct.update(code, expires=None)
+        else:
+            m = re.fullmatch(r"(\d{1,2})\.(\d{1,2})\.(\d{4})", t)
+            if m:
+                when = datetime(int(m[3]), int(m[2]), int(m[1]), 23, 59, tzinfo=TZ).timestamp()
+            elif t.isdigit():
+                when = time.time() + int(t) * 86400
+            else:
+                raise ValueError("Надішліть число днів або дату 31.12.2026")
+            ct.update(code, expires=when)
+    elif field == "max":
+        if not clear and not t.isdigit():
+            raise ValueError("Надішліть число")
+        ct.update(code, max_clicks=None if clear else int(t))
+    elif field == "pw":
+        import clicktrack
+        ct.update(code, pw_hash=None if clear else clicktrack.password_hash(code, t))
+    elif field == "og":
+        parts = [x.strip() for x in t.split("\n")] + ["", "", ""]
+        ct.update(code, og_title=None if clear else parts[0][:200], og_desc=None if clear else parts[1][:300],
+                  og_image=None if clear or not parts[2].startswith("http") else parts[2])
+    elif field in ("geo", "dev", "ab"):
+        r = ct.get(code)
+        rules = json.loads(r["rules"] or "{}")
+        key = {"geo": "geo", "dev": "device", "ab": "ab"}[field]
+        if clear:
+            rules.pop(key, None)
+        else:
+            found = {} if field != "ab" else []
+            for line in t.split("\n"):
+                m = re.search(r"(https?://\S+)", line)
+                if not m:
+                    continue
+                rest = line.replace(m[1], "").strip()
+                if field == "ab":
+                    found.append({"url": m[1], "w": int(re.sub(r"\D", "", rest) or 50)})
+                elif rest:
+                    found[rest.lower() if field == "dev" else rest] = m[1]
+            if not found:
+                raise ValueError("Не знайшов жодного рядка з адресою https://…")
+            if field == "ab":
+                rules["main_w"] = max(1, 100 - sum(x["w"] for x in found))
+            rules[key] = found
+        ct.update(code, rules=rules)
+    return code, "✅ Збережено"
 
 
 async def shortio_sync(force=False):
@@ -6730,6 +6872,61 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         screen = ("✏️ <b>Адреса Ollama</b>\nНа тому ж сервері Oracle (docker compose): <code>http://ollama:11434</code>\n"
                   "Домашній ПК через Tailscale чи Cloudflare Tunnel: його адреса.\n«-» — як у змінній OLLAMA_URL.\nЗараз: <code>"
                   + esc(ollama_url() or "—") + "</code>", [CANCEL_ROW])
+    elif a in ("sl", "sli", "sle", "slt", "sldel", "sldel2", "slqr", "slst", "slnew", "slcsv", "slimp", "slq"):
+        ct = clicks()
+        code = arg or ""
+        if a == "sl":
+            screen = scr_sl(chat_id, int(arg) if (arg or "").isdigit() else 0)
+        elif a == "sli":
+            screen = scr_sli(chat_id, code)
+        elif a == "slnew":
+            ask_input(chat_id, "slnew")
+            screen = ("➕ <b>Скоротити посилання</b>\nНадішліть адресу (https://…). Можна одразу зі своїм кінцем адреси через пробіл: "
+                      "<code>https://greenpost.ua/news/… zubr-lviv</code>", [CANCEL_ROW])
+        elif a == "slq":
+            ask_input(chat_id, "slq")
+            screen = ("🔍 Що шукати? Частина адреси, назви, тегу чи нотатки.", [CANCEL_ROW])
+        elif a == "sle" and len(parts) > 3 and parts[3] in SL_FIELDS:
+            ask_input(chat_id, "slset", f"{code}|{parts[3]}")
+            screen = (f"<b>{SL_FIELDS[parts[3]][0]}</b>\n{esc(SL_FIELDS[parts[3]][1])}", [CANCEL_ROW])
+        elif a == "slt" and ct.get(code):
+            ct.update(code, active=0 if ct.get(code)["active"] else 1)
+            screen = scr_sli(chat_id, code)
+        elif a == "sldel":
+            screen = ("🗑 Видалити посилання разом зі статистикою? Люди, які його натиснуть, побачать «не знайдено».",
+                      [[("🗑 Так, видалити", f"m:sldel2:{code}"), ("Ні", f"m:sli:{code}")]])
+        elif a == "sldel2":
+            ct.delete(code)
+            toast, screen = "Видалено", scr_sl(chat_id)
+        elif a == "slqr" and ct.get(code):
+            import clicktrack
+            if q:
+                await q.answer("Готую QR-код…")
+            await update.effective_chat.send_photo(InputFile(io.BytesIO(clicktrack.qr_png(short_url(code))), filename=f"qr-{code}.png"),
+                                                   caption=f"🔳 QR-код для {short_url(code)}\nСкани теж рахуються в статистиці.")
+        elif a == "slst":
+            import clicktrack
+            r = ct.get(code) or {}
+            text = clicktrack.report_html(ct.report(code=code), esc, UTM.LABELS).replace(
+                "Кліки за UTM-посиланнями", "Переходи: " + esc(r.get("title") or short_url(code)), 1)
+            screen = (text[:4000], [[("« До посилання", f"m:sli:{code}")]])
+        elif a == "slcsv":
+            await update.effective_chat.send_document(InputFile(io.BytesIO(ct.csv()), filename=f"links-{datetime.now(TZ):%Y-%m-%d}.csv"),
+                                                      caption="📤 Усі короткі посилання з кількістю переходів (відкривається в Excel).")
+        elif a == "slimp":
+            if not os.getenv("SHORTIO_API_KEY"):
+                toast = "Потрібен SHORTIO_API_KEY (лише читання — у Short.io нічого не змінюється)"
+            else:
+                from plugins.newsroom.shortio import ShortIO, normalize_link_rows
+                try:
+                    raw = await ShortIO().request("GET", "https://api.short.io/api/links",
+                                                  params={"domain_id": os.getenv("SHORTIO_DOMAIN_ID", ""), "limit": 150})
+                    items = raw.get("links", raw) if isinstance(raw, dict) else raw
+                    rows_ = [(x.get("originalURL"), x.get("path"), x.get("title") or "") for x in items or [] if isinstance(x, dict)]
+                    toast = f"📥 Перенесено нових: {ct.import_rows(rows_)} з {len(rows_)}"
+                except Exception as exc:  # noqa: BLE001
+                    toast = f"Short.io: {str(exc)[:150]}"
+            screen = scr_sl(chat_id)
     elif a in ("utmt", "utmown", "utmold", "utmres", "utmrs", "utmreg", "utmst", "utmx", "utmd", "utm", "utmadd", "utmclk", "utmclx", "utmsync", "utmsio", "utmsx"):
         st = _utm_state(chat_id)
         if a == "utm":
@@ -7325,6 +7522,26 @@ async def _handle_awaited(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text):
             return await reply("Не схоже на назву моделі. Приклад: qwen2.5:7b", reply_markup=kb([CANCEL_ROW]))
         asyncio.get_running_loop().create_task(ollama_pull_job(chat_id, name))
         return await show(update, *(await scr_ollama(chat_id)), edit=False)
+    if action == "slnew":
+        p2 = text.split()
+        try:
+            code = clicks().create(p2[0] if p2 else "", p2[1] if len(p2) > 1 else None)
+        except ValueError as exc:
+            ask_input(chat_id, "slnew")
+            return await reply(str(exc), reply_markup=kb([CANCEL_ROW]))
+        t, r = scr_sli(chat_id, code)
+        return await show(update, "✅ Готово — копіюйте коротке посилання:\n\n" + t, r, edit=False)
+    if action == "slq":
+        return await show(update, *scr_sl(chat_id, 0, text.strip()[:60]), edit=False)
+    if action == "slset":
+        code, field = data.split("|", 1)
+        try:
+            code, note = sl_apply(code, field, text)
+        except (ValueError, json.JSONDecodeError) as exc:
+            ask_input(chat_id, "slset", data)
+            return await reply(f"⚠️ {exc}", reply_markup=kb([CANCEL_ROW]))
+        t, r = scr_sli(chat_id, code)
+        return await show(update, note + "\n\n" + t, r, edit=False)
     if action == "utmurl":
         parts = text.split()
         url = UTM.clean_url(parts[0]) if parts else ""
@@ -9102,20 +9319,40 @@ async def main():
                               text=str(body.get("text") or "")[:4000] if op == "text" else None)
         return _Resp(json.dumps(res, ensure_ascii=False), media_type="application/json")
 
-    async def _short_redirect(request):  # 📈 коротке посилання мітки: записати клік і перекинути на статтю
+    async def _short_redirect(request):  # 🔗 коротке посилання: правила, пароль, прев'ю, запис кліку й переадресація
+        import clicktrack
+        from urllib.parse import parse_qs as _pq
         from starlette.responses import RedirectResponse
-        code = request.path_params.get("code", "")[:16]
-        target = clicks().target(code)
-        if not target:
-            return _Resp("Посилання не знайдено", status_code=404)
-        h = request.headers
+        code = request.path_params.get("code", "")[:40]
+        ct, h = clicks(), request.headers
+        link = ct.get(code)
+        if not link or link["provider"] != "own":
+            return _HTML("<h3>Посилання не знайдено</h3>", status_code=404)
         ip = (h.get("x-forwarded-for") or h.get("x-real-ip") or (request.client.host if request.client else "")).split(",")[0].strip()
-        if request.method == "GET":
+        ua = h.get("user-agent", "")
+        country = ""
+        if '"geo"' in (link.get("rules") or ""):
+            country = (await ct.geo(ip))[0]
+        pw = None
+        if request.method == "POST":
+            pw = (_pq((await request.body()).decode("utf-8", "ignore")).get("p") or [""])[0]
+        kind, val = ct.check(code, ua, country, pw)
+        if kind == "missing":
+            return _HTML("<h3>Посилання не знайдено</h3>", status_code=404)
+        if kind == "gone":
+            return _HTML(f"<h3>{esc(val)}</h3>", status_code=410)
+        if kind == "password":
+            return _HTML(clicktrack.password_page(code, esc, wrong=pw is not None), status_code=401 if pw is not None else 200)
+        target = val if kind == "go" else link["full_url"]
+        if request.method != "HEAD":
             BACKGROUND.add(asyncio.get_running_loop().create_task(
-                clicks().record(code, ip, h.get("user-agent", ""), h.get("referer", ""), h.get("accept-language", ""))))
-        return RedirectResponse(target, status_code=302, headers={"Cache-Control": "no-store"})
+                ct.record(code, ip, ua, h.get("referer", ""), h.get("accept-language", ""))))
+        if kind == "preview":
+            return _HTML(clicktrack.preview_html(link, target, esc))
+        return RedirectResponse(target, status_code=302 if request.method != "POST" else 303, headers={"Cache-Control": "no-store"})
 
-    app.router.routes.insert(0, _Route("/r/{code}", _short_redirect, methods=["GET", "HEAD"]))
+    app.router.routes.insert(0, _Route("/r/{code}", _short_redirect, methods=["GET", "HEAD", "POST"]))
+    app.router.routes.append(_Route("/{code:str}", _short_redirect, methods=["GET", "HEAD", "POST"]))  # власний домен: домен/код
     app.router.routes.insert(0, _Route("/app", _app_page, methods=["GET"]))
     app.router.routes.insert(0, _Route("/app/api", _app_api, methods=["POST"]))
     app.router.routes.insert(0, _Route("/sandbox", _sandbox_page, methods=["GET"]))

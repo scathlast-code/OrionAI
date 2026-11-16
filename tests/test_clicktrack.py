@@ -55,3 +55,18 @@ def test_shortio_write_needs_permission(monkeypatch):
         except S.ShortIOError:
             pass
         assert (len(calls) > before) == ok, policy
+
+
+def test_own_shortener_rules(tmp_path):
+    import time
+    t = C.Tracker(tmp_path / "s.db")
+    code = t.create("https://greenpost.ua/news/x", "zubr-lviv", "Зубри")
+    assert t.check(code, "Mozilla") == ("go", "https://greenpost.ua/news/x")
+    t.update(code, rules={"device": {"ios": "https://apps.apple.com/x"}})
+    assert t.check(code, "Mozilla/5.0 (iPhone) Mobile")[1] == "https://apps.apple.com/x"
+    t.update(code, pw_hash=C.password_hash(code, "1"))
+    assert t.check(code, "Mozilla")[0] == "password" and t.check(code, "Mozilla", password="1")[0] == "go"
+    t.update(code, expires=time.time() - 1)
+    assert t.check(code, "Mozilla")[0] == "gone"
+    assert t.rename(code, "zubr2") == "zubr2" and t.get("zubr2")["title"] == "Зубри"
+    assert C.qr_png("https://x.ua/zubr2")[:4] == b"\x89PNG"
