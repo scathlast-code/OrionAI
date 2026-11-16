@@ -102,17 +102,26 @@ class _DDGParser(HTMLParser):
     def __init__(self):
         super().__init__()
         self.results, self.capture, self.url, self.title = [], False, '', []
+        self.snip = None
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
         if tag == 'a' and 'result__a' in a.get('class', ''):
             self.capture, self.url, self.title = True, a.get('href', ''), []
+        elif 'result__snippet' in (a.get('class') or '') and self.results:
+            self.snip = []  # короткий уривок під результатом — часто містить саму відповідь
 
     def handle_data(self, data):
         if self.capture:
             self.title.append(data)
+        elif self.snip is not None:
+            self.snip.append(data)
 
     def handle_endtag(self, tag):
+        if self.snip is not None and tag in ('a', 'div', 'td'):
+            self.results[-1]['snippet'] = ''.join(self.snip).strip()[:600]
+            self.snip = None
+            return
         if tag == 'a' and self.capture:
             url = html.unescape(self.url)
             if url.startswith('//'):
@@ -124,12 +133,24 @@ class _DDGParser(HTMLParser):
 
 
 async def _duckduckgo(c, q):
-    # Unofficial HTML interface; may stop working without notice.
-    r = await c.get('https://html.duckduckgo.com/html/', params={'q': q}, headers={'User-Agent': 'Mozilla/5.0'})
-    r.raise_for_status()
-    p = _DDGParser()
-    p.feed(r.text)
-    return _items(p.results)
+    # Unofficial HTML interface; may stop working without notice. Two mirrors: html та lite.
+    ua = {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+          'Accept-Language': 'uk,en;q=0.8'}
+    for url in ('https://html.duckduckgo.com/html/', 'https://lite.duckduckgo.com/lite/'):
+        try:
+            r = await c.post(url, data={'q': q, 'kl': 'ua-uk'}, headers=ua)
+            if r.status_code >= 400:
+                continue
+            p = _DDGParser()
+            p.feed(r.text)
+            if not p.results and 'lite' in url:
+                p.results = [dict(url=html.unescape(m.group(1)), title=re.sub('<[^>]+>', '', m.group(2)).strip(), snippet='')
+                             for m in re.finditer(r'<a[^>]+href="(https?://[^"]+)"[^>]*class=.result-link.[^>]*>(.*?)</a>', r.text)]
+            if p.results:
+                return _items(p.results)
+        except httpx.HTTPError:
+            continue
+    return []
 
 
 class _PageText(HTMLParser):
@@ -233,3 +254,35 @@ async def search(query):
             except (httpx.HTTPError, ValueError, TypeError, KeyError, UnicodeError) as exc:
                 failures.append(f'{name}: HTTP {exc.response.status_code}' if isinstance(exc, httpx.HTTPStatusError) else f'{name}: {type(exc).__name__}')
     return None, 'Пошук не вдався: ' + '; '.join(failures)
+
+
+WMO = {0: "ясно", 1: "переважно ясно", 2: "мінлива хмарність", 3: "хмарно", 45: "туман", 48: "паморозь", 51: "мряка", 53: "мряка", 55: "сильна мряка",
+       61: "невеликий дощ", 63: "дощ", 65: "сильний дощ", 66: "крижаний дощ", 67: "крижаний дощ", 71: "невеликий сніг", 73: "сніг", 75: "сильний сніг",
+       77: "снігова крупа", 80: "зливи", 81: "зливи", 82: "сильні зливи", 85: "снігопад", 86: "сильний снігопад", 95: "гроза", 96: "гроза з градом", 99: "гроза з градом"}
+
+
+async def weather(city):
+    """Погода через Open-Meteo (безкоштовно, без ключа): зараз + 3 дні."""
+    city = (city or "").strip()[:80]
+    if not city:
+        return "Не вказано місто."
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            g = (await c.get("https://geocoding-api.open-meteo.com/v1/search", params={"name": city, "count": 1, "language": "uk"})).json()
+            if not g.get("results"):
+                return f"Не знайшов місто «{city}»."
+            loc = g["results"][0]
+            f = (await c.get("https://api.open-meteo.com/v1/forecast", params={
+                "latitude": loc["latitude"], "longitude": loc["longitude"], "timezone": "auto", "forecast_days": 3,
+                "current": "temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code",
+                "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"})).json()
+    except Exception as e:  # noqa: BLE001
+        return f"Метеосервіс недоступний: {e}"
+    cur, d = f.get("current", {}), f.get("daily", {})
+    place = ", ".join(x for x in (loc.get("name"), loc.get("admin1"), loc.get("country")) if x)
+    lines = [f"{place} (місцевий час {cur.get('time', '').replace('T', ' ')}): {WMO.get(cur.get('weather_code'), '')}, "
+             f"{cur.get('temperature_2m')}°C (відчувається як {cur.get('apparent_temperature')}°C), вологість {cur.get('relative_humidity_2m')}%, "
+             f"вітер {cur.get('wind_speed_10m')} км/год."]
+    for i, day in enumerate(d.get("time", [])[:3]):
+        lines.append(f"{day}: {WMO.get(d['weather_code'][i], '')}, {d['temperature_2m_min'][i]}…{d['temperature_2m_max'][i]}°C, опади {d['precipitation_probability_max'][i]}%")
+    return "\n".join(lines) + "\nДжерело: open-meteo.com"
