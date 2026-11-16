@@ -173,14 +173,15 @@ class Engine:
         self.ask_ai = ask_ai
         self.max_fix = max_fix
 
-    async def _json(self, prompt, system, label, image=None):
-        text, model = await self.ask_ai(prompt, system=system, label=label, image=image)
+    async def _json(self, prompt, system, label, image=None, avoid=None):
+        kw = {"avoid": avoid} if avoid else {}
+        text, model = await self.ask_ai(prompt, system=system, label=label, image=image, **kw)
         try:
             return parse_json(text), model
         except (ValueError, json.JSONDecodeError):
             # одна повторна спроба з нагадуванням про формат
             text, model = await self.ask_ai(prompt + "\n\nУВАГА: попередня відповідь не була коректним JSON. Лише JSON!",
-                                            system=system, label=label, image=image)
+                                            system=system, label=label, image=image, **kw)
             return parse_json(text), model
 
     async def fit_length(self, data: dict, target: int, system: str, label: str):

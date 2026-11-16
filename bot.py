@@ -2312,7 +2312,7 @@ def layout(chat_id):
 # ---------------------------------------------------------------- 🔌 плагіни
 
 
-async def _plugin_ai(prompt, system=None, label=None, image=None):
+async def _plugin_ai(prompt, system=None, label=None, image=None, avoid=None):
     """Моделі Оріона для плагінів: та сама черга, «Авто»-перемикання й ліміти, без запису в журнал розмов."""
     token = NO_JOURNAL.set(True)
     set_prio(0, label or "плагін")
@@ -2322,7 +2322,8 @@ async def _plugin_ai(prompt, system=None, label=None, image=None):
             content = [{"type": "text", "text": prompt},
                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image}"}}]
         history = [{"role": "system", "content": system}] if system else []
-        text, pid, *_ = await ask_llm(history, content)
+        ex = tuple(p for p, v in PROVIDERS.items() if avoid and v.get("title") == avoid)  # «🔁 Іншою моделлю»
+        text, pid, *_ = await ask_llm(history, content, exclude=ex)
     finally:
         NO_JOURNAL.reset(token)
     return text, (PROVIDERS.get(pid, {}).get("title") or str(pid or ""))

@@ -351,19 +351,31 @@ class ObservancesUI:
         r = self.obs(oid)
         if not r:
             return
-        cands = await self.web_candidates([f"\"{r['title'][:80]}\""], 72)
-        if not cands:
-            cands = await self.web_candidates([r["title"][:80]], 24 * 30)
-        if cands:
-            scored = await self.score(cands)
-            ids = await self.save_finds("mode", f"obs-{oid}", scored)
-            fs = self.desk.finds(ids=ids, sort="prio", limit=5)
-            if fs:
-                return await self.compose(chat, fs, size, size, f"📅 До теми: {r['title']}.")
-        fake = [{"id": 0, "title": r["title"], "url": r["url"], "source": r["source"], "published": time.time(),
-                 "snippet": f"{r['title']} ({KINDS.get(r['kind'])}). Свіжих новин не знайдено — напиши тематичний допис: що це за "
-                            "день/тиждень, навіщо він, що може зробити читач. Без вигаданих цифр і подій.", "story_id": None}]
-        await self.compose(chat, fake, size, size, "📅 Тематичний допис без свіжих новин — перевірте факти.")
+        from .desk_ui import Progress
+        pg = await Progress(self.host, chat, f"Тема дня: {r['title'][:60]}").start("🔎 Крок 1 з 3: шукаю свіже про тему…")
+        try:
+            cands = await self.web_candidates([f"\"{r['title'][:80]}\""], 72)
+            if not cands:
+                cands = await self.web_candidates([r["title"][:80]], 24 * 30)
+            did = None
+            if cands:
+                await pg.set(f"⭐ Крок 2 з 3: оцінюю знайдене ({len(cands)})…")
+                scored = await self.score(cands)
+                ids = await self.save_finds("mode", f"obs-{oid}", scored)
+                fs = self.desk.finds(ids=ids, sort="prio", limit=5)
+                if fs:
+                    await pg.set("✍️ Крок 3 з 3: ШІ пише чернетку…")
+                    did = await self.compose(chat, fs, size, size, f"📅 До теми: {r['title']}.")
+                    return await pg.done("✅ Чернетку готово — нижче" if did else "ℹ️ Чернетку не написано", self.prompt_rows())
+            await pg.set("✍️ Крок 3 з 3: свіжих новин немає — ШІ пише тематичний допис…")
+            fake = [{"id": 0, "title": r["title"], "url": r["url"], "source": r["source"], "published": time.time(),
+                     "snippet": f"{r['title']} ({KINDS.get(r['kind'])}). Свіжих новин не знайдено — напиши тематичний допис: що це за "
+                                "день/тиждень, навіщо він, що може зробити читач. Без вигаданих цифр і подій.", "story_id": None}]
+            did = await self.compose(chat, fake, size, size, "📅 Тематичний допис без свіжих новин — перевірте факти.")
+            await pg.done("✅ Тематичний допис готовий — нижче" if did else "ℹ️ Чернетку не написано", self.prompt_rows())
+        except Exception as exc:  # noqa: BLE001
+            log.exception("write_observance")
+            await pg.done(f"⚠️ Не вдалося: {esc(exc)[:300]}", self.prompt_rows())
 
     # ----- фон
     async def _obs_loop(self):
@@ -402,7 +414,7 @@ class ObservancesUI:
             return None, self.obs_card(x)
         if a == "obw":
             self._bg(self.write_observance(chat, int(x), y))
-            return "✍️ Пишу…", ("✍️ <b>Пишу на тему дня</b> — бот пошукає свіже й надішле чернетку з вашими кнопками.", [[("« Теми дня", self.cb("obh"))]])
+            return "✍️ Пишу…", ("✍️ <b>Пишу на тему дня</b>\nУ чаті з ботом видно хід роботи (крок і секунди), потім прийде чернетка. Якщо ШІ відмовиться — «📋 Промт для іншого ШІ» або «🔁 Іншою моделлю».", [[("« Теми дня", self.cb("obh"))]])
         if a == "obz":
             r = self.obs(x)
             n = self.add_collected(chat, "text", f"📅 Тема дня: {r['title']}", r["source"], r["url"])
