@@ -34,6 +34,25 @@ DEFAULTS = {"who": "all", "greeting": "👋 Вітаю! Напишіть пов�
 WHO = {"all": "пишуть усі", "members": "лише учасники бота", "closed": "ніхто (закрито)"}
 
 
+def mention(uid, name, username=""):
+    """Ім'я, яке відкриває профіль людини (tg://user — працює й без @username) + @username, якщо є."""
+    if uid and int(uid) > 0:
+        out = f'<a href="tg://user?id={int(uid)}">{esc(name or uid)}</a>'
+    elif username:
+        out = f'<a href="https://t.me/{esc(username)}">{esc(name)}</a>'
+    else:
+        out = esc(name or uid)
+    return out + (f" @{esc(username)}" if username else "")
+
+
+def profile_row(cb, uid, username=""):
+    """Кнопки «👤 Профіль» (картка з фото й описом) і «↗ Відкрити акаунт» (для людей з @username)."""
+    row = [("👤 Профіль", cb("pf", uid))]
+    if username:
+        row.append(("↗ Відкрити акаунт", f"url:https://t.me/{username}"))
+    return row
+
+
 def kind_of(m):
     for k in ("photo", "video", "voice", "video_note", "audio", "document", "sticker", "animation", "location", "contact", "poll"):
         if getattr(m, k, None):
@@ -210,7 +229,8 @@ class Plugin(Base):
                         (uid, name, (u.username if u else "") or "", now, now))
         link = (f"https://t.me/{c.username}/{m.message_id}" if c.username
                 else f"https://t.me/c/{str(c.id).removeprefix('-100')}/{m.message_id}")
-        head = (f"{what} · <b>{esc(c.title or '')}</b>\n👤 {esc(name)}" + (f" @{esc(u.username)}" if u and u.username else "")
+        uname = (u.username if u else getattr(sender, "username", "")) or ""
+        head = (f"{what} · <b>{esc(c.title or '')}</b>\n👤 {mention(uid, name, uname)} · <code>{uid}</code>"
                 + (f"\n↪️ до допису: «{esc(about)}»" if about else "")
                 + ("\n<i>Відповідь — reply на повідомлення нижче: бот відповість прямо в коментарях.</i>" if c.type != "channel" else ""))
         rows = [[("🔗 Відкрити", "url:" + link)]]
@@ -218,6 +238,7 @@ class Plugin(Base):
             rows[0].insert(0, ("↩️ Відповісти там", self.cb("rc", c.id, m.message_id)))
             rows.append([("🔇 Мут 1 год", self.cb("mu", c.id, uid, 3600)), ("🔇 Мут 1 добу", self.cb("mu", c.id, uid, 86400))])
             rows.append([("🚫 Забанити", self.cb("ban", c.id, uid)), ("🗑 Видалити коментар", self.cb("del", c.id, m.message_id))])
+        rows.append(profile_row(self.cb, uid, uname))
         rows.append([("✅ Прочитано", self.cb("ok", uid))])
         for owner in self.host.admins():
             try:
@@ -298,6 +319,30 @@ class Plugin(Base):
         rows.append([("« Канали й коментарі", self.cb("chs"))])
         return "\n".join(lines), rows
 
+    async def send_profile(self, ctx, to, uid):
+        """👤 Картка людини: фото профілю, ім'я (відкриває акаунт), @username, опис, ID, скільки писала."""
+        bot = ctx.bot
+        p = self.person(uid) or {}
+        name, username, bio = p.get("name") or str(uid), p.get("username") or "", ""
+        try:
+            ch = await bot.get_chat(uid)
+            name = getattr(ch, "full_name", None) or getattr(ch, "title", None) or name
+            username = ch.username or username
+            bio = getattr(ch, "bio", None) or getattr(ch, "description", None) or ""
+        except Exception:  # noqa: BLE001 — Telegram дає дані лише про тих, хто писав боту чи в спільний чат
+            pass
+        text = (f"👤 {mention(uid, name, username)}\nID: <code>{uid}</code>" + (f"\n📝 {esc(bio)[:300]}" if bio else "")
+                + (f"\nПовідомлень: {p.get('count', 0)}" if p else "")
+                + ("" if username else "\n<i>Без @username — торкніться імені, щоб відкрити акаунт.</i>"))
+        rows = [r for r in [[("↗ Відкрити акаунт", f"url:https://t.me/{username}")] if username else []] if r]
+        try:
+            ph = await bot.get_user_profile_photos(uid, limit=1) if uid > 0 else None
+            if ph and ph.total_count:
+                return await bot.send_photo(to, ph.photos[0][-1].file_id, caption=text, parse_mode="HTML", reply_markup=self._kb(rows) if rows else None)
+        except Exception:  # noqa: BLE001
+            pass
+        await bot.send_message(to, text, parse_mode="HTML", reply_markup=self._kb(rows) if rows else None)
+
     def chats_screen(self):
         cs = self.chats()
         lines = ["📣 <b>Канали й коментарі</b>",
@@ -333,12 +378,13 @@ class Plugin(Base):
         if fwd is not None:
             ch = getattr(fwd, "chat", None) or getattr(fwd, "sender_chat", None)
             fsrc = (ch.title if ch else getattr(getattr(fwd, "sender_user", None), "full_name", "") or getattr(fwd, "sender_user_name", "")) or "?"
-        head = (f"📮 <b>{esc(user.full_name)}</b>" + (f" @{esc(user.username)}" if user.username else "") + f" · <code>{user.id}</code>"
+        head = (f"📮 <b>{mention(user.id, user.full_name, user.username or '')}</b> · <code>{user.id}</code>"
                 + (" · учасник" if member else "") + f" · {n}-е" + (f"\n↪️ переслано з «{esc(fsrc)}»" if fsrc else "")
                 + "\n<i>Відповідь — просто reply на повідомлення нижче.</i>")
         rows = [[("↩️ Відповісти", self.cb("r", user.id)), ("📰 У ньюзрум", self.cb("n", user.id, msg.message_id))],
                 [("🔇 Мут 1 год", f"m:bpn:{user.id}:mute:3600"), ("🔇 Мут 1 добу", f"m:bpn:{user.id}:mute:86400")],
-                [("🚫 Забанити в боті", f"m:bpn:{user.id}:ban"), ("✅ Прочитано", self.cb("ok", user.id))]]
+                [("🚫 Забанити в боті", f"m:bpn:{user.id}:ban"), ("✅ Прочитано", self.cb("ok", user.id))],
+                profile_row(self.cb, user.id, user.username or "")]
         silent = self.get("silent") == "1"
         bot = ctx.bot
         for owner in self.host.admins():
@@ -506,6 +552,9 @@ class Plugin(Base):
                 return "🗑 Коментар видалено", None
             except Exception as exc:  # noqa: BLE001
                 return f"Не вдалося видалити: {str(exc)[:150]}", None
+        if a == "pf" and x:
+            await self.send_profile(ctx, chat, int(x))
+            return "👤 Картка профілю нижче", None
         if a == "mod" and x:
             return None, self.sanctions_screen(int(x))
         if a == "rc" and x and y:

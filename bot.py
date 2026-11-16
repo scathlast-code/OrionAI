@@ -2073,14 +2073,15 @@ async def deny(update: Update):
         # Хто натиснув «Старт» — одразу заявка власнику з кнопкою «Дати доступ». Після схвалення бот просто починає працювати.
         user = update.effective_user
         member_upsert(user, "pending")
-        who = esc(user.full_name) + (f" (@{esc(user.username)})" if user.username else "")
+        who = f'<a href="tg://user?id={user.id}">{esc(user.full_name)}</a>' + (f" (@{esc(user.username)})" if user.username else "")
         for admin in admin_ids():  # власник і (у режимі «усім усе») кожен учасник може схвалити
             try:
                 await update.get_bot().send_message(
                     admin, f"👥 <b>{who} просить доступ до бота й застосунку</b>\nID: <code>{user.id}</code>\n\n"
                     "Натисніть «✅ Дати доступ» — бот одразу запрацює для цієї людини й привітається з нею. Нічого більше від неї не потрібно.",
                     parse_mode=ParseMode.HTML,
-                    reply_markup=kb([[("✅ Дати доступ", f"m:accok:{user.id}"), ("❌ Відхилити", f"m:accno:{user.id}")]]))
+                    reply_markup=kb([[("✅ Дати доступ", f"m:accok:{user.id}"), ("❌ Відхилити", f"m:accno:{user.id}")],
+                                     [("👤 Профіль", f"m:pl:inb:pf:{user.id}")] + ([("↗ Відкрити акаунт", f"url:https://t.me/{user.username}")] if user.username else [])]))
             except Exception:  # noqa: BLE001
                 log.warning("не вдалося повідомити %s про заявку %s", admin, user.id)
         st = "pending"
