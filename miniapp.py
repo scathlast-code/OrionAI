@@ -202,7 +202,10 @@ def history(B, uid, limit=40):
         rows = con.execute("SELECT role, text, provider, ts FROM messages WHERE dialog_id=? AND pending=0 ORDER BY id DESC LIMIT ?",
                            (did, limit)).fetchall()
     title = B.dialog_name(did) if did else "Нова розмова"
-    return {"dialog": title, "limits": B.limits_brief(short=True), "messages": [{"role": r["role"], "text": r["text"][:6000], "provider": r["provider"] or "", "ts": r["ts"]} for r in rows[::-1]]}
+    ch = B.get_choice(uid)
+    models = [{"id": "auto", "title": "🔁 Авто", "on": ch == "auto"}] + [
+        {"id": k, "title": f"{B.BADGE.get(k, '🤖')} {v['title']}", "on": ch == k} for k, v in B.PROVIDERS.items()]
+    return {"dialog": title, "limits": B.limits_brief(short=True), "models": models, "messages": [{"role": r["role"], "text": r["text"][:6000], "provider": r["provider"] or "", "ts": r["ts"]} for r in rows[::-1]]}
 
 
 def menu(B, uid):
