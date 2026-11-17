@@ -569,18 +569,21 @@ class Plugin(Base):
                     desc = M.post_text(info)
                     outs = await M.render(path, opts, work, item.engine == "direct") if path else []
                     # Опис і автор — у підписі самого файлу (Telegram дозволяє 1024 символи); довший текст — ще й окремо
-                    tail = (f"\n\n👤 {who}" + (f" · {link}" if link else "") if who else "\n") + f"\n🔗 {job.url}"
+                    # Підпис HTML: довгі адреси — короткими посиланнями «Автор» / «Допис»; ліміт Telegram — 1024 видимі символи
+                    who_html = (f'<a href="{esc(link)}">{esc(who)}</a>' if link else esc(who)) if who else ""
+                    tail = (f"\n\n👤 {who_html}" if who else "\n") + f' · <a href="{esc(job.url)}">🔗 Допис</a>'
+                    tail_len = len(f"\n\n👤 {who} · 🔗 Допис")
                     first = True
                     for out in outs + tracks:
                         cap = ""
                         if first:
                             if opts.post and desc and desc not in shown and opts.target != "zip":
-                                full = desc.strip() + tail
-                                if len(full) <= 1024:
-                                    cap = full
+                                body = desc.strip()
+                                if len(body) + tail_len <= 1024:
+                                    cap = esc(body) + tail
                                     shown.add(desc)  # уже в підписі — окремим повідомленням не дублюємо
                                 else:
-                                    cap = desc.strip()[:1020 - len(tail)].rstrip() + "…" + tail
+                                    cap = esc(body[:1020 - tail_len].rstrip()) + "…" + tail
                             else:
                                 cap = tail.strip()
                             first = False
@@ -593,7 +596,7 @@ class Plugin(Base):
 
                         async def on_up(done, total, up=up):
                             await stage(f"{up}\n{bar(done, total)}")
-                        await self.send_doc(chat, out, cap[:1024], on_progress=on_up)
+                        await self.send_media(chat, out, cap, on_progress=on_up)
                         sent.append(out.name)
                         kept = self.keep(out)
                         if kept:
@@ -689,6 +692,43 @@ class Plugin(Base):
         f = await self.host.bot().get_file(p.file_id, read_timeout=40)
         await f.download_to_drive(path, read_timeout=60)
         return path
+
+    async def send_media(self, chat, path, caption_html="", on_progress=None):
+        """Відео — як відео (з плеєром), фото — як фото, GIF — анімацією, аудіо — треком; решта — файлом."""
+        ext = path.suffix.lower()
+        size = path.stat().st_size
+        bot = self.host.bot()
+        kw = dict(caption=caption_html, parse_mode="HTML", read_timeout=300, write_timeout=300)
+        meta = {}
+        if ext in (".mp4", ".mov", ".m4v"):
+            try:
+                data = await M.probe_media(path)
+                v = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), {})
+                meta = {"width": int(v.get("width") or 0) or None, "height": int(v.get("height") or 0) or None,
+                        "duration": int(float((data.get("format") or {}).get("duration") or 0)) or None}
+            except Exception:  # noqa: BLE001
+                meta = {}
+        try:
+            if size <= TELEGRAM_OUT - 512 * 1024:
+                with path.open("rb") as fh:
+                    if ext in (".mp4", ".mov", ".m4v"):
+                        return await bot.send_video(chat, fh, filename=path.name, supports_streaming=True, **meta, **kw)
+                    if ext in (".jpg", ".jpeg", ".png", ".webp") and size <= 10_000_000:
+                        return await bot.send_photo(chat, fh, **kw)
+                    if ext == ".gif":
+                        return await bot.send_animation(chat, fh, filename=path.name, **kw)
+                    if ext in (".mp3", ".m4a", ".ogg", ".opus", ".aac"):
+                        return await bot.send_audio(chat, fh, filename=path.name, **kw)
+            elif ext in (".mp4", ".mov", ".m4v") and self.big.ready() and size <= BIG_LIMIT:
+                try:
+                    return await self.big.send(chat, path, caption_html, progress=on_progress, video=meta or {}, html=True)
+                except Exception as exc:  # noqa: BLE001
+                    raise JobError(f"Не вдалося надіслати велике відео: {type(exc).__name__}: {str(exc)[:200]}") from None
+        except JobError:
+            raise
+        except Exception:  # noqa: BLE001 — Telegram не прийняв як відео/фото: надсилаємо файлом
+            log.exception("send as media failed, falling back to document")
+        return await self.send_doc(chat, path, re.sub(r"<[^>]+>", "", caption_html).replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"'), on_progress)
 
     async def send_doc(self, chat, path, caption="", on_progress=None):
         """До 50 МБ — звичайно; більше (до 2 ГБ) — через пряме з'єднання з Telegram від імені бота."""
