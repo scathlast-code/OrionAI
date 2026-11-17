@@ -444,8 +444,12 @@ class Plugin(Base):
                 await self.host.bot().edit_message_text(text[:4096], chat_id=chat, message_id=msg.message_id, parse_mode="HTML",
                                                         reply_markup=self._markup(rows), disable_web_page_preview=True)
                 return msg
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                why = str(exc).lower()
+                # «не змінилось» (той самий текст) чи «забагато запитів» — лишаємо старе повідомлення, а не шлемо нове.
+                # Нове — лише якщо старе зникло (видалене).
+                if "not found" not in why and "can't be edited" not in why:
+                    return msg
         return await self.host.notify(chat, text, rows) or msg
 
     async def quick(self, chat, url):
