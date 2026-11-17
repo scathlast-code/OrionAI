@@ -51,6 +51,26 @@ FF = (
 )
 
 
+UA_TITLES = (
+    (r"^TikTok video #(\d+)", r"Відео TikTok \1"),
+    (r"^Video by (.+)", r"Відео від \1"),
+    (r"^Photo by (.+)", r"Фото від \1"),
+    (r"^Post by (.+)", r"Допис від \1"),
+    (r"^Reel by (.+)", r"Reels від \1"),
+    (r"^Story by (.+)", r"Сторіс від \1"),
+    (r"^(Instagram|Facebook|Threads|Twitter|X) (video|post|photo)\b", lambda m: {"video": "Відео", "post": "Допис", "photo": "Фото"}[m[2]] + " " + m[1]),
+    (r"^Untitled$", "Без назви"),
+)
+
+
+def ua_title(title):
+    """Англійські заглушки завантажувачів («TikTok video #…», «Video by …») → українською."""
+    title = str(title or "")
+    for pattern, repl in UA_TITLES:
+        title = re.sub(pattern, repl, title, count=1)
+    return title
+
+
 @dataclass
 class Item:
     engine: str
@@ -60,7 +80,7 @@ class Item:
 
     @property
     def title(self):
-        return str(self.info.get("title") or self.info.get("filename") or "Медіа")
+        return ua_title(self.info.get("title") or self.info.get("filename") or "Медіа")
 
 
 COOKIES_DIR = None  # тека з cookies.txt за платформами (задає плагін)
@@ -809,7 +829,7 @@ async def fetch(item, source, options, work, progress=None):
     info_path = work / "media.info.json"
     info = json.loads(info_path.read_text(encoding="utf-8")) if info_path.is_file() else item.info
     allow_extractor(info)
-    stem = Path(safe_name(info.get("title") or item.title, "media")).stem
+    stem = Path(safe_name(ua_title(info.get("title") or item.title)[:70], "media")).stem
     path = files[0].rename(work / (stem + files[0].suffix.lower()))
     tracks = [
         track.rename(work / (stem + track.name.removeprefix("media")))
