@@ -591,6 +591,54 @@ async def resolve_share(url):
     return url
 
 
+STORY = re.compile(r"^https?://(?:www\.|m\.)?instagram\.com/stories/([A-Za-z0-9_.]+)/?(\d+)?")
+APIFY_ACTOR = "seemuapps~instagram-story-downloader"
+
+
+async def story_probe(url, work):
+    """Сторіс Instagram: спершу як звичайно (yt-dlp, з cookies, якщо є), а якщо Instagram вимагає входу —
+    через сервіс Apify, який має власні акаунти (як інші боти-завантажувачі). Ключ — APIFY_TOKEN у Railway."""
+    match = STORY.match(url)
+    user, story_id = match[1], match[2]
+    try:
+        items = await video_probe(url, work)
+        if items:
+            return items
+    except JobError as exc:
+        first = str(exc)
+    else:
+        first = ""
+    token = os.environ.get("APIFY_TOKEN", "").strip()
+    if not token:
+        raise JobError("Instagram показує сторіс лише після входу. Щоб бот їх качав без вашого акаунта, як інші боти, "
+                       "додайте в Railway змінну APIFY_TOKEN (apify.com → Settings → API &amp; Integrations; безкоштовних "
+                       "$5 на місяць вистачає приблизно на 300 сторіс)." + (f"\n\n<i>Технічно: {html_escape(first[-200:])}</i>" if first else ""))
+    async with httpx.AsyncClient(timeout=180, trust_env=False) as client:
+        r = await client.post(f"https://api.apify.com/v2/acts/{APIFY_ACTOR}/run-sync-get-dataset-items",
+                              params={"token": token}, json={"usernames": [user], "saveFiles": False, "maxItems": 0})
+    if r.status_code in (401, 403):
+        raise JobError("APIFY_TOKEN не підходить — перевірте ключ у Railway.")
+    if r.status_code == 402:
+        raise JobError("На Apify закінчився баланс цього місяця.")
+    if r.status_code >= 400:
+        raise JobError(f"Apify відповів помилкою {r.status_code}: {r.text[:150]}")
+    rows = [row for row in (r.json() or []) if isinstance(row, dict)]
+    if story_id:
+        exact = [row for row in rows if str(row.get("storyId") or "").split("_")[0] == story_id]
+        rows = exact or rows
+    items = []
+    for row in rows:
+        link = row.get("videoUrl") if row.get("mediaType") == "video" else None
+        link = link or row.get("videoUrl") or row.get("imageUrl")
+        if link:
+            items.append(Item("direct", link, {"title": f"Сторіс @{user}", "author": user,
+                                               "author_url": f"https://www.instagram.com/{user}/",
+                                               "description": " ".join(row.get("links") or [])}))
+    if not items:
+        raise JobError(f"У @{user} зараз немає доступних сторіс (минули 24 години або акаунт приватний).")
+    return items
+
+
 async def inspect_link(url, work):
     await check_url(url)
     parsed = urlsplit(url)
@@ -600,6 +648,8 @@ async def inspect_link(url, work):
         or domain_matches(host, ("discordapp.com", "discordapp.net", "t.me", "telegram.me"))
     ):
         probes = (page_probe, video_probe, gallery_probe)
+    elif STORY.match(url):
+        probes = (story_probe,)
     elif domain_matches(host, ("tumblr.com",)):
         probes = (tumblr_probe, gallery_probe, video_probe, page_probe)
     elif domain_matches(host, ("threads.net", "threads.com")):
@@ -634,8 +684,10 @@ async def inspect_link(url, work):
         raise JobError("Сайт не розкрив серверу це коротке посилання «Поділитися». Спробуйте інше посилання на той самий допис: "
                        "у Facebook — «Поділитися» → «Копіювати посилання» з самого відео (reel/… або watch/?v=…).")
     # Найзмістовніша причина — від yt-dlp (він знає сайти), далі gallery-dl, далі сторінка.
-    order = {"threads_probe": 0, "tumblr_probe": 0, "video_probe": 1, "gallery_probe": 2, "page_probe": 3}
+    order = {"story_probe": 0, "threads_probe": 0, "tumblr_probe": 0, "video_probe": 1, "gallery_probe": 2, "page_probe": 3}
     errors.sort(key=lambda e: order.get(e[0], 3))
+    if errors and errors[0][0] == "story_probe":
+        raise JobError(errors[0][1])  # уже зрозуміле пояснення
     raise JobError(explain(errors[0][1] if errors else "Джерело не повернуло медіа або тексту."))
 
 
