@@ -254,25 +254,42 @@ class ObservancesUI:
             span = f" · {fmt(a)}" + (f"–{fmt(b)}" if b != a else "")
         return f"{KINDS.get(r['kind'], '•').split()[0]} {esc(r['title'])}{span}"
 
-    def obs_home(self, chat=None):
+    def obs_home(self, chat=None, open_=""):
+        """Дві «гармоніки»: ✍️ теми (кнопки «написати») і ⚙️ меню. open_ — що розгорнуто: «t», «m» або «tm»."""
         d = self.today()
         rs = self.obs_on(d)
         days = [r for r in rs if r["kind"] == "day"]
         ongoing = [r for r in rs if r["kind"] != "day"]
-        lines = [f"📅 <b>Теми дня · {d.day} {MONTHS_GEN[d.month - 1]}, {WD[d.weekday()]}</b>", ""]
-        lines += [self.obs_line(r) for r in days[:20]] or ["Сьогоднішніх днів у базі немає — «🔄 Оновити з інтернету»."]
-        if ongoing:
-            lines += ["", "<b>Триває:</b>"] + [self.obs_line(r) for r in ongoing[:12]]
+        lines = [f"📅 <b>Теми дня · {d.day} {MONTHS_GEN[d.month - 1]}, {WD[d.weekday()]}</b>"]
+        if days:
+            lines += [f"📌 Сьогодні: {len(days)}" + (f" · триває: {len(ongoing)}" if ongoing else ""),
+                      "<blockquote expandable>" + "\n".join(self.obs_line(r) for r in days[:20])
+                      + ("\n\n<b>Триває:</b>\n" + "\n".join(self.obs_line(r) for r in ongoing[:12]) if ongoing else "")
+                      + "</blockquote>"]
+        else:
+            lines += ["Сьогоднішніх днів у базі немає — «🔄 Оновити з інтернету»."]
+            if ongoing:
+                lines += ["<blockquote expandable><b>Триває:</b>\n" + "\n".join(self.obs_line(r) for r in ongoing[:12]) + "</blockquote>"]
         on = self.store.get("obs_morning") is not False
         cov = self.obs_coverage()
-        lines += ["", f"⏰ Ранкове сповіщення: {self.store.get('obs_time') or '07:30'}" + ("" if on else " (вимкнено)"),
-                  f"📚 Календар із Вікіпедії: {cov}/366 днів року" + (" — завантажується у фоні" if cov < 366 else " ✅")]
-        rows = [[(f"✍️ {r['title'][:30]}", self.cb("ob", r["id"]))] for r in (days + ongoing)[:6]]
-        rows += [[("📅 Сьогодні", self.cb("obt", "day")), ("🗓 Тиждень", self.cb("obt", "week"))],
-                 [("📆 Місяць", self.cb("obt", "month")), ("🎆 Рік", self.cb("obt", "year"))],
-                 [("🗓 Календар", self.cb("obc", d.strftime("%Y%m"))), ("➕ Своя тема", self.cb("oba"))],
-                 [("🔄 Оновити з інтернету", self.cb("obu")), (("⏰ " + (self.store.get("obs_time") or "07:30")) if on else "⏰ вимк.", self.cb("obm"))],
-                 [("« Знайти й написати", self.cb("D"))]]
+        hm = self.store.get("obs_time") or "07:30"
+        lines += [f"⏰ {hm}" + ("" if on else " (вимкнено)") + f" · 📚 Вікіпедія: {cov}/366" + (" — вантажиться" if cov < 366 else " ✅")]
+        open_ = open_ or ""
+        t_open, m_open = "t" in open_, "m" in open_
+        flip = lambda flag: "".join(sorted(set(open_) ^ {flag})) or "-"
+        topics = (days + ongoing)[:8]
+        rows = []
+        if topics:
+            rows.append([(f"✍️ Написати на тему · {len(topics)} {'▾' if t_open else '▸'}", self.cb("obh", flip("t")))])
+            if t_open:
+                rows += [[(f"✍️ {r['title'][:34]}", self.cb("ob", r["id"]))] for r in topics]
+        rows.append([(f"⚙️ Меню {'▾' if m_open else '▸'}", self.cb("obh", flip("m")))])
+        if m_open:
+            rows += [[("📅 Сьогодні", self.cb("obt", "day")), ("🗓 Тиждень", self.cb("obt", "week"))],
+                     [("📆 Місяць", self.cb("obt", "month")), ("🎆 Рік", self.cb("obt", "year"))],
+                     [("🗓 Календар", self.cb("obc", d.strftime("%Y%m"))), ("➕ Своя тема", self.cb("oba"))],
+                     [("🔄 Оновити з інтернету", self.cb("obu")), (("⏰ " + hm) if on else "⏰ вимк.", self.cb("obm"))]]
+        rows.append([("« Знайти й написати", self.cb("D"))])
         return "\n".join(lines)[:4000], rows
 
     def obs_period(self, what):
@@ -400,8 +417,11 @@ class ObservancesUI:
                             await self.prefetch()
                             self.store.set("obs_last_fetch", now.date().isoformat())
                     hm = self.store.get("obs_time") or "07:30"
-                    if self.store.get("obs_morning") is not False and now.strftime("%H:%M") == hm and sent_day != now.date():
+                    today = now.date().isoformat()
+                    if (self.store.get("obs_morning") is not False and now.strftime("%H:%M") == hm and sent_day != now.date()
+                            and self.store.get("obs_sent") != today):  # один раз на день, навіть після перезапуску
                         sent_day = now.date()
+                        self.store.set("obs_sent", today)
                         text, rows = self.obs_home()
                         await self.host.notify_admins("🌅 " + text, rows)
             except asyncio.CancelledError:
@@ -413,7 +433,7 @@ class ObservancesUI:
     # ----- маршрути
     async def obs_route(self, chat, a, x, y):
         if a == "obh":
-            return None, self.obs_home(chat)
+            return None, self.obs_home(chat, "" if x in ("", "-") else x)
         if a == "obt":
             return None, self.obs_period(x)
         if a == "obc":

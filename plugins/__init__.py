@@ -72,7 +72,7 @@ class Host:
             return None
 
     async def notify_admins(self, text, rows=None):
-        for uid in self.admins():
+        for uid in dict.fromkeys(self.admins()):  # той самий ID двічі — одне повідомлення
             await self.notify(uid, text, rows)
 
 
@@ -93,7 +93,8 @@ class Plugin:
 
     def on(self) -> bool:
         """Чи увімкнений плагін зараз (фонові цикли перевіряють це на кожному кроці)."""
-        return self.host.extra.get("enabled", lambda pid: True)(self.id)
+        return (self.host.extra.get("enabled", lambda pid: True)(self.id)
+                and self.host.extra.get("node_active", lambda: True)())
 
     def ask(self, chat, key, data=None):
         """Попросити в користувача текст; відповідь прийде в on_text(…, key, data, text)."""
