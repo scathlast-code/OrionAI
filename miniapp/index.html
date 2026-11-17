@@ -75,7 +75,8 @@ body.marking .cell,body.marking .seg button,body.marking .card{outline:1.5px das
 .bub{cursor:pointer}.acts{max-height:75vh;overflow-y:auto;z-index:9}.act{display:block;width:100%;text-align:left;border:0;background:var(--bg);color:var(--txt);font:inherit;padding:12px 14px;border-radius:12px;margin:5px 0}
 .act.on{background:var(--acc);color:var(--acct)}.act.subact{background:none;font-size:12.5px;opacity:.6;padding:10px 4px 2px;pointer-events:none}.act.cancel{text-align:center;font-weight:600}
 .composer{flex-wrap:wrap;align-items:flex-end}.rq{flex-basis:100%;display:none;margin-bottom:2px;align-items:center;gap:8px;background:var(--card);border-left:3px solid var(--acc);border-radius:8px;padding:6px 8px;font-size:13px}
-.rq span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.rq button{border:0;background:none;color:var(--txt);font-size:15px}
+.rq{box-sizing:border-box;width:100%;max-width:100%;min-width:0}.rq span{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rq button{flex:0 0 auto;border:0;width:30px;height:30px;border-radius:50%;background:var(--bg,rgba(127,127,127,.15));color:var(--txt);font-size:16px;line-height:30px;padding:0}
 .cards{display:flex;flex-direction:column;gap:10px;margin:10px 0}.copycard{background:var(--card);border-radius:14px;padding:10px 12px;user-select:none;-webkit-user-select:none;transition:background .2s}
 .copycard.copied{background:color-mix(in srgb,var(--acc) 22%,var(--card))}.cc-h{display:flex;align-items:center;gap:8px}.cc-h b{flex:1;font-size:14px}
 .cc-b{border:0;border-radius:10px;padding:5px 9px;font:inherit;font-size:12px;background:color-mix(in srgb,var(--acc) 16%,transparent);color:var(--acc);cursor:pointer}
@@ -307,6 +308,7 @@ function drawSections(main,res){
   if(rest.length) drawRows(main,rest,[]);
 }
 function render(res, bare){
+  if(res.poll){const my=seq;setTimeout(async()=>{if(my!==seq)return;const r=await call('screen',res.poll);if(r&&r.text&&my===seq)render(r)},3000)}  // живий стан (завантаження тощо)
   const main=document.getElementById('main'); main.innerHTML=''; main.style.paddingBottom='';
   const comp=document.getElementById('composer'); if(comp) comp.style.display='none'; const mb=document.getElementById('mbar'); if(mb) mb.remove();
   const lines=(res.text||'').split('\n'); const title=lines.shift().replace(/<[^>]+>/g,'').trim();

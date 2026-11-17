@@ -2528,7 +2528,8 @@ PLUGINS = orion_plugins.Registry(orion_plugins.Host(
            "real_bot": lambda: tg_app.bot if tg_app else None, "hubclient": hub,
            "miniapp_url": miniapp_url(),
            "awaiting": lambda chat: chat in AWAIT or CM.wants_text(chat),
-           "node_active": lambda: NODE.active,  # фонові цикли плагінів працюють лише на активному вузлі кластера
+           "node_active": lambda: NODE.active,
+           "in_app": lambda: __import__("miniapp").CAPTURE.get() is not None,  # запит прийшов із Mini App  # фонові цикли плагінів працюють лише на активному вузлі кластера
            "preinvited": lambda user: bool(preinvite_match(user)) and member_status(user.id) != "blocked"},
 ))
 PLUGIN_CTX = {}  # chat -> id плагіна, чий екран відкрито останнім (для запитів тексту)
