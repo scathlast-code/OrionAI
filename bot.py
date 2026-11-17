@@ -3054,6 +3054,29 @@ def scr_mdtest():
     return text[:4000], [[("🔄 Перевірити ще раз", "m:mdtest:go"), ("« Моделі", "m:md")]]
 
 
+def scr_model_info(chat_id, pid):
+    """Картка моделі (торкання аватарки в розмові застосунку): стан, ліміти й налаштування."""
+    if pid not in PROVIDERS:
+        return scr_models(chat_id)
+    cur, mode = get_choice(chat_id), model_mode(chat_id)
+    pool = [p for p in prefs(chat_id).get("auto_pool") or [] if p in PROVIDERS]
+    if mode == "one" and cur == pid:
+        role = "✋ Зараз відповідає лише вона" + (" (🔒 без підміни)" if prefs(chat_id).get("strict_model", False) else " (підміняється, якщо не може)")
+    elif mode == "pool":
+        role = "🎯 У вашому наборі" if pid in pool else "🎯 Режим «обрані» — її в наборі немає"
+    else:
+        role = "🔁 Авто: бот обирає з усіх, вона серед них"
+    text = f"<b>🤖 {esc(PROVIDERS[pid]['title'])}</b>\n{role}\n\n" + provider_report(pid)
+    if paused_until(pid):
+        text += f"\n\n⏸ На паузі до {hhmm(paused_until(pid))} (ще {left(paused_until(pid))})"
+    pick = ("☑️ Прибрати з набору" if pid in pool else "➕ Додати в набір") if mode == "pool" else \
+        ("● Вже відповідає вона" if mode == "one" and cur == pid else "▶️ Відповідає лише вона")
+    rows = [[(pick, f"m:pick:{pid}"), ("🔁 Авто", "m:pick:auto")],
+            [("🔄 Оновити ліміти", f"m:minfo:{pid}"), ("🩺 Перевірити", "m:mdtest")],
+            [("⚙️ Усі моделі й режими", "m:md"), ("ℹ️ Про модель", f"help:m:{pid}")]]
+    return text[:4000], rows
+
+
 def scr_limits(pid=None):
     if pid and pid in PROVIDERS:
         text = "<b>📊 Ліміти</b>\n\n" + provider_report(pid)
@@ -7071,6 +7094,8 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
                     pass
             await models_check()
         screen = scr_mdtest()
+    elif a == "minfo":  # картка моделі з застосунку
+        screen = scr_model_info(chat_id, arg)
     elif a == "lim":
         if q:
             await q.answer("Оновлюю…")
