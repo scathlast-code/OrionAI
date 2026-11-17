@@ -527,8 +527,22 @@ class Plugin(Base):
                     who, link = M.author(info)
                     desc = M.post_text(info)
                     outs = await M.render(path, opts, work, item.engine == "direct") if path else []
-                    cap_tail = f"\n👤 {who}" + (f" · {link}" if link else "") if who else ""
+                    # Опис і автор — у підписі самого файлу (Telegram дозволяє 1024 символи); довший текст — ще й окремо
+                    tail = (f"\n\n👤 {who}" + (f" · {link}" if link else "") if who else "\n") + f"\n🔗 {job.url}"
+                    first = True
                     for out in outs + tracks:
+                        cap = ""
+                        if first:
+                            if opts.post and desc and desc not in shown and opts.target != "zip":
+                                full = desc.strip() + tail
+                                if len(full) <= 1024:
+                                    cap = full
+                                    shown.add(desc)  # уже в підписі — окремим повідомленням не дублюємо
+                                else:
+                                    cap = desc.strip()[:1020 - len(tail)].rstrip() + "…" + tail
+                            else:
+                                cap = tail.strip()
+                            first = False
                         if opts.target == "zip":
                             bundle.append(out)
                             continue
@@ -538,10 +552,10 @@ class Plugin(Base):
 
                         async def on_up(done, total, up=up):
                             await stage(f"{up}\n{bar(done, total)}")
-                        await self.send_doc(chat, out, (f"📎 {out.name} · {mb(size_)}" + cap_tail)[:1000], on_progress=on_up)
+                        await self.send_doc(chat, out, cap[:1024], on_progress=on_up)
                         sent.append(out.name)
                     if opts.post and desc and desc not in shown:
-                        body = f"📝 {info.get('title') or item.title}\n👤 {who or 'автор не вказаний'}" + (f" · {link}" if link else "") + f"\n🔗 {job.url}\n\n{desc}"
+                        body = f"📝 Повний текст допису\n👤 {who or 'автор не вказаний'}" + (f" · {link}" if link else "") + f"\n🔗 {job.url}\n\n{desc}"
                         if opts.target == "zip":
                             note = work / "текст-допису.txt"
                             note.write_text(body, encoding="utf-8")
