@@ -387,19 +387,21 @@ def _best_media(post):
     return None
 
 
-async def threads_probe(url, work):
-    """Threads віддає сторінкою лише обкладинку (og:image), а справжні відео/фото лежать у JSON усередині сторінки."""
-    async with open_url(url, agent=BROWSER) as response:  # /share/… посилання перенаправляє на /@автор/post/КОД
-        match = re.search(r"/post/([A-Za-z0-9_-]+)", urlsplit(str(response.url)).path) or re.search(
-            r"/post/([A-Za-z0-9_-]+)", urlsplit(url).path)
-        code = match[1] if match else None
+async def _grab(url, limit=8_000_000):
+    async with open_url(url, agent=BROWSER) as response:
         content = bytearray()
         async for chunk in response.aiter_bytes(65536):
             content.extend(chunk)
-            if len(content) >= 8_000_000:
+            if len(content) >= limit:
                 break
-    text = bytes(content).decode("utf-8", "replace")
-    post = None
+        return str(response.url), bytes(content).decode("utf-8", "replace")
+
+
+POST_URL = re.compile(r"https?:(?:\\?/){2}(?:www\.)?threads\.(?:net|com)(?:\\?/)@([\w.]+)(?:\\?/)post(?:\\?/)([\w-]+)")
+
+
+def _threads_post(text, code):
+    """Об'єкт допису з JSON усередині сторінки (там, де він є)."""
     for blob in re.findall(r"<script[^>]*type=\"application/json\"[^>]*>(.*?)</script>", text, re.S):
         if (code and code not in blob) or ("video_versions" not in blob and "image_versions2" not in blob):
             continue
@@ -408,30 +410,70 @@ async def threads_probe(url, work):
         except ValueError:
             continue
         for node in _walk(data):
-            if node.get("code") and (code is None or node.get("code") == code) and ("image_versions2" in node or "video_versions" in node or "carousel_media" in node):
-                post = node
-                break
-        if post:
-            break
-    if not post:
-        return []
-    caption = post.get("caption") or {}
-    user = post.get("user") or {}
-    info = {
-        "title": (caption.get("text") if isinstance(caption, dict) else "") or f"Threads {post.get('code', '')}",
-        "description": caption.get("text") if isinstance(caption, dict) else "",
-        "author": user.get("username") or "",
-        "author_url": f"https://www.threads.com/@{user['username']}" if user.get("username") else "",
-    }
-    info["title"] = info["title"][:80]
-    parts = post.get("carousel_media") or [post]
-    items = []
-    for number, part in enumerate(parts, 1):
-        found = _best_media(part) if isinstance(part, dict) else None
-        if found:
-            address, ext = found
-            items.append(Item("direct", address, {**info, "filename": f"threads-{post.get('code', 'post')}-{number}{ext}"}))
-    return items or ([Item("text", url, info)] if info["description"] else [])
+            if node.get("code") and (code is None or node.get("code") == code) and (
+                    "image_versions2" in node or "video_versions" in node or "carousel_media" in node):
+                return node
+    return None
+
+
+def _embed_media(text, base):
+    """Сторінка /embed: звичайний HTML з <video> і великими фото (без аватарок)."""
+    doc = read_html(text.encode("utf-8"))
+    links = []
+    for node in doc.xpath("//video[@src] | //video/source[@src]"):
+        links.append((urljoin(base, node.get("src")), ".mp4"))
+    if not links:
+        for node in doc.xpath("//img[@src]"):
+            src = node.get("src") or ""
+            if re.search(r"cdninstagram|fbcdn", src) and not re.search(r"s150x150|_s\d{2,3}x\d{2,3}|profile", src) \
+                    and "Avatar" not in (node.get("class") or "") and "profile" not in (node.get("alt") or "").lower():
+                links.append((urljoin(base, src), ".jpg"))
+    for address in re.findall(r"\"video_url\":\"([^\"]+)\"", text):
+        try:
+            links.append((json.loads(f'"{address}"'), ".mp4"))
+        except ValueError:
+            pass
+    return list(dict.fromkeys(links))
+
+
+async def threads_probe(url, work):
+    """Threads: відео/фото з JSON сторінки, а якщо сервер його не отримав — зі сторінки вбудовування /embed."""
+    final, text = await _grab(url)  # /share/… перенаправляє на /@автор/post/КОД
+    match = POST_URL.search(final) or POST_URL.search(url) or POST_URL.search(text)
+    user, code = (match[1], match[2]) if match else ("", None)
+    meta = {(t.get("property") or t.get("name") or "").lower(): t.get("content")
+            for t in read_html(text.encode("utf-8")).xpath("//meta[@content]")}
+    info = {"title": (meta.get("og:title") or f"Threads {code or ''}")[:80],
+            "description": meta.get("og:description") or "",
+            "author": user, "author_url": f"https://www.threads.com/@{user}" if user else ""}
+    post = _threads_post(text, code)
+    if post:
+        caption = post.get("caption") or {}
+        if isinstance(caption, dict) and caption.get("text"):
+            info["description"] = caption["text"]
+        items = []
+        for part in post.get("carousel_media") or [post]:
+            found = _best_media(part) if isinstance(part, dict) else None
+            if found:
+                items.append(Item("direct", found[0], dict(info)))
+        if items:
+            return items
+    embed_note = "немає адреси допису"
+    if code and user:
+        try:
+            efinal, etext = await _grab(f"https://www.threads.com/@{user}/post/{code}/embed", 3_000_000)
+            links = _embed_media(etext, efinal)
+            if not links:
+                epost = _threads_post(etext, code)
+                if epost:
+                    links = [f for f in (_best_media(p) for p in (epost.get("carousel_media") or [epost])
+                                          if isinstance(p, dict)) if f]
+            if links:
+                return [Item("direct", address, dict(info)) for address, _ in links]
+            embed_note = f"embed {len(etext) // 1024} КБ без медіа"
+        except (JobError, httpx.HTTPError) as exc:
+            embed_note = f"embed: {str(exc)[:80]}"
+    raise JobError(f"threads · сторінка {len(text) // 1024} КБ, допис {code or '?'}, {embed_note}")
 
 
 async def inspect_link(url, work):
@@ -466,9 +508,11 @@ async def inspect_link(url, work):
             continue  # лише заголовок і обкладинка сторінки — для відеосайту це не результат
         if items:
             return items
-    if domain_matches(host, ("threads.net", "threads.com")) and not cookie_file(url):
-        raise JobError("Threads віддав серверу лише обкладинку, без самого відео — для цього допису потрібен вхід. "
-                       "🍪 Додайте cookies threads у «Входи на сайти».")
+    if domain_matches(host, ("threads.net", "threads.com")):
+        detail = next((e[1] for e in errors if e[0] == "threads_probe"), "")
+        raise JobError("Threads не віддав серверу саме відео, лише обкладинку."
+                       + ("" if cookie_file(url) else " Якщо допис відкривається лише після входу — 🍪 додайте cookies threads у «Входи на сайти».")
+                       + (f"\n\n<i>Технічно: {html_escape(detail)}</i>" if detail else ""))
     # Найзмістовніша причина — від yt-dlp (він знає сайти), далі gallery-dl, далі сторінка.
     order = {"video_probe": 0, "gallery_probe": 1, "page_probe": 2}
     errors.sort(key=lambda e: order.get(e[0], 3))
