@@ -559,7 +559,9 @@ class Plugin(Base):
                     raise
                 except Exception as exc:  # noqa: BLE001
                     log.exception("media item failed")
-                    failed.append(f"{n} · {esc(type(exc).__name__)}")
+                    code = getattr(getattr(exc, "response", None), "status_code", None)
+                    failed.append(f"{n} · " + (f"сайт не віддав файл (HTTP {code}) — спробуйте ще раз або інший формат"
+                                               if code else esc(type(exc).__name__)))
             if bundle:
                 pack = root / (safe_name(job.items[nums[0] - 1].title, "media")[:60] + ".zip")
                 with zipfile.ZipFile(pack, "w", zipfile.ZIP_STORED) as z:
