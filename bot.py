@@ -2510,6 +2510,8 @@ async def _plugin_chat_answer(chat_id, text):
         await tg_app.bot.send_message(chat_id, (reply or "")[:4096])
 
 
+APP_MEDIA = {}  # uid -> [{"name","url","size","kind"}] — показати в Mini App після завантаження
+
 PLUGINS = orion_plugins.Registry(orion_plugins.Host(
     data_dir=Path(os.path.dirname(DB_PATH) or "."),
     token=TELEGRAM_TOKEN,
@@ -2529,6 +2531,7 @@ PLUGINS = orion_plugins.Registry(orion_plugins.Host(
            "miniapp_url": miniapp_url(),
            "awaiting": lambda chat: chat in AWAIT or CM.wants_text(chat),
            "node_active": lambda: NODE.active,
+           "app_media": APP_MEDIA,  # 📥 файли, які застосунок покаже плеєром
            "in_app": lambda: __import__("miniapp").CAPTURE.get() is not None,  # запит прийшов із Mini App  # фонові цикли плагінів працюють лише на активному вузлі кластера
            "preinvited": lambda user: bool(preinvite_match(user)) and member_status(user.id) != "blocked"},
 ))
@@ -9965,6 +9968,17 @@ async def main():
     app.router.routes.append(_Route("/{code:str}", _short_redirect, methods=["GET", "HEAD", "POST"]))  # власний домен: домен/код
     app.router.routes.insert(0, _Route("/app", _app_page, methods=["GET"]))
     app.router.routes.insert(0, _Route("/app/api", _app_api, methods=["POST"]))
+
+    async def _app_file(request):  # 📥 завантажене відео/фото для перегляду в застосунку (посилання-токен, живе 3 год)
+        from starlette.responses import FileResponse
+        token, name = request.path_params["token"], request.path_params["name"]
+        if not re.fullmatch(r"[A-Za-z0-9_-]{8,40}", token) or "/" in name or name.startswith("."):
+            return _Resp(status_code=404)
+        path = Path(os.path.dirname(DB_PATH) or ".") / "plugins" / "med" / "served" / token / name
+        if not path.is_file():
+            return _HTML("<h3>Файл уже прибрано — він зберігається 3 години. Він є в чаті з ботом.</h3>", status_code=404)
+        return FileResponse(path, filename=name, content_disposition_type="inline")
+    app.router.routes.insert(0, _Route("/app/file/{token}/{name}", _app_file, methods=["GET", "HEAD"]))
     app.router.routes.insert(0, _Route("/sandbox", _sandbox_page, methods=["GET"]))
     app.router.routes.insert(0, _Route("/sandbox/stat", _sandbox_stat, methods=["POST"]))
     server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="info"))

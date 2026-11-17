@@ -128,13 +128,13 @@ function split(label){
   let icon=m?m[1]:'', rest=m?label.slice(m[0].length):label, badge='';
   const b=rest.match(/\s·\s*(\d+)$/); if(b){badge=b[1];rest=rest.slice(0,b.index)}
   return {icon,rest,badge}}
-async function call(op, data, extra){
+async function call(op, data, extra, quiet){
   if(!init){render({text:'<b>Відкрийте з Telegram</b>\nЗастосунок працює всередині бота: синя кнопка ліворуч від поля вводу або ⚙️ → 📱 Чат і застосунок.',rows:[]},true);return null}
   busy=true;
   try{const r=await fetch(API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({initData:init,op,data},extra||{}))});
     if(r.status===403){render({text:'<b>Немає доступу</b>\nЦей застосунок відкривається лише для учасників бота.\nЯкщо вас запросили — поверніться в чат із ботом і натисніть «✅ Згоден(-на)», потім відкрийте застосунок знову.',rows:[]},true);return null}
-    if(!r.ok){toast('Помилка API: HTTP '+r.status);return null}
-    return await r.json()}catch(e){toast(e instanceof SyntaxError?'Некоректна відповідь сервера':'Сервер API недоступний');return null}finally{busy=false}}
+    if(!r.ok){if(!quiet)toast('Помилка API: HTTP '+r.status);return null}
+    return await r.json()}catch(e){if(!quiet)toast(e instanceof SyntaxError?'Некоректна відповідь сервера':'Сервер API недоступний');return null}finally{busy=false}}
 function loading(){const m=document.getElementById('main');m.innerHTML='<div class="skel"></div><div class="skel"></div><div class="skel"></div>';const c=document.getElementById('composer');if(c)c.style.display='none';const mb=document.getElementById('mbar');if(mb)mb.remove()}
 async function open_(data, push=true){
   if(data==='m:home'||data==='m:nav:home') return openMenu(push);
@@ -308,8 +308,23 @@ function drawSections(main,res){
   const rest=(res.rows||[]).map(r=>r.filter(([t,d])=>!used.has(d)&&d!=='m:noop')).filter(r=>r.length);
   if(rest.length) drawRows(main,rest,[]);
 }
+function drawMedia(main,list){  // 📥 завантажене: плеєр / фото / аудіо + «Зберегти»
+  for(const f of list){const box=document.createElement('div');box.className='mcard';
+    const abs=new URL(f.url,location.href).href;let el;
+    if(f.kind==='video'){el=document.createElement('video');el.controls=true;el.playsInline=true;el.preload='metadata';el.src=f.url}
+    else if(f.kind==='image'){el=document.createElement('img');el.src=f.url;el.loading='lazy'}
+    else if(f.kind==='audio'){el=document.createElement('audio');el.controls=true;el.src=f.url}
+    if(el){el.style.cssText='width:100%;max-height:70vh;border-radius:12px;background:#000;display:block';box.appendChild(el)}
+    const row=document.createElement('div');row.style.cssText='display:flex;gap:8px;align-items:center;margin-top:6px';
+    const nm=document.createElement('small');nm.style.cssText='flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.7';
+    nm.textContent=f.name+' · '+(f.size/1048576).toFixed(1)+' МБ';
+    const sv=document.createElement('button');sv.className='btn';sv.textContent='⬇️ Зберегти';
+    sv.onclick=()=>{haptic();try{TG.openLink(abs)}catch(_){window.open(abs,'_blank')}};
+    row.append(nm,sv);box.appendChild(row);box.style.cssText='margin:10px 0';main.appendChild(box)}}
+let pollFails=0;
 function render(res, bare){
-  if(res.poll){const my=seq;setTimeout(async()=>{if(my!==seq)return;const r=await call('screen',res.poll);if(r&&r.text&&my===seq)render(r)},3000)}  // живий стан (завантаження тощо)
+  if(res.poll){const my=seq;setTimeout(async function tick(){if(my!==seq)return;const r=await call('screen',res.poll,null,true);
+    if(my!==seq)return;if(r&&r.text){pollFails=0;render(r)}else if(++pollFails<40){setTimeout(tick,5000)}},3000)}  // живий стан; збій (502 під час перезапуску) — пробуємо далі
   const main=document.getElementById('main'); main.innerHTML=''; main.style.paddingBottom='';
   const comp=document.getElementById('composer'); if(comp) comp.style.display='none'; const mb=document.getElementById('mbar'); if(mb) mb.remove();
   const lines=(res.text||'').split('\n'); const title=lines.shift().replace(/<[^>]+>/g,'').trim();
@@ -324,6 +339,7 @@ function render(res, bare){
   if(sub){const s=document.createElement('div');s.className='sub';s.innerHTML=sanitize(sub);main.appendChild(s)}
   if(res.sections&&res.sections.length) rest='';
   if(res.cards&&res.cards.length){rest='';drawCards(main,res.cards)}
+  if(res.media&&res.media.length)drawMedia(main,res.media);
   if(rest.trim()){const c=document.createElement('div');c.className='card';c.innerHTML=sanitize(rest.trim());c.onclick=()=>{if(marking)mark('текст екрана','',c.textContent)};main.appendChild(c)}
   for(const n of res.notes||[]){const d=document.createElement('div');d.className='notes';d.innerHTML='<div></div>';d.firstChild.textContent=n;main.appendChild(d)}
   if(res.sections&&res.sections.length){drawSections(main,res);}

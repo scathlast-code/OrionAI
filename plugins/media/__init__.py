@@ -15,6 +15,8 @@ import logging
 import re
 import secrets
 import shutil
+import time
+from urllib.parse import quote
 import tempfile
 import zipfile
 from dataclasses import dataclass, field, replace
@@ -92,7 +94,8 @@ class Plugin(Base):
         self.armed: dict[int, str] = {}       # чат -> "clean" | "cookie:<сайт>": чекаємо файл
         self.tasks: dict[int, asyncio.Task] = {}
         self.offers: dict[str, tuple[int, str]] = {}
-        self.live: dict[int, tuple[str, list]] = {}  # чат -> останній стан швидкого завантаження (для Mini App)
+        self.live: dict[int, tuple[str, list]] = {}
+        self.got: dict[int, list] = {}  # чат -> файли останнього завантаження (для перегляду в Mini App)  # чат -> останній стан швидкого завантаження (для Mini App)
         self.big = Big(self.dir, host.token)  # 🚀 файли до 2 ГБ через MTProto
         self.commands = [("media", self.cmd_media, "Медіа: завантажити за посиланням")]
 
@@ -422,6 +425,39 @@ class Plugin(Base):
     def in_app(self):
         return self.host.extra.get("in_app", lambda: False)()
 
+    SERVE_HOURS = 3
+    SERVE_MAX = 3 * 1024 ** 3
+
+    def keep(self, path):
+        """Файл після надсилання в чат — ще на кілька годин доступний у Mini App (/app/file/<токен>/<назва>)."""
+        root = self.dir / "served"
+        root.mkdir(exist_ok=True)
+        dirs = sorted((d for d in root.iterdir() if d.is_dir()), key=lambda d: d.stat().st_mtime)
+        total = 0
+        for d in dirs:
+            size = sum(f.stat().st_size for f in d.iterdir() if f.is_file())
+            if time.time() - d.stat().st_mtime > self.SERVE_HOURS * 3600:
+                shutil.rmtree(d, ignore_errors=True)
+            else:
+                total += size
+        while dirs and total + path.stat().st_size > self.SERVE_MAX:  # місце — старші йдуть першими
+            d = dirs.pop(0)
+            if d.exists():
+                total -= sum(f.stat().st_size for f in d.iterdir() if f.is_file())
+                shutil.rmtree(d, ignore_errors=True)
+        token = secrets.token_urlsafe(12)
+        dest = root / token
+        dest.mkdir()
+        name = safe_name(path.name, "media")
+        try:
+            shutil.move(str(path), str(dest / name))
+        except OSError:
+            return None
+        ext = Path(name).suffix.lower()
+        kind = ("video" if ext in (".mp4", ".mov", ".webm", ".m4v") else "image" if ext in (".jpg", ".jpeg", ".png", ".gif", ".webp")
+                else "audio" if ext in (".mp3", ".m4a", ".ogg", ".opus", ".wav", ".aac") else "file")
+        return {"name": name, "url": f"/app/file/{token}/{quote(name)}", "size": (dest / name).stat().st_size, "kind": kind}
+
     def live_screen(self, chat):
         """Стан для Mini App: поки триває — «🔄 Оновити стан» (застосунок натискає її сам кожні 3 с)."""
         text, rows = self.live.get(chat) or ("Активного завантаження немає.", [])
@@ -429,7 +465,11 @@ class Plugin(Base):
             return (text + "\n\n<i>📲 Готові файли приходять у чат з ботом.</i>",
                     [[("🔄 Оновити стан", self.cb("st")), ("⏹ Зупинити", self.cb("stop"))], [("« Медіа", self.cb())]])
         rows = [r for r in (rows or []) if r] or [[("« Медіа", self.cb())]]
-        tail = "\n\n<i>📲 Файли — у чаті з ботом.</i>" if text.startswith(("✅", "📝")) else ""
+        files = self.got.get(chat) or []
+        if files:  # застосунок покаже плеєр / фото й кнопку «Зберегти»
+            self.host.extra.get("app_media", {})[chat] = files
+        tail = ("\n\n<i>📲 Ті самі файли — і в чаті з ботом.</i>" if files else "\n\n<i>📲 Файли — у чаті з ботом.</i>") \
+            if text.startswith(("✅", "📝")) else ""
         return text + tail, [[("🔗 Ще посилання", self.cb("url"))]] + rows
 
     def _markup(self, rows):
@@ -495,6 +535,7 @@ class Plugin(Base):
         bot = self.host.bot()
         opts = replace(job.options)
         sent, failed, shown, bundle = [], [], set(), []
+        self.got[chat] = []
         quick = status is not None
         title = job.items[nums[0] - 1].title if len(nums) == 1 else f"{len(nums)} елементів"
         stop = [[("⏹ Зупинити", self.cb("stop"))]]
@@ -554,6 +595,9 @@ class Plugin(Base):
                             await stage(f"{up}\n{bar(done, total)}")
                         await self.send_doc(chat, out, cap[:1024], on_progress=on_up)
                         sent.append(out.name)
+                        kept = self.keep(out)
+                        if kept:
+                            self.got[chat].append(kept)
                     if opts.post and desc and desc not in shown:
                         body = f"📝 Повний текст допису\n👤 {who or 'автор не вказаний'}" + (f" · {link}" if link else "") + f"\n🔗 {job.url}\n\n{desc}"
                         if opts.target == "zip":
@@ -588,6 +632,9 @@ class Plugin(Base):
                 try:
                     await self.send_doc(chat, pack, f"📦 {len(bundle)} файл(ів) · {mb(pack.stat().st_size)}")
                     sent.append(pack.name)
+                    kept = self.keep(pack)
+                    if kept:
+                        self.got[chat].append(kept)
                 except JobError as exc:
                     failed.append(f"ZIP · {esc(str(exc))}")
         if sent and not failed:
