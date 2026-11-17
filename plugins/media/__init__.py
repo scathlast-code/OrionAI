@@ -420,6 +420,7 @@ class Plugin(Base):
         stop = [[("⏹ Зупинити", self.cb("stop"))]]
         status = await self._status(chat, None, "🔎 Шукаю відео за посиланням…", stop)
         try:
+            url = await M.resolve_share(url)
             with tempfile.TemporaryDirectory(prefix="orion-media-") as work:
                 items = await M.inspect_link(url, Path(work))
         except M.URLDenied as exc:
@@ -447,6 +448,7 @@ class Plugin(Base):
         return "🔎 Шукаю медіа…", ("🔎 Шукаю відкриті медіа й текст допису — це може тривати до хвилини.", [[("⏹ Зупинити", self.cb("stop"))]])
 
     async def inspect(self, chat, url):
+        url = await M.resolve_share(url)
         with tempfile.TemporaryDirectory(prefix="orion-media-") as work:
             items = await M.inspect_link(url, Path(work))
         self.jobs[chat] = Job(secrets.token_hex(4), url, items[:300])

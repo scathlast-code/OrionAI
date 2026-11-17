@@ -534,6 +534,24 @@ async def tumblr_probe(url, work):
     raise JobError("tumblr · " + "; ".join(notes))
 
 
+SHARE = re.compile(r"^https?://(?:(?:www|m|web)\.)?(?:facebook\.com/(?:share|story\.php|watch/?\?)|fb\.watch/|vm\.tiktok\.com/|vt\.tiktok\.com/|pin\.it/)")
+
+
+async def resolve_share(url):
+    """Короткі посилання «Поділитися» (facebook.com/share/…, fb.watch, vm.tiktok…) → справжня адреса допису,
+    бо завантажувачі їх не розпізнають. Якщо сайт веде на сторінку входу — лишаємо як було."""
+    if not SHARE.match(url):
+        return url
+    try:
+        async with open_url(url, agent=BROWSER) as response:
+            final = str(response.url)
+    except (JobError, httpx.HTTPError, OSError):
+        return url
+    if re.search(r"/login|/checkpoint|login\.php", final):
+        return url
+    return final
+
+
 async def inspect_link(url, work):
     await check_url(url)
     parsed = urlsplit(url)
@@ -620,6 +638,8 @@ async def fetch(item, source, options, work):
         selector = f"bv{height}+ba{language}/b{height}{language}"
         if not language:
             selector += f"/bv{height}"
+        if height:  # у Facebook та ін. формати часто без висоти — тоді фільтр відсіює все; беремо найкраще, що є
+            selector += f"/bv*+ba{language}/b{language}" + ("" if language else "/bv*")
         convert = []
     entry = (
         ["--yes-playlist", "--playlist-items", str(item.index)]
