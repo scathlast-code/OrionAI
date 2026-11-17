@@ -115,7 +115,8 @@ class Plugin(Base):
             rows.insert(0, [("⏹ Зупинити завдання", self.cb("stop"))])
         if chat in self.jobs:
             rows.insert(1, [("📋 Останній знайдений набір", self.cb("menu", self.jobs[chat].token))])
-        rows += [[("🍪 Входи на сайти (cookies)", self.cb("ck")), ("🛠 Інструменти", self.cb("tools"))]]
+        rows += [[("🍪 Входи на сайти (cookies)", self.cb("ck")), ("🛠 Інструменти", self.cb("tools"))],
+                 [("🩺 Перевірити, які сайти працюють", self.cb("chk"))]]
         return t, rows
 
     def job_screen(self, chat):
@@ -184,7 +185,8 @@ class Plugin(Base):
                     lines.append(f"{tool}: версія {(await run(tool, '--version', timeout=20)).strip()[:20]}")
                 except JobError:
                     pass
-        rows = [[("🔄 Оновити yt-dlp і gallery-dl", self.cb("upd"))]] if self.host.is_admin(chat) else []
+        rows = [[("🩺 Перевірити сайти", self.cb("chk"))]]
+        rows += [[("🔄 Оновити yt-dlp і gallery-dl", self.cb("upd"))]] if self.host.is_admin(chat) else []
         rows.append([("« Медіа", self.cb())])
         lines.append("\nСайти часто змінюються — якщо щось перестало завантажуватись, оновіть завантажувачі.")
         return "\n".join(lines), rows
@@ -216,6 +218,12 @@ class Plugin(Base):
             return "🗑 Видалено", self.cookies_screen(chat)
         if a == "tools":
             return None, await self.tools_screen(chat)
+        if a == "chk":
+            if self.busy(chat):
+                return "⏳ Попереднє завдання ще триває", None
+            self.live[chat] = ("🩺 Перевіряю сайти…", [])
+            self._bg(chat, self.check_sites(chat))
+            return "🩺 Перевіряю…", (self.live_screen(chat) if self.in_app() else None)
         if a == "upd" and self.host.is_admin(chat):
             self._bg(chat, self.update_tools(chat))
             return "🔄 Оновлюю…", None
@@ -761,6 +769,57 @@ class Plugin(Base):
         rep.write_text(body, encoding="utf-8")
         with rep.open("rb") as fh:
             await self.host.bot().send_document(chat, fh, filename=rep.name)
+
+    SITES = (("YouTube", "Youtube"), ("TikTok", "TikTok"), ("Instagram", "Instagram"), ("Facebook", "Facebook"),
+             ("X / Twitter", "Twitter"), ("Reddit", "Reddit"), ("Vimeo", "Vimeo"), ("Dailymotion", "Dailymotion"),
+             ("SoundCloud", "Soundcloud"), ("Twitch (кліпи)", "TwitchClips"), ("Pinterest", "Pinterest"), ("Bluesky", "Bluesky"),
+             ("Tumblr", "Tumblr"), ("Rumble", "Rumble"), ("VK", "VK"), ("Snapchat", "SnapchatSpotlight"), ("Likee", "Likee"),
+             ("Imgur", "Imgur"), ("Telegram (відкриті канали)", "TelegramEmbed"), ("Bilibili", "BiliBili"), ("Coub", "Coub"),
+             ("Streamable", "Streamable"), ("LinkedIn", "LinkedIn"))
+
+    async def check_sites(self, chat):
+        """🩺 Справжня перевірка з сервера: для кожного сайту — пошук медіа за тестовими посиланнями самого yt-dlp."""
+        try:
+            import yt_dlp.extractor as E
+        except Exception:  # noqa: BLE001
+            E = None
+        status = await self._status(chat, None, "🩺 Перевіряю сайти з сервера… (1–3 хв)", [[("⏹ Зупинити", self.cb("stop"))]])
+        sem = asyncio.Semaphore(4)
+        results = {}
+
+        async def one(title, ie):
+            cls = getattr(E, ie + "IE", None) if E else None
+            urls = [t.get("url") for t in (cls.get_testcases(False) if cls else []) if t.get("url")][:2]
+            if not urls:
+                results[title] = ("➖", "немає тестового посилання")
+                return
+            last = ""
+            for url in urls:
+                async with sem:
+                    try:
+                        with tempfile.TemporaryDirectory(prefix="orion-chk-") as work:
+                            items = await asyncio.wait_for(M.inspect_link(url, Path(work)), 120)
+                        real = [i for i in items if i.engine != "text" and not i.info.get("preview")]
+                        if real:
+                            results[title] = ("✅", f"знайдено: {len(real)}")
+                            return
+                        last = "лише текст / обкладинка"
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:  # noqa: BLE001
+                        last = re.sub(r"<[^>]+>", "", str(exc)).split("\n")[0][:90] or type(exc).__name__
+            results[title] = ("❌", last)
+
+        await asyncio.gather(*(one(t, ie) for t, ie in self.SITES))
+        lines = ["🩺 <b>Перевірка сайтів із сервера</b>", ""]
+        for title, _ in self.SITES:
+            mark, note = results.get(title, ("❔", ""))
+            lines.append(f"{mark} {esc(title)}" + (f" — <i>{esc(note)}</i>" if mark != "✅" else ""))
+        lines += ["", "<blockquote expandable>ℹ️ Як читати\nПеревірка — за прикладами з тестів yt-dlp; деякі з них давно видалені, "
+                  "тож ❌ «недоступне» ще не означає, що сайт не працює — краще перевірити своїм посиланням. "
+                  "Threads і сторіс (Instagram, Facebook, TikTok) тут не перевіряються: сторіс зникають за добу. "
+                  "Сторіс Instagram і Facebook потребують APIFY_TOKEN; YouTube блокує сервери — потрібен MEDIA_PROXY.</blockquote>"]
+        await self._status(chat, status, "\n".join(lines)[:4000], [[("🔁 Ще раз", self.cb("chk")), ("« Медіа", self.cb())]])
 
     async def update_tools(self, chat):
         import sys
