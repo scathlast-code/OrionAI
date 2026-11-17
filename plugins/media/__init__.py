@@ -34,6 +34,7 @@ LIVE = (60, 180, 300)
 MEDIA_HOSTS = ("youtube.com", "youtu.be", "instagram.com", "tiktok.com", "facebook.com", "fb.watch", "threads.net",
                "threads.com", "x.com", "twitter.com", "vimeo.com", "reddit.com", "pinterest.com", "pin.it", "twitch.tv",
                "dailymotion.com", "soundcloud.com", "tumblr.com", "likee.video", "snapchat.com", "rumble.com", "bsky.app")
+QUICK_MAX = 10  # стільки елементів (альбом, карусель) завантажуємо одразу, без меню
 URL_ONLY = re.compile(r"^\s*(https?://\S+)\s*$")
 
 
@@ -87,7 +88,8 @@ class Plugin(Base):
     def home(self, chat):
         busy = self.busy(chat)
         t = ("📥 <b>Медіа</b>\n<blockquote expandable>ℹ️ Що вміє\n" + esc(self.summary) +
-             "\n\nПосилання можна просто надіслати в чат — якщо це відео з відомого сайту, бот запропонує завантажити."
+             "\n\nПосилання можна просто надіслати в чат — бот одразу завантажить відео (до 1080p) і надішле файл. "
+             "Інший формат (MP3, якість, субтитри, таймкоди) — кнопкою під готовим файлом."
              "\n" + ("🚀 Великі файли — до 2 ГБ (пряме з'єднання з Telegram увімкнено)." if self.big.ready() else
                      "⚠️ Без TELEGRAM_API_ID і TELEGRAM_API_HASH у Railway бот надсилає лише до 50 МБ і приймає до 20 МБ; "
                      "з ними — до 2 ГБ (як інші боти-завантажувачі). Ключі: my.telegram.org → API development tools.") + "</blockquote>")
@@ -208,9 +210,11 @@ class Plugin(Base):
                 task.cancel()
                 return "⏹ Зупиняю", self.home(chat)
             return "Активного завдання немає", self.home(chat)
-        if a == "off" and x in self.offers:
+        if a == "off" and x in self.offers:  # старі кнопки «Знайти й завантажити» з попередньої версії
             c, url = self.offers.pop(x)
-            return self.start_inspect(chat, url)
+            return self.start_quick(chat, url) or "🔎 Шукаю…", None
+        if a == "re" and x in self.offers:  # 🔁 повторити після помилки
+            return self.start_quick(chat, self.offers[x][1]) or "🔎 Шукаю…", None
         if a == "cl" and chat in self.pending and self.pending[chat].token == x:
             p = self.pending.pop(chat)
             if y != "yes":
@@ -262,7 +266,7 @@ class Plugin(Base):
             if not m:
                 self.ask(chat, "url")
                 return "Не бачу посилання", ("⚠️ Потрібне посилання, що починається з https://", [[("✖️ Скасувати", "m:cancel")]])
-            return self.start_inspect(chat, m[0].rstrip(").,]»"))
+            return self.start_quick(chat, m[0].rstrip(").,]»")), None
         job = self.jobs.get(chat)
         if not job or job.token != data:
             return "Меню застаріло", self.home(chat)
@@ -302,14 +306,16 @@ class Plugin(Base):
         chat = update.effective_chat.id
         arg = (update.message.text or "").partition(" ")[2].strip()
         if arg.startswith("http"):
-            toast, screen = self.start_inspect(chat, arg)
-            return await update.message.reply_text(toast)
+            toast = self.start_quick(chat, arg)
+            if toast:
+                await update.message.reply_text(toast)
+            return
         t, rows = self.home(chat)
         await self.host.notify(chat, t, rows)
 
     # ================================================================ посилання в чаті
     async def intercept(self, update, ctx):
-        """Повідомлення лише з посиланням на відомий відеосайт — пропонуємо завантажити (питання з посиланням іде до ШІ)."""
+        """Повідомлення лише з посиланням на відомий відеосайт — одразу завантажуємо (питання з посиланням іде до ШІ)."""
         msg = update.message
         if not msg or msg.chat.type != "private" or not msg.text:
             return False
@@ -319,10 +325,9 @@ class Plugin(Base):
         host = (M.urlsplit(m[1]).hostname or "").lower()
         if not M.domain_matches(host, MEDIA_HOSTS):
             return False
-        t = secrets.token_hex(4)
-        self.offers[t] = (msg.chat_id, m[1])
-        await self.host.notify(msg.chat_id, "📥 Це посилання на медіа. Завантажити?\n<i>Щоб поговорити з ШІ про нього — напишіть питання разом із посиланням.</i>",
-                               [[("📥 Знайти й завантажити", self.cb("off", t))]])
+        toast = self.start_quick(msg.chat_id, m[1])
+        if toast:
+            await msg.reply_text(toast)
         return True
 
     async def on_file(self, update, ctx):
@@ -388,6 +393,53 @@ class Plugin(Base):
         task = asyncio.get_running_loop().create_task(wrap())
         self.tasks[chat] = task
 
+    # ---------------------------------------------------------------- 1 крок: посилання → файл
+    def start_quick(self, chat, url):
+        """Повертає текст лише якщо почати не можна; інакше все показує саме повідомлення-статус."""
+        if self.busy(chat):
+            return "⏳ Ще завантажую попереднє — дочекайтесь або зупиніть: /media"
+        self._bg(chat, self.quick(chat, url))
+        return None
+
+    def _markup(self, rows):
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        return InlineKeyboardMarkup([[InlineKeyboardButton(t, callback_data=d) for t, d in row] for row in rows]) if rows else None
+
+    async def _status(self, chat, msg, text, rows=None):
+        """Одне повідомлення, що оновлюється: 🔎 → ⬇️ → ✅/⚠️."""
+        if msg:
+            try:
+                await self.host.bot().edit_message_text(text[:4096], chat_id=chat, message_id=msg.message_id, parse_mode="HTML",
+                                                        reply_markup=self._markup(rows), disable_web_page_preview=True)
+                return msg
+            except Exception:  # noqa: BLE001
+                pass
+        return await self.host.notify(chat, text, rows) or msg
+
+    async def quick(self, chat, url):
+        stop = [[("⏹ Зупинити", self.cb("stop"))]]
+        status = await self._status(chat, None, "🔎 Шукаю відео за посиланням…", stop)
+        try:
+            with tempfile.TemporaryDirectory(prefix="orion-media-") as work:
+                items = await M.inspect_link(url, Path(work))
+        except M.URLDenied as exc:
+            await self._status(chat, status, f"⚠️ {esc(str(exc))}")
+            return
+        except JobError as exc:
+            t = secrets.token_hex(4)
+            self.offers[t] = (chat, url)
+            await self._status(chat, status, f"⚠️ <b>Не вийшло завантажити</b>\n\n{exc}"[:4000],
+                               [[("🔁 Спробувати ще раз", self.cb("re", t))], [("🍪 Входи на сайти", self.cb("ck")), ("« Медіа", self.cb())]])
+            return
+        job = Job(secrets.token_hex(4), url, items[:300])
+        job.options.height = 1080  # швидкий режим: до 1080p, щоб не впертись у межу Telegram
+        self.jobs[chat] = job
+        if len(job.items) > QUICK_MAX:  # плейлист чи канал — тут без вибору ніяк
+            t, rows = self.job_screen(chat)
+            await self._status(chat, status, f"📋 Тут {len(job.items)} елементів — виберіть, що завантажити.\n\n" + t, rows)
+            return
+        await self.download(chat, job, list(range(1, len(job.items) + 1)), status=status)
+
     def start_inspect(self, chat, url):
         if self.busy(chat):
             return "⏳ Попереднє завдання ще триває", None
@@ -401,11 +453,13 @@ class Plugin(Base):
         t, rows = self.job_screen(chat)
         await self.host.notify(chat, t, rows)
 
-    async def download(self, chat, job, nums):
+    async def download(self, chat, job, nums, status=None):
         bot = self.host.bot()
         opts = replace(job.options)
         sent, failed, shown, bundle = [], [], set(), []
-        await self.host.notify(chat, f"📥 В обробці: {len(nums)}", [[("⏹ Зупинити", self.cb("stop"))]])
+        quick = status is not None
+        title = job.items[nums[0] - 1].title if len(nums) == 1 else f"{len(nums)} елементів"
+        status = await self._status(chat, status, f"⬇️ Завантажую: {esc(title[:100])}…", [[("⏹ Зупинити", self.cb("stop"))]])
         with tempfile.TemporaryDirectory(prefix="orion-media-") as root:
             root = Path(root)
             for n in nums:
@@ -442,12 +496,12 @@ class Plugin(Base):
                     if path is None and not desc:
                         failed.append(f"{n} · лише текст, а його вимкнено")
                 except JobError as exc:
-                    failed.append(f"{n} · {exc}")
+                    failed.append(f"{n} · {M.explain(exc)}")
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001
                     log.exception("media item failed")
-                    failed.append(f"{n} · {type(exc).__name__}")
+                    failed.append(f"{n} · {esc(type(exc).__name__)}")
             if bundle:
                 pack = root / (safe_name(job.items[nums[0] - 1].title, "media")[:60] + ".zip")
                 with zipfile.ZipFile(pack, "w", zipfile.ZIP_STORED) as z:
@@ -457,13 +511,25 @@ class Plugin(Base):
                     await self.send_doc(chat, pack, f"📦 {len(bundle)} файл(ів) · {mb(pack.stat().st_size)}")
                     sent.append(pack.name)
                 except JobError as exc:
-                    failed.append(f"ZIP · {exc}")
-        msg = f"✅ Надіслано файлів: {len(sent)}"
-        if failed:
-            msg += "\n\n⚠️ Не вдалося:\n" + "\n".join(esc(f) for f in failed[:30])
-            if any(re.search(r"login|sign in|cookie|private|403|401|confirm", f, re.I) for f in failed):
-                msg += "\n\n🍪 Схоже, сайт вимагає входу — додайте cookies у «🍪 Входи на сайти»."
-        await self.host.notify(chat, msg[:4000], [[("📋 До набору", self.cb("menu", job.token)), ("« Медіа", self.cb())]])
+                    failed.append(f"ZIP · {esc(str(exc))}")
+        if sent and not failed:
+            msg = "✅ Готово" + (f" · файлів: {len(sent)}" if len(sent) > 1 else "")
+        elif sent:
+            msg = f"✅ Надіслано файлів: {len(sent)}\n\n⚠️ Не вдалося:\n" + "\n".join(failed[:30])
+        elif failed:
+            msg = "⚠️ <b>Не вийшло завантажити</b>\n\n" + "\n\n".join(failed[:10])
+        elif shown:
+            msg = "📝 Тут лише текст допису — надіслав його вище."
+        else:
+            msg = "⚠️ Файлів не знайшлося. Спробуйте інший формат або якість."
+        rows = [[("⚙️ Інший формат (MP3, якість…)" if quick else "📋 До набору", self.cb("menu", job.token))], [("« Медіа", self.cb())]]
+        if quick and (sent or shown):
+            try:  # статус більше не потрібен — лишаємо тільки файли й одну кнопку
+                await bot.delete_message(chat, status.message_id)
+                status = None
+            except Exception:  # noqa: BLE001
+                pass
+        await self._status(chat, status, msg[:4000], rows)
 
     async def inspect_file(self, chat, p):
         if p.size and p.size > TELEGRAM_IN and not self.big.ready():
