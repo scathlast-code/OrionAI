@@ -170,7 +170,8 @@ function renderChat(res, typing){
         sw.firstChild.textContent='↪️ Тепер відповідає '+avatar(pv).name+' (замість '+avatar(lastProv).name+')';main.appendChild(sw)}
       if(pv) lastProv=pv;
       if(pv){const sm=document.createElement('small');sm.textContent=avatar(pv).name+(m.ts?' · '+new Date(m.ts*1000).toLocaleTimeString('uk-UA',{hour:'2-digit',minute:'2-digit'}):'');b.appendChild(sm)}
-      const row=document.createElement('div');row.className='arow';row.append(avaEl(pv),b);main.appendChild(row)}
+      const av=avaEl(pv);if(pv){av.style.cursor='pointer';av.onclick=e=>{e.stopPropagation();haptic();open_('m:minfo:'+pv,true)}}  // картка моделі: стан, ліміти, налаштування
+      const row=document.createElement('div');row.className='arow';row.append(av,b);main.appendChild(row)}
     else main.appendChild(b)}
   if(!(res.messages||[]).length){const e=document.createElement('div');e.className='empty';e.textContent='Почніть розмову — напишіть питання, перешліть текст новини або надішліть файл 📎\nТоркніться повідомлення, щоб відповісти саме на нього або почати з нього нову гілку.';main.appendChild(e)}
   if(res.models&&res.models.length>1){ // хто відповідає — перемикання прямо в розмові
