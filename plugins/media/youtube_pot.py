@@ -17,8 +17,6 @@ import site
 from typing import Sequence
 from urllib.parse import urlsplit
 
-# Max concurrent heavy media jobs (yt-dlp download or FFmpeg post-process).
-# 1 is safest under 1 GB Railway RAM.
 HEAVY_SLOTS = int(os.environ.get("MEDIA_HEAVY_SLOTS", "1"))
 _heavy_sem: asyncio.Semaphore | None = None
 
@@ -27,7 +25,6 @@ BOT_CHECK = re.compile(
     re.I,
 )
 
-# Client order tuned for datacenter IPs. First entry is preferred.
 YT_CLIENT_SETS: Sequence[str] = (
     "mweb,tv,web_safari,web_embedded",
     "tv,mweb,web_embedded",
@@ -42,7 +39,6 @@ def is_youtube(url: str) -> bool:
 
 
 def _plugin_dirs() -> list[str]:
-    """Return directories that contain yt_dlp_plugins (bgutil installs here)."""
     dirs: list[str] = []
     candidates = []
     try:
@@ -77,12 +73,6 @@ def yt_args(
     client_set: str | None = None,
     extra: Sequence[str] = (),
 ) -> list[str]:
-    """Build yt-dlp argument list for a YouTube call.
-
-    When allow_plugins=True we do NOT pass --no-plugin-dirs and we add
-    --plugin-dirs pointing at the installed bgutil plugin location so that
-    the PO Token provider can be loaded only for YouTube.
-    """
     args: list[str] = [
         "yt-dlp",
         "--ignore-config",
@@ -109,7 +99,6 @@ def yt_args(
 
 
 def probe_command(url: str, client_set: str | None = None, allow_plugins: bool = True) -> list[str]:
-    """Full command for metadata / format probe."""
     return yt_args(
         allow_plugins=allow_plugins,
         client_set=client_set or YT_CLIENT_SETS[0],
@@ -130,7 +119,6 @@ def download_base_args(
     allow_plugins: bool = True,
     extra: Sequence[str] = (),
 ) -> list[str]:
-    """Base args for actual media download (caller adds -f, -o, etc.)."""
     return yt_args(
         allow_plugins=allow_plugins,
         client_set=client_set or YT_CLIENT_SETS[0],
@@ -143,7 +131,6 @@ def is_bot_check(text: str) -> bool:
 
 
 def explain_youtube(raw: str, has_proxy: bool = False) -> str:
-    """User-facing Ukrainian message for YouTube-specific failures."""
     raw = str(raw or "").strip()
     if is_bot_check(raw):
         msg = (
@@ -170,7 +157,6 @@ def explain_youtube(raw: str, has_proxy: bool = False) -> str:
 
 
 def heavy_semaphore() -> asyncio.Semaphore:
-    """Process-local semaphore for yt-dlp / FFmpeg."""
     global _heavy_sem
     if _heavy_sem is None:
         _heavy_sem = asyncio.Semaphore(max(1, HEAVY_SLOTS))
@@ -178,11 +164,6 @@ def heavy_semaphore() -> asyncio.Semaphore:
 
 
 class HeavyJob:
-    """Async context manager that limits concurrent heavy media work.
-
-    Releases the slot on normal exit, exception, timeout and cancellation.
-    """
-
     def __init__(self):
         self._sem = heavy_semaphore()
 
