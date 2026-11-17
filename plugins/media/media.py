@@ -145,8 +145,8 @@ async def check_url(url):
 
 
 @asynccontextmanager
-async def open_url(url, referer=None):
-    headers = {"User-Agent": "Mozilla/5.0"}
+async def open_url(url, referer=None, agent=None):
+    headers = {"User-Agent": agent or "Mozilla/5.0"}
     if referer:
         parsed = urlsplit(referer)
         headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
@@ -361,6 +361,79 @@ async def page_probe(url, work):
     return [Item("text", final_url, info)] if post_text(info) else []
 
 
+BROWSER = ("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) "
+           "Version/18.0 Mobile/15E148 Safari/604.1")
+
+
+def _walk(node):
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from _walk(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _walk(value)
+
+
+def _best_media(post):
+    """Відео (найкраща версія) або фото (найбільше) з об'єкта допису Threads/Instagram."""
+    videos = post.get("video_versions") or []
+    if videos and isinstance(videos[0], dict) and videos[0].get("url"):
+        return videos[0]["url"], ".mp4"
+    candidates = ((post.get("image_versions2") or {}).get("candidates")) or []
+    candidates = [c for c in candidates if isinstance(c, dict) and c.get("url")]
+    if candidates:
+        return max(candidates, key=lambda c: (c.get("width") or 0) * (c.get("height") or 0))["url"], ".jpg"
+    return None
+
+
+async def threads_probe(url, work):
+    """Threads віддає сторінкою лише обкладинку (og:image), а справжні відео/фото лежать у JSON усередині сторінки."""
+    async with open_url(url, agent=BROWSER) as response:  # /share/… посилання перенаправляє на /@автор/post/КОД
+        match = re.search(r"/post/([A-Za-z0-9_-]+)", urlsplit(str(response.url)).path) or re.search(
+            r"/post/([A-Za-z0-9_-]+)", urlsplit(url).path)
+        code = match[1] if match else None
+        content = bytearray()
+        async for chunk in response.aiter_bytes(65536):
+            content.extend(chunk)
+            if len(content) >= 8_000_000:
+                break
+    text = bytes(content).decode("utf-8", "replace")
+    post = None
+    for blob in re.findall(r"<script[^>]*type=\"application/json\"[^>]*>(.*?)</script>", text, re.S):
+        if (code and code not in blob) or ("video_versions" not in blob and "image_versions2" not in blob):
+            continue
+        try:
+            data = json.loads(blob)
+        except ValueError:
+            continue
+        for node in _walk(data):
+            if node.get("code") and (code is None or node.get("code") == code) and ("image_versions2" in node or "video_versions" in node or "carousel_media" in node):
+                post = node
+                break
+        if post:
+            break
+    if not post:
+        return []
+    caption = post.get("caption") or {}
+    user = post.get("user") or {}
+    info = {
+        "title": (caption.get("text") if isinstance(caption, dict) else "") or f"Threads {post.get('code', '')}",
+        "description": caption.get("text") if isinstance(caption, dict) else "",
+        "author": user.get("username") or "",
+        "author_url": f"https://www.threads.com/@{user['username']}" if user.get("username") else "",
+    }
+    info["title"] = info["title"][:80]
+    parts = post.get("carousel_media") or [post]
+    items = []
+    for number, part in enumerate(parts, 1):
+        found = _best_media(part) if isinstance(part, dict) else None
+        if found:
+            address, ext = found
+            items.append(Item("direct", address, {**info, "filename": f"threads-{post.get('code', 'post')}-{number}{ext}"}))
+    return items or ([Item("text", url, info)] if info["description"] else [])
+
+
 async def inspect_link(url, work):
     await check_url(url)
     parsed = urlsplit(url)
@@ -370,6 +443,8 @@ async def inspect_link(url, work):
         or domain_matches(host, ("discordapp.com", "discordapp.net", "t.me", "telegram.me"))
     ):
         probes = (page_probe, video_probe, gallery_probe)
+    elif domain_matches(host, ("threads.net", "threads.com")):
+        probes = (threads_probe, gallery_probe, video_probe, page_probe)
     elif domain_matches(host, GALLERY):
         probes = (gallery_probe, video_probe, page_probe)
     else:
@@ -385,12 +460,15 @@ async def inspect_link(url, work):
         except (JobError, httpx.HTTPError, OSError, ValueError, TypeError) as exc:
             errors.append((probe.__name__, str(exc) or type(exc).__name__))
             continue
-        if items and video_site and probe is page_probe and all(
+        if items and (video_site or domain_matches(host, GALLERY)) and probe is page_probe and all(
             it.engine == "text" or it.info.get("preview") for it in items
         ):
             continue  # лише заголовок і обкладинка сторінки — для відеосайту це не результат
         if items:
             return items
+    if domain_matches(host, ("threads.net", "threads.com")) and not cookie_file(url):
+        raise JobError("Threads віддав серверу лише обкладинку, без самого відео — для цього допису потрібен вхід. "
+                       "🍪 Додайте cookies threads у «Входи на сайти».")
     # Найзмістовніша причина — від yt-dlp (він знає сайти), далі gallery-dl, далі сторінка.
     order = {"video_probe": 0, "gallery_probe": 1, "page_probe": 2}
     errors.sort(key=lambda e: order.get(e[0], 3))
