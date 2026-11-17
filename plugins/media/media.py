@@ -535,7 +535,7 @@ async def tumblr_probe(url, work):
     raise JobError("tumblr · " + "; ".join(notes))
 
 
-SHARE = re.compile(r"^https?://(?:(?:www|m|web)\.)?(?:facebook\.com/(?:share|story\.php|watch/?\?)|fb\.watch/|vm\.tiktok\.com/|vt\.tiktok\.com/|pin\.it/)")
+SHARE = re.compile(r"^https?://(?:(?:www|m|web)\.)?(?:facebook\.com/(?:share|story\.php|watch/?\?)|fb\.watch/|pin\.it/)")  # короткі TikTok yt-dlp розгортає сам
 
 
 def _real_target(final):
@@ -650,6 +650,8 @@ async def inspect_link(url, work):
         probes = (page_probe, video_probe, gallery_probe)
     elif STORY.match(url):
         probes = (story_probe,)
+    elif domain_matches(host, ("tiktok.com",)):
+        probes = (video_probe, gallery_probe, page_probe)  # відео — yt-dlp; фото-каруселі — gallery-dl
     elif domain_matches(host, ("tumblr.com",)):
         probes = (tumblr_probe, gallery_probe, video_probe, page_probe)
     elif domain_matches(host, ("threads.net", "threads.com")):
