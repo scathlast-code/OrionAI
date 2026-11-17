@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import re
 import secrets
@@ -81,6 +82,7 @@ class Plugin(Base):
         self.armed: dict[int, str] = {}       # чат -> "clean" | "cookie:<сайт>": чекаємо файл
         self.tasks: dict[int, asyncio.Task] = {}
         self.offers: dict[str, tuple[int, str]] = {}
+        self.live: dict[int, tuple[str, list]] = {}  # чат -> останній стан швидкого завантаження (для Mini App)
         self.big = Big(self.dir, host.token)  # 🚀 файли до 2 ГБ через MTProto
         self.commands = [("media", self.cmd_media, "Медіа: завантажити за посиланням")]
 
@@ -212,9 +214,11 @@ class Plugin(Base):
             return "Активного завдання немає", self.home(chat)
         if a == "off" and x in self.offers:  # старі кнопки «Знайти й завантажити» з попередньої версії
             c, url = self.offers.pop(x)
-            return self.start_quick(chat, url) or "🔎 Шукаю…", None
+            return self.start_quick(chat, url) or "🔎 Шукаю…", (self.live_screen(chat) if self.in_app() else None)
+        if a == "st":
+            return None, self.live_screen(chat)
         if a == "re" and x in self.offers:  # 🔁 повторити після помилки
-            return self.start_quick(chat, self.offers[x][1]) or "🔎 Шукаю…", None
+            return self.start_quick(chat, self.offers[x][1]) or "🔎 Шукаю…", (self.live_screen(chat) if self.in_app() else None)
         if a == "cl" and chat in self.pending and self.pending[chat].token == x:
             p = self.pending.pop(chat)
             if y != "yes":
@@ -266,7 +270,8 @@ class Plugin(Base):
             if not m:
                 self.ask(chat, "url")
                 return "Не бачу посилання", ("⚠️ Потрібне посилання, що починається з https://", [[("✖️ Скасувати", "m:cancel")]])
-            return self.start_quick(chat, m[0].rstrip(").,]»")), None
+            toast = self.start_quick(chat, m[0].rstrip(").,]»"))
+            return toast, (self.live_screen(chat) if self.in_app() else None)
         job = self.jobs.get(chat)
         if not job or job.token != data:
             return "Меню застаріло", self.home(chat)
@@ -326,8 +331,8 @@ class Plugin(Base):
         if not M.domain_matches(host, MEDIA_HOSTS):
             return False
         toast = self.start_quick(msg.chat_id, m[1])
-        if toast:
-            await msg.reply_text(toast)
+        if toast or self.in_app():
+            await msg.reply_text(toast or "📥 Завантажую. Стан — у розділі «📥 Медіа», файл прийде в чат з ботом.")
         return True
 
     async def on_file(self, update, ctx):
@@ -390,7 +395,9 @@ class Plugin(Base):
             except Exception as exc:  # noqa: BLE001
                 log.exception("media job failed")
                 await self.host.notify(chat, f"⚠️ Не вдалося: {esc(type(exc).__name__)}")
-        task = asyncio.get_running_loop().create_task(wrap())
+        # Чистий контекст: якщо завдання почали з Mini App, його повідомлення й файли мають іти в справжній чат,
+        # а не в «перехоплювач» запиту застосунку, який уже завершився.
+        task = asyncio.get_running_loop().create_task(wrap(), context=contextvars.Context())
         self.tasks[chat] = task
 
     # ---------------------------------------------------------------- 1 крок: посилання → файл
@@ -398,8 +405,22 @@ class Plugin(Base):
         """Повертає текст лише якщо почати не можна; інакше все показує саме повідомлення-статус."""
         if self.busy(chat):
             return "⏳ Ще завантажую попереднє — дочекайтесь або зупиніть: /media"
+        self.live[chat] = ("🔎 Шукаю відео за посиланням…", [])
         self._bg(chat, self.quick(chat, url))
         return None
+
+    def in_app(self):
+        return self.host.extra.get("in_app", lambda: False)()
+
+    def live_screen(self, chat):
+        """Стан для Mini App: поки триває — «🔄 Оновити стан» (застосунок натискає її сам кожні 3 с)."""
+        text, rows = self.live.get(chat) or ("Активного завантаження немає.", [])
+        if self.busy(chat):
+            return (text + "\n\n<i>📲 Готові файли приходять у чат з ботом.</i>",
+                    [[("🔄 Оновити стан", self.cb("st")), ("⏹ Зупинити", self.cb("stop"))], [("« Медіа", self.cb())]])
+        rows = [r for r in (rows or []) if r] or [[("« Медіа", self.cb())]]
+        tail = "\n\n<i>📲 Файли — у чаті з ботом.</i>" if text.startswith(("✅", "📝")) else ""
+        return text + tail, [[("🔗 Ще посилання", self.cb("url"))]] + rows
 
     def _markup(self, rows):
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -407,6 +428,7 @@ class Plugin(Base):
 
     async def _status(self, chat, msg, text, rows=None):
         """Одне повідомлення, що оновлюється: 🔎 → ⬇️ → ✅/⚠️."""
+        self.live[chat] = (text, [r for r in (rows or []) if not any(d == self.cb("stop") for _, d in r)])
         if msg:
             try:
                 await self.host.bot().edit_message_text(text[:4096], chat_id=chat, message_id=msg.message_id, parse_mode="HTML",
