@@ -248,7 +248,7 @@ VIDEO_HOSTS = ("youtube.com", "youtu.be", "tiktok.com", "vimeo.com", "twitch.tv"
                "soundcloud.com", "fb.watch")
 # Друга спроба для YouTube, коли він просить «підтвердити, що ви не бот»: інші клієнти плеєра.
 YT_RETRY = ("--extractor-args", "youtube:player_client=default,tv,mweb,web_safari,web_embedded")
-BOT_CHECK = re.compile(r"sign in to confirm|not a bot|confirm you.re not|po.?token|http error 403", re.I)
+BOT_CHECK = re.compile(r"sign in to confirm|not a bot|confirm you.re not|po.?token", re.I)
 
 
 def explain(raw):
@@ -260,7 +260,9 @@ def explain(raw):
                "(Railway), посилання тут ні до чого. Інші сайти (TikTok, Instagram, X…) працюють."
                + ("\nПроксі MEDIA_PROXY теж заблоковано — потрібен домашній (residential) проксі." if os.environ.get("MEDIA_PROXY")
                   else "\n🔧 Надійне рішення — домашній проксі: змінна MEDIA_PROXY у Railway. Іноді блок знімається сам за кілька годин."))
-    elif re.search(r"private|log ?in|sign in|cookies|authenticat|members.only|age.restrict|inappropriate", low):
+    elif re.search(r"http error 403|forbidden", low):
+        why = "Сайт відмовив серверу бота (403) — часто так блокують сервери; іноді допомагає повтор."
+    elif re.search(r"private|log ?in|sign in|authenticat|members.only|age.restrict|inappropriate|cookies (?:are|is) (?:required|needed)", low):
         why = "Сайт віддає це лише після входу (приватне, 18+ чи лише для підписників). 🍪 Додайте cookies цього сайту в «Входи на сайти»."
     elif "unsupported url" in low:
         why = "Цей сайт завантажувачі не підтримують."
@@ -859,7 +861,7 @@ async def fetch(item, source, options, work, progress=None):
     try:
         await go(extra)
     except JobError as exc:
-        if extra or not BOT_CHECK.search(str(exc)) or not domain_matches(
+        if extra or not (BOT_CHECK.search(str(exc)) or "403" in str(exc)) or not domain_matches(
                 (urlsplit(source).hostname or "").lower(), ("youtube.com", "youtu.be")):
             raise
         for leftover in work.iterdir():
