@@ -15,3 +15,6 @@ telethon>=1.36,<2
 openpyxl>=3.1,<4        # Excel зі статистикою UTM
 segno>=1.6,<2            # QR-коди коротких посилань (без Pillow)
 python-docx>=1.1,<2     # Word-звіт UTM
+yt-dlp[default]          # 📥 Медіа: завантаження з YouTube, Instagram, TikTok…
+gallery-dl               # 📥 Медіа: альбоми й каруселі
+lxml>=5,<7               # 📥 Медіа: розбір сторінок і очищення HTML

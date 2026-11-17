@@ -24,7 +24,7 @@ from typing import Any, Awaitable, Callable
 log = logging.getLogger("orion.plugins")
 
 # Порядок — це порядок кнопок у меню «🔌 Плагіни».
-BUILTIN = ["hub", "newsroom", "stickers", "inbox"]
+BUILTIN = ["hub", "newsroom", "stickers", "inbox", "media"]
 
 
 def esc(s) -> str:
@@ -132,6 +132,10 @@ class Plugin:
 
     async def on_private(self, update, ctx) -> bool:
         """Будь-яке приватне повідомлення ДО перевірки доступу (і від незнайомих). True — оброблено, далі не йде."""
+        return False
+
+    async def on_file(self, update, ctx) -> bool:
+        """Будь-який файл/фото/відео/аудіо в приватному чаті від учасника — ДО звичайної обробки. True — оброблено."""
         return False
 
     async def start(self):
@@ -324,6 +328,17 @@ class Registry:
                     return True
             except Exception:  # noqa: BLE001
                 log.exception("plugin %s document failed", p.id)
+        return False
+
+    async def on_file(self, update, ctx):
+        for p in self.active():
+            if p.admin_only and not self.host.is_admin(update.effective_user.id):
+                continue
+            try:
+                if await p.on_file(update, ctx):
+                    return True
+            except Exception:  # noqa: BLE001
+                log.exception("plugin %s file failed", p.id)
         return False
 
     async def on_private(self, update, ctx):

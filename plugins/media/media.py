@@ -1,0 +1,520 @@
+"""📥 Пошук і завантаження відкритих медіа (з MediaBot): yt-dlp, gallery-dl, прямі файли, дописи Telegram, Open Graph.
+
+Додано для OrionAI: входи через cookies (для Instagram, Facebook, TikTok…), режими MP3 / GIF / без звуку,
+короткий запис ефіру. Перевірка адрес (лише публічні HTTP/HTTPS) — як в оригіналі.
+"""
+import asyncio
+import ipaddress
+import json
+import mimetypes
+import re
+import socket
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import unquote, urljoin, urlsplit
+
+import httpx
+from lxml import html
+
+from .common import JobError, URLDenied, WEB_LIMIT, run, safe_name
+
+BLOCKED = (
+    "line.me", "lin.ee", "line-apps.com", "line-scdn.net",
+    "bip.com", "bip.ai", "periscope.tv", "pscp.tv",
+    "pornhub.com", "pornhub.org", "pornhub.net", "pornhubpremium.com",
+    "phncdn.com", "phprcdn.com",
+)
+GALLERY = (
+    "threads.net", "threads.com", "instagram.com", "x.com", "twitter.com",
+    "facebook.com", "tumblr.com", "pinterest.com", "pin.it",
+    "tiktok.com", "reddit.com", "snapchat.com", "likee.video",
+)
+MEDIA = {
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".bmp", ".tif", ".tiff", ".heic",
+    ".mp4", ".mkv", ".mov", ".webm", ".m4v", ".avi", ".mpeg", ".ts", ".flv", ".3gp",
+    ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wav", ".oga", ".mka",
+}
+SUBTITLES = {".vtt", ".srt", ".ass", ".ttml", ".srv3", ".json3", ".dfxp"}
+YT = (
+    "yt-dlp", "--ignore-config", "--no-plugin-dirs", "--no-cache-dir",
+    "--no-progress", "--no-warnings", "--socket-timeout", "15",
+    "--retries", "1", "--js-runtimes", "node",
+)
+FF = (
+    "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+    "-protocol_whitelist", "file,pipe",
+)
+
+
+@dataclass
+class Item:
+    engine: str
+    url: str
+    info: dict
+    index: int | None = None
+
+    @property
+    def title(self):
+        return str(self.info.get("title") or self.info.get("filename") or "Медіа")
+
+
+COOKIES_DIR = None  # тека з cookies.txt за платформами (задає плагін)
+COOKIE_SITES = {
+    "instagram": ("instagram.com",), "facebook": ("facebook.com", "fb.watch"), "threads": ("threads.net", "threads.com"),
+    "tiktok": ("tiktok.com",), "x": ("x.com", "twitter.com"), "youtube": ("youtube.com", "youtu.be"),
+    "reddit": ("reddit.com",), "pinterest": ("pinterest.com", "pin.it"), "vk": ("vk.com", "vkvideo.ru"),
+}
+
+
+def cookie_file(url):
+    """cookies.txt для сайту посилання, якщо його завантажили в «🍪 Входи»."""
+    if not COOKIES_DIR:
+        return None
+    host = (urlsplit(url).hostname or "").lower()
+    for site, domains in COOKIE_SITES.items():
+        if domain_matches(host, domains):
+            path = Path(COOKIES_DIR) / f"{site}.txt"
+            return path if path.is_file() else None
+    return None
+
+
+def cookie_args(url, flag="--cookies"):
+    path = cookie_file(url)
+    return [flag, str(path)] if path else []
+
+
+@dataclass
+class Options:
+    height: int = 0
+    mode: str = "video"  # video | audio (MP3) | gif | mute
+    live: int = 180      # скільки секунд записувати активний ефір
+    audio: str = "auto"
+    subs: str = "off"
+    cuts: tuple = ()
+    join: bool = False
+    post: bool = True
+    target: str = "tg"
+
+
+def domain_matches(host, domains):
+    return any(host == domain or host.endswith("." + domain) for domain in domains)
+
+
+async def check_url(url):
+    try:
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").rstrip(".").lower()
+        port = parsed.port
+    except ValueError:
+        raise URLDenied("Невалідне посилання.") from None
+    if (
+        parsed.scheme not in {"http", "https"} or not host or
+        parsed.username is not None or parsed.password is not None or
+        port not in {None, 80, 443} or re.search(r"[\s\\\x00-\x1f]", url)
+    ):
+        raise URLDenied("Потрібне публічне посилання HTTP або HTTPS.")
+    if domain_matches(host, BLOCKED) or "pornhub" in host:
+        raise URLDenied("Це джерело вимкнене.")
+    try:
+        addresses = await asyncio.wait_for(
+            asyncio.get_running_loop().getaddrinfo(host, None, type=socket.SOCK_STREAM),
+            timeout=8,
+        )
+    except (OSError, TimeoutError):
+        raise JobError("Сервер джерела не відповідає.") from None
+    if not addresses or any(
+        not ipaddress.ip_address(row[4][0]).is_global for row in addresses
+    ):
+        raise URLDenied("Адреса джерела має бути публічною.")
+
+
+@asynccontextmanager
+async def open_url(url, referer=None):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    if referer:
+        parsed = urlsplit(referer)
+        headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
+    async with httpx.AsyncClient(
+        timeout=20, follow_redirects=False, trust_env=False, headers=headers
+    ) as client:
+        for _ in range(7):
+            await check_url(url)
+            async with client.stream("GET", url) as response:
+                if response.is_redirect and response.headers.get("location"):
+                    url = urljoin(url, response.headers["location"])
+                    continue
+                response.raise_for_status()
+                yield response
+                return
+    raise JobError("Забагато перенаправлень.")
+
+
+def media_extension(response):
+    mime = response.headers.get("content-type", "").split(";")[0].lower()
+    url_suffix = Path(urlsplit(str(response.url)).path).suffix.lower()
+    if mime.startswith(("image/", "video/", "audio/")):
+        aliases = {
+            "audio/mp4": ".m4a", "audio/ogg": ".ogg", "audio/x-m4a": ".m4a",
+            "video/x-matroska": ".mkv", "image/jpeg": ".jpg",
+        }
+        return aliases.get(mime) or mimetypes.guess_extension(mime) or (
+            url_suffix if url_suffix in MEDIA else None
+        )
+    if mime in {"", "application/octet-stream"} and url_suffix in MEDIA:
+        return url_suffix
+    return None
+
+
+def read_html(raw):
+    if isinstance(raw, str):
+        raw = raw.encode("utf-8")
+    try:
+        raw.decode("utf-8")
+    except UnicodeDecodeError:
+        parser = html.HTMLParser(no_network=True, remove_comments=True)
+    else:
+        parser = html.HTMLParser(encoding="utf-8", no_network=True, remove_comments=True)
+    return html.document_fromstring(raw or b"<html></html>", parser=parser)
+
+
+def post_text(info):
+    for key in ("description", "caption", "content", "text", "summary"):
+        value = info.get(key)
+        if isinstance(value, str) and value.strip():
+            if re.search(r"<(?:p|div|a|br|span)\b", value, re.I):
+                return " ".join(text.strip() for text in read_html(value).itertext() if text.strip())
+            return value.strip()
+    return ""
+
+
+def author(info):
+    name = (
+        info.get("uploader") or info.get("channel") or info.get("author")
+        or info.get("username") or info.get("creator") or ""
+    )
+    link = info.get("uploader_url") or info.get("channel_url") or info.get("author_url")
+    if isinstance(name, dict):
+        link = link or name.get("url")
+        name = name.get("name") or name.get("username") or name.get("nick") or ""
+    link = link if isinstance(link, str) and link.startswith(("https://", "http://")) else ""
+    return str(name), link
+
+
+def allow_extractor(data):
+    extractor = str(data.get("extractor_key") or data.get("ie_key") or "").lower()
+    if any(name in extractor for name in ("pornhub", "periscope")):
+        raise URLDenied("Це джерело вимкнене.")
+
+
+async def video_probe(url, work):
+    data = json.loads(await run(
+        *YT, *cookie_args(url), "--dump-single-json", "--skip-download", "--flat-playlist",
+        "--yes-playlist", "--", url, cwd=work, timeout=100,
+    ))
+    allow_extractor(data)
+    if isinstance(data.get("webpage_url"), str):
+        await check_url(data["webpage_url"])
+    if "entries" in data:
+        return [
+            Item("yt", url, row, position)
+            for position, row in enumerate(data["entries"] or [], 1)
+            if isinstance(row, dict)
+        ]
+    if data.get("formats") or data.get("url"):
+        return [Item("yt", url, data)]
+    return []
+
+
+async def gallery_probe(url, work):
+    data = json.loads(await run(
+        "gallery-dl", "--config-ignore", *cookie_args(url, "--cookies"), "--dump-json",
+        "--", url, cwd=work, timeout=90,
+    ))
+    result = []
+    shared = {}
+    for row in data:
+        if not isinstance(row, list) or len(row) != 3 or not isinstance(row[2], dict):
+            continue
+        kind, address, info = row
+        if kind == 2:
+            shared = info
+        elif kind == 3 and isinstance(address, str) and address.startswith(("https://", "http://")):
+            result.append(Item("direct", address, {**shared, **info}))
+    return result
+
+
+async def page_probe(url, work):
+    parsed = urlsplit(url)
+    telegram = (
+        domain_matches((parsed.hostname or "").lower(), ("t.me", "telegram.me"))
+        and re.fullmatch(r"/(?:s/)?[A-Za-z0-9_]+/\d+/?", parsed.path)
+    )
+    if telegram:
+        channel, number = parsed.path.strip("/").split("/")[-2:]
+        url = f"https://t.me/{channel}/{number}?embed=1"
+    async with open_url(url) as response:
+        final_url = str(response.url)
+        if media_extension(response):
+            name = unquote(Path(urlsplit(final_url).path).name)
+            return [Item("direct", final_url, {"title": name or "Медіа"})]
+        content = bytearray()
+        async for chunk in response.aiter_bytes(65536):
+            content.extend(chunk)
+            if len(content) >= 2_000_000:
+                break
+    document = read_html(bytes(content))
+    meta = {
+        (tag.get("property") or tag.get("name") or "").lower(): tag.get("content")
+        for tag in document.xpath("//meta[@content]")
+    }
+    info = {
+        "title": meta.get("og:title") or document.xpath("string(//title)"),
+        "description": meta.get("og:description") or meta.get("description"),
+        "author": meta.get("author"),
+        "author_url": meta.get("article:author"),
+    }
+    links = []
+    if telegram:
+        texts = document.find_class("tgme_widget_message_text")
+        owners = document.find_class("tgme_widget_message_owner_name")
+        if texts:
+            info["description"] = texts[0].text_content().strip()
+        if owners:
+            info["author"] = owners[0].text_content().strip()
+            if owners[0].get("href"):
+                info["author_url"] = urljoin(final_url, owners[0].get("href"))
+        nodes = document.xpath("//video[@src] | //video/source[@src]")
+        for node in nodes + document.find_class("tgme_widget_message_photo_wrap"):
+            address = node.get("src")
+            if not address:
+                match = re.search(r"url\(['\"]?([^'\")]+)", node.get("style", ""))
+                address = match[1] if match else None
+            if address:
+                links.append(urljoin(final_url, address))
+    video_url = meta.get("og:video:secure_url") or meta.get("og:video")
+    if video_url and Path(urlsplit(video_url).path).suffix.lower() in MEDIA:
+        links.append(urljoin(final_url, video_url))
+    if links:
+        return [Item("direct", link, info) for link in dict.fromkeys(links)]
+    image_url = meta.get("og:image:secure_url") or meta.get("og:image")
+    if image_url:
+        return [Item("direct", urljoin(final_url, image_url), {**info, "preview": True})]
+    return [Item("text", final_url, info)] if post_text(info) else []
+
+
+async def inspect_link(url, work):
+    await check_url(url)
+    parsed = urlsplit(url)
+    host = parsed.hostname.lower().rstrip(".")
+    if (
+        Path(parsed.path).suffix.lower() in MEDIA
+        or domain_matches(host, ("discordapp.com", "discordapp.net", "t.me", "telegram.me"))
+    ):
+        probes = (page_probe, video_probe, gallery_probe)
+    elif domain_matches(host, GALLERY):
+        probes = (gallery_probe, video_probe, page_probe)
+    else:
+        probes = (video_probe, gallery_probe, page_probe)
+
+    for probe in probes:
+        try:
+            items = await probe(url, work)
+        except URLDenied:
+            raise
+        except (JobError, httpx.HTTPError, OSError, ValueError, TypeError):
+            continue
+        if items:
+            return items
+    raise JobError("Джерело не повернуло доступного медіа або тексту.")
+
+
+async def fetch_direct(item, source, options, work):
+    if options.audio != "auto" or options.subs != "off":
+        raise JobError("Прямий файл має власну доріжку. Вибери /audio auto і /subs off.")
+    async with open_url(item.url, referer=source) as response:
+        extension = media_extension(response)
+        if not extension:
+            raise JobError("За адресою відкрилася сторінка замість медіафайла.")
+        candidate = unquote(Path(urlsplit(str(response.url)).path).name)
+        stem = Path(safe_name(candidate or item.title, "media")).stem
+        path = work / (stem + extension)
+        total = 0
+        with path.open("wb") as output:
+            async for chunk in response.aiter_bytes(65536):
+                total += len(chunk)
+                if total > WEB_LIMIT:
+                    raise JobError("Розмір перевищує ліміт завантаження.")
+                output.write(chunk)
+        if not total:
+            raise JobError("Джерело повернуло порожній файл.")
+    return path, [], item.info
+
+
+async def fetch(item, source, options, work):
+    if item.engine == "text":
+        return None, [], item.info
+    if item.engine == "direct":
+        return await fetch_direct(item, source, options, work)
+
+    allow_extractor(item.info)
+    entry_url = item.info.get("webpage_url") or item.info.get("url")
+    if isinstance(entry_url, str) and entry_url.startswith(("https://", "http://")):
+        await check_url(entry_url)
+    height = f"[height<={options.height}]" if options.height else ""
+    language = f"[language^={options.audio}]" if options.audio != "auto" else ""
+    if options.mode == "audio":
+        selector = f"ba{language}/b{language}"
+        convert = ["-x", "--audio-format", "mp3", "--audio-quality", "192K"]
+    else:
+        selector = f"bv{height}+ba{language}/b{height}{language}"
+        if not language:
+            selector += f"/bv{height}"
+        convert = []
+    entry = (
+        ["--yes-playlist", "--playlist-items", str(item.index)]
+        if item.index is not None else ["--no-playlist"]
+    )
+    subtitles = (
+        ["--write-subs", "--write-auto-subs", "--sub-langs", re.escape(options.subs) + ".*"]
+        if options.subs != "off" else []
+    )
+    live = []
+    if item.info.get("is_live") or item.info.get("live_status") == "is_live":  # 🔴 ефір — записуємо лише перші хвилини
+        live = ["--downloader", "ffmpeg", "--downloader-args", f"ffmpeg:-t {int(options.live)}"]
+    await run(
+        *YT, *cookie_args(source), *entry, *convert, *subtitles, *live, "-f", selector,
+        "--max-filesize", str(WEB_LIMIT), "--write-info-json",
+        "--no-write-playlist-metafiles", "-o", "media.%(ext)s",
+        "--", source, cwd=work, timeout=600 + (options.live if live else 0),
+    )
+    outputs = [path for path in work.iterdir() if path.is_file()]
+    files = [
+        path for path in outputs
+        if path.suffix.lower() in MEDIA and path.stat().st_size > 0
+    ]
+    if len(files) != 1:
+        raise JobError("Джерело не віддало один файл у вибраній якості або мові.")
+    if files[0].stat().st_size > WEB_LIMIT:
+        raise JobError("Розмір перевищує ліміт завантаження.")
+    info_path = work / "media.info.json"
+    info = json.loads(info_path.read_text(encoding="utf-8")) if info_path.is_file() else item.info
+    allow_extractor(info)
+    stem = Path(safe_name(info.get("title") or item.title, "media")).stem
+    path = files[0].rename(work / (stem + files[0].suffix.lower()))
+    tracks = [
+        track.rename(work / (stem + track.name.removeprefix("media")))
+        for track in outputs if track.suffix.lower() in SUBTITLES
+    ]
+    return path, tracks, info
+
+
+def parse_cuts(value):
+    segments = []
+    for section in value.split(","):
+        match = re.fullmatch(
+            r"\s*(\d+(?::\d{1,2}){0,2}(?:\.\d{1,3})?)\s*[-–—]\s*"
+            r"(\d+(?::\d{1,2}){0,2}(?:\.\d{1,3})?)\s*", section
+        )
+        if not match:
+            raise JobError("Приклад · /cuts 00:12-00:30,01:05-01:25")
+        times = []
+        for clock in match.groups():
+            parts = list(map(float, clock.split(":")))
+            if any(part >= 60 for part in parts[1:]):
+                raise JobError("У форматі з двокрапкою останні значення мають бути до 60.")
+            times.append(sum(part * 60**i for i, part in enumerate(reversed(parts))))
+        start, end = times
+        if end <= start or end > 1_000_000:
+            raise JobError("Перевір початок і кінець фрагмента.")
+        segments.append((start, end))
+    return tuple(segments)
+
+
+async def probe_media(path):
+    return json.loads(await run(
+        "ffprobe", "-v", "error", "-protocol_whitelist", "file,pipe",
+        "-show_format", "-show_streams", "-of", "json", path, timeout=30,
+    ))
+
+
+async def render(path, options, work, direct):
+    image = (mimetypes.guess_type(path.name)[0] or "").startswith("image/")
+    if options.mode in ("gif", "mute") and not image:
+        return await render_special(path, options, work)
+    needs_scale = direct and options.height and not image and options.mode == "video"
+    needs_audio = (direct or path.suffix.lower() != ".mp3") and options.mode == "audio" and not image
+    if not (options.cuts or needs_scale or needs_audio):
+        return [path]
+    data = await probe_media(path)
+    video = next((
+        stream for stream in data.get("streams", [])
+        if stream["codec_type"] == "video"
+        and not stream.get("disposition", {}).get("attached_pic")
+    ), None)
+    audio = any(stream["codec_type"] == "audio" for stream in data.get("streams", []))
+    video_output = video is not None and options.mode != "audio"
+    if not video_output and not audio:
+        raise JobError("У цьому файлі немає доріжки для вибраної операції.")
+    if not options.cuts and not needs_audio:
+        if not video_output or (video.get("height") or 0) <= options.height:
+            return [path]
+    duration = data.get("format", {}).get("duration")
+    if options.cuts and duration not in {None, "N/A"}:
+        if float(duration) + 0.25 < max(end for _, end in options.cuts):
+            raise JobError("Таймкод виходить за тривалість файлу.")
+    ext = ".mp4" if video_output else ".mp3"
+    maps = ["-map", "0:V:0", "-map", "0:a:0?"] if video_output else ["-map", "0:a:0"]
+    codec = ["-c:a", "aac", "-b:a", "160k"] if video_output else ["-c:a", "libmp3lame", "-b:a", "192k"]
+    if video_output:
+        height = f"min(ih,{options.height})" if needs_scale else "ih"
+        codec += [
+            "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+            "-vf", f"scale=-2:'trunc({height}/2)*2'", "-movflags", "+faststart",
+        ]
+    clips = work / "segments"
+    clips.mkdir()
+    chunks = []
+    for number, (start, end) in enumerate(options.cuts or ((0, None),), 1):
+        output = clips / f"part{number:03d}{ext}"
+        seek = ["-ss", str(start)] if start else []
+        length = ["-t", str(end - start)] if end is not None else []
+        await run(
+            *FF, *seek, "-i", path, *length, *maps, "-map_metadata", "0",
+            *codec, output, timeout=450,
+        )
+        chunks.append(output)
+    if options.join and len(chunks) > 1:
+        listing = clips / "segments.txt"
+        listing.write_text("".join(f"file '{part.name}'\n" for part in chunks), encoding="utf-8")
+        joined = work / f"{path.stem} — фрагменти{ext}"
+        await run(
+            *FF, "-f", "concat", "-safe", "1", "-i", listing, "-i", path,
+            "-map", "0", "-map_metadata", "1", "-c", "copy", joined, timeout=120,
+        )
+        return [joined]
+    return [
+        part.rename(work / f"{path.stem} — {index:02d}{ext}")
+        for index, part in enumerate(chunks, 1)
+    ]
+
+
+async def render_special(path, options, work):
+    """🎞 GIF (до 15 с, 480 px, 12 кадр/с) або 🔇 відео без звуку; таймкоди теж враховуються."""
+    cuts = options.cuts or ((0, None),)
+    out = []
+    for number, (start, end) in enumerate(cuts, 1):
+        seek = ["-ss", str(start)] if start else []
+        if options.mode == "gif":
+            length = ["-t", str(min(15, (end - start) if end is not None else 15))]
+            dest = work / f"{path.stem}{'' if len(cuts) == 1 else f' — {number:02d}'}.gif"
+            await run(*FF, *seek, *length, "-i", path, "-vf",
+                      "fps=12,scale='min(480,iw)':-2:flags=lanczos,split[a][b];[a]palettegen=max_colors=128[p];[b][p]paletteuse=dither=bayer",
+                      "-loop", "0", dest, timeout=300)
+        else:
+            length = ["-t", str(end - start)] if end is not None else []
+            dest = work / f"{path.stem} — без звуку{'' if len(cuts) == 1 else f' {number:02d}'}{path.suffix if path.suffix.lower() in ('.mp4', '.mov', '.mkv', '.webm') else '.mp4'}"
+            await run(*FF, *seek, "-i", path, *length, "-map", "0:V:0", "-an", "-c", "copy" if not cuts[0][0] and cuts[0][1] is None else "libx264",
+                      *([] if not cuts[0][0] and cuts[0][1] is None else ["-preset", "fast", "-pix_fmt", "yuv420p"]), dest, timeout=450)
+        out.append(dest)
+    return out

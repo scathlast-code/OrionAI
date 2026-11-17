@@ -1,6 +1,8 @@
 FROM python:3.13-slim
 # ffmpeg — слайдшоу й голос, шрифти DejaVu — підписи кирилицею, tzdata — час завдань
+# 📥 Медіа: exiftool, mat2, 7z — метадані; nodejs — yt-dlp розгадує захист YouTube
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core tzdata \
+    libimage-exiftool-perl mat2 p7zip-full nodejs \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY requirements.txt .
