@@ -630,10 +630,10 @@ async def story_probe(url, work):
         first = str(exc)
     else:
         first = ""
-    if not os.environ.get("APIFY_TOKEN", "").strip() and first:
+    if not apify_token() and first:
         raise JobError("Instagram показує сторіс лише після входу. Щоб бот їх качав без вашого акаунта, як інші боти, "
                        "додайте в Railway змінну APIFY_TOKEN (apify.com → Settings → API &amp; Integrations; безкоштовних "
-                       "$5 на місяць вистачає приблизно на 300 сторіс)." + f"\n\n<i>Технічно: {html_escape(first[-200:])}</i>")
+                       "$5 на місяць вистачає приблизно на 300 сторіс).\n\n🔎 " + apify_hint() + f"\n\n<i>Технічно: {html_escape(first[-200:])}</i>")
     rows = await apify_run(APIFY_ACTOR, {"usernames": [user], "saveFiles": False, "maxItems": 0}, timeout=180)
     if story_id:
         exact = [row for row in rows if str(row.get("storyId") or "").split("_")[0] == story_id]
@@ -651,15 +651,35 @@ async def story_probe(url, work):
     return items
 
 
+def apify_token():
+    """Ключ Apify: APIFY_TOKEN, а якщо змінну назвали трохи інакше (APIFY_API_TOKEN, з пробілом, малими літерами) —
+    будь-яка змінна з «apify» у назві або значення, схоже на ключ (apify_api_…)."""
+    exact = os.environ.get("APIFY_TOKEN", "").strip().strip('"\'')
+    if exact:
+        return exact
+    for name, value in os.environ.items():
+        value = (value or "").strip().strip('"\'')
+        if value and ("APIFY" in name.upper().replace(" ", "") or value.startswith("apify_api_")):
+            return value
+    return ""
+
+
+def apify_hint():
+    names = [n for n in os.environ if "APIFY" in n.upper()]
+    return ("Сервер бачить змінні з «APIFY»: " + ", ".join(f"«{n}»" for n in names) + " — але без значення."
+            if names else "Сервер бота не бачить жодної змінної з «APIFY» — у Railway вона не застосована до цього сервісу "
+            "(натисніть «Deploy» після додавання) або додана до іншого сервісу.")
+
+
 FB_STORY = re.compile(r"^https?://(?:(?:www|m|web)\.)?facebook\.com/stories/")
 FB_STORY_ACTOR = "codenest~facebook-story-downloader"
 
 
 async def apify_run(actor, payload, timeout=240):
-    token = os.environ.get("APIFY_TOKEN", "").strip()
+    token = apify_token()
     if not token:
         raise JobError("Facebook та Instagram показують сторіс лише після входу. Щоб бот їх качав без вашого акаунта, як інші боти, "
-                       "додайте в Railway змінну APIFY_TOKEN (apify.com → Settings → API &amp; Integrations).")
+                       "додайте в Railway змінну APIFY_TOKEN (apify.com → Settings → API &amp; Integrations).\n\n🔎 " + apify_hint())
     async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
         r = await client.post(f"https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items",
                               params={"token": token}, json=payload)
