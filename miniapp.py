@@ -371,7 +371,8 @@ async def run(bot_module, uid, op, data=None, text=None, user=None, file=None):
     if cc:  # посилання — окремими віконцями з «Скопіювати»; текст із тими ж посиланнями вже не потрібен
         cards, text_out = cc["cards"], cc["head"]
     poll = next((d for r in rows for t, d in r if t.startswith("🔄 Оновити стан")), None)  # екран зі станом — застосунок оновлює сам
-    return {"poll": poll, "cards": cards, "text": text_out, "rows": rows, "hints": button_hints.apply_over(rows, button_hints.for_rows(rows), B.prefs(uid).get("hint_over")), "sections": secs or None, "toast": sink.toast, "notes": sink.notes[-5:], "awaiting": uid in B.AWAIT,
+    media = getattr(B, "APP_MEDIA", {}).pop(uid, None)
+    return {"media": media, "poll": poll, "cards": cards, "text": text_out, "rows": rows, "hints": button_hints.apply_over(rows, button_hints.for_rows(rows), B.prefs(uid).get("hint_over")), "sections": secs or None, "toast": sink.toast, "notes": sink.notes[-5:], "awaiting": uid in B.AWAIT,
             "view": bool(op == "screen" and data and B.is_view(data)),
             "replies": [re.sub(r"<[^>]+>", "", t)[:6000] for t in replies[-5:]]}
 
