@@ -386,7 +386,7 @@ async def fetch(item, source, options, work):
         *YT, *cookie_args(source), *entry, *convert, *subtitles, *live, "-f", selector,
         "--max-filesize", str(WEB_LIMIT), "--write-info-json",
         "--no-write-playlist-metafiles", "-o", "media.%(ext)s",
-        "--", source, cwd=work, timeout=600 + (options.live if live else 0),
+        "--", source, cwd=work, timeout=2400 + (options.live if live else 0),
     )
     outputs = [path for path in work.iterdir() if path.is_file()]
     files = [
