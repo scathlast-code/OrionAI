@@ -188,6 +188,14 @@ class Plugin(Base):
         rows = [[("🩺 Перевірити сайти", self.cb("chk"))]]
         rows += [[("🔄 Оновити yt-dlp і gallery-dl", self.cb("upd"))]] if self.host.is_admin(chat) else []
         rows.append([("« Медіа", self.cb())])
+        import os as _os
+        tok = M.apify_token()
+        lines.append("\n<b>Ключі</b>")
+        lines.append(f"{'✅' if tok else '❌'} APIFY_TOKEN (сторіс Instagram і Facebook)" + (f" · …{esc(tok[-4:])}" if tok else ""))
+        if not tok:
+            lines.append("   " + esc(M.apify_hint()))
+        lines.append(f"{'✅' if _os.environ.get('MEDIA_PROXY') else '—'} MEDIA_PROXY (YouTube)")
+        lines.append(f"{'✅' if self.big.ready() else '—'} TELEGRAM_API_ID / HASH (файли до 2 ГБ)")
         lines.append("\nСайти часто змінюються — якщо щось перестало завантажуватись, оновіть завантажувачі.")
         return "\n".join(lines), rows
 
