@@ -17,6 +17,8 @@ from urllib.parse import unquote, urljoin, urlsplit
 import httpx
 from lxml import html
 
+from html import escape as html_escape
+
 from .common import JobError, URLDenied, WEB_LIMIT, run, safe_name
 
 BLOCKED = (
@@ -207,17 +209,59 @@ def allow_extractor(data):
         raise URLDenied("Це джерело вимкнене.")
 
 
+# Сайти, де заголовок сторінки без самого відео — це невдача, а не результат.
+VIDEO_HOSTS = ("youtube.com", "youtu.be", "tiktok.com", "vimeo.com", "twitch.tv", "dailymotion.com", "rumble.com",
+               "soundcloud.com", "fb.watch")
+# Друга спроба для YouTube, коли він просить «підтвердити, що ви не бот»: інші клієнти плеєра.
+YT_RETRY = ("--extractor-args", "youtube:player_client=default,tv,mweb,web_safari,web_embedded")
+BOT_CHECK = re.compile(r"sign in to confirm|not a bot|confirm you.re not|po.?token|http error 403", re.I)
+
+
+def explain(raw):
+    """Сирий текст помилки yt-dlp / gallery-dl → зрозуміла причина + технічний рядок."""
+    raw = str(raw or "").strip()
+    low = raw.lower()
+    if BOT_CHECK.search(raw):
+        why = ("YouTube не пускає сервер бота: просить «підтвердити, що ви не бот». Це блокування IP-адреси сервера "
+               "(Railway), посилання тут ні до чого.\n🍪 Рішення: Медіа → «🍪 Входи на сайти» → youtube → надішліть cookies.txt "
+               "зі свого браузера — тоді бот відкриватиме YouTube як ви.")
+    elif re.search(r"private|log ?in|sign in|cookies|authenticat|members.only|age.restrict|inappropriate", low):
+        why = "Сайт віддає це лише після входу (приватне, 18+ чи лише для підписників). 🍪 Додайте cookies цього сайту в «Входи на сайти»."
+    elif "unsupported url" in low:
+        why = "Цей сайт завантажувачі не підтримують."
+    elif re.search(r"unavailable|removed|not available|deleted|does not exist|404", low):
+        why = "Відео недоступне: видалене, заблоковане у країні сервера або посилання неповне."
+    elif re.search(r"429|too many requests|rate.?limit", low):
+        why = "Сайт тимчасово обмежив запити з сервера. Спробуйте за кілька хвилин."
+    elif "перевищив час" in low:
+        why = "Сайт відповідав надто довго."
+    else:
+        why = "Не вдалося отримати медіа з цього посилання."
+    tech = re.sub(r"^(?:\w[\w-]*: )?(?:[\w-]+ · код \d+\. )?(?:ERROR: )?", "", raw.splitlines()[-1] if raw else "")[:220]
+    tech = html_escape(tech)
+    return why + (f"\n\n<i>Технічно: {tech}</i>" if tech and tech not in why else "")
+
+
 async def video_probe(url, work):
-    data = json.loads(await run(
-        *YT, *cookie_args(url), "--dump-single-json", "--skip-download", "--flat-playlist",
-        "--yes-playlist", "--", url, cwd=work, timeout=100,
-    ))
+    base = (*YT, *cookie_args(url), "--dump-single-json", "--skip-download", "--flat-playlist", "--yes-playlist")
+    extra = ()
+    try:
+        out = await run(*base, "--", url, cwd=work, timeout=100)
+    except JobError as exc:
+        host = (urlsplit(url).hostname or "").lower()
+        if not (domain_matches(host, ("youtube.com", "youtu.be")) and BOT_CHECK.search(str(exc))):
+            raise
+        extra = YT_RETRY
+        out = await run(*base, *extra, "--", url, cwd=work, timeout=100)
+    data = json.loads(out)
+    if extra:
+        data["_yt_args"] = list(extra)
     allow_extractor(data)
     if isinstance(data.get("webpage_url"), str):
         await check_url(data["webpage_url"])
     if "entries" in data:
         return [
-            Item("yt", url, row, position)
+            Item("yt", url, {**row, "_yt_args": data.get("_yt_args", [])}, position)
             for position, row in enumerate(data["entries"] or [], 1)
             if isinstance(row, dict)
         ]
@@ -317,16 +361,26 @@ async def inspect_link(url, work):
     else:
         probes = (video_probe, gallery_probe, page_probe)
 
+    video_site = domain_matches(host, VIDEO_HOSTS)
+    errors = []
     for probe in probes:
         try:
             items = await probe(url, work)
         except URLDenied:
             raise
-        except (JobError, httpx.HTTPError, OSError, ValueError, TypeError):
+        except (JobError, httpx.HTTPError, OSError, ValueError, TypeError) as exc:
+            errors.append((probe.__name__, str(exc) or type(exc).__name__))
             continue
+        if items and video_site and probe is page_probe and all(
+            it.engine == "text" or it.info.get("preview") for it in items
+        ):
+            continue  # лише заголовок і обкладинка сторінки — для відеосайту це не результат
         if items:
             return items
-    raise JobError("Джерело не повернуло доступного медіа або тексту.")
+    # Найзмістовніша причина — від yt-dlp (він знає сайти), далі gallery-dl, далі сторінка.
+    order = {"video_probe": 0, "gallery_probe": 1, "page_probe": 2}
+    errors.sort(key=lambda e: order.get(e[0], 3))
+    raise JobError(explain(errors[0][1] if errors else "Джерело не повернуло медіа або тексту."))
 
 
 async def fetch_direct(item, source, options, work):
@@ -382,12 +436,22 @@ async def fetch(item, source, options, work):
     live = []
     if item.info.get("is_live") or item.info.get("live_status") == "is_live":  # 🔴 ефір — записуємо лише перші хвилини
         live = ["--downloader", "ffmpeg", "--downloader-args", f"ffmpeg:-t {int(options.live)}"]
-    await run(
-        *YT, *cookie_args(source), *entry, *convert, *subtitles, *live, "-f", selector,
-        "--max-filesize", str(WEB_LIMIT), "--write-info-json",
-        "--no-write-playlist-metafiles", "-o", "media.%(ext)s",
-        "--", source, cwd=work, timeout=2400 + (options.live if live else 0),
-    )
+    def args(extra):
+        return (*YT, *cookie_args(source), *extra, *entry, *convert, *subtitles, *live, "-f", selector,
+                "--max-filesize", str(WEB_LIMIT), "--write-info-json",
+                "--no-write-playlist-metafiles", "-o", "media.%(ext)s", "--", source)
+    limit = 2400 + (options.live if live else 0)
+    extra = tuple(item.info.get("_yt_args") or ())
+    try:
+        await run(*args(extra), cwd=work, timeout=limit)
+    except JobError as exc:
+        if extra or not BOT_CHECK.search(str(exc)) or not domain_matches(
+                (urlsplit(source).hostname or "").lower(), ("youtube.com", "youtu.be")):
+            raise
+        for leftover in work.iterdir():
+            if leftover.is_file():
+                leftover.unlink()
+        await run(*args(YT_RETRY), cwd=work, timeout=limit)
     outputs = [path for path in work.iterdir() if path.is_file()]
     files = [
         path for path in outputs
