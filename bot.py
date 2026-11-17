@@ -2323,6 +2323,7 @@ ITEMS = {
     "news": ("📰 Ньюзрум", "m:pl:news"),
     "utm": ("🔗 UTM-мітки", "m:utm"),
     "stk": ("🧷 Стікери", "m:pl:stk"),
+    "med": ("📥 Медіа", "m:pl:med"),
     "sbx": ("🧪 Пісочниця", "m:sbx"),
     "imp": ("💡 Покращити", "m:imp"),
     "inbox": ("📮 Скринька", "m:pl:inb"),
@@ -2338,7 +2339,7 @@ DEFAULT_GROUPS = {
 DEFAULT_LAYOUT = [
     ["g:work", "home"], ["g:plugins", "home"], ["g:ai", "home"], ["g:settings", "home"],
     ["dl", "g:work"], ["tl", "g:work"], ["nt", "g:work"], ["pins", "g:work"], ["inbox", "g:work"],
-    ["news", "g:plugins"], ["utm", "g:plugins"], ["stk", "g:plugins"],
+    ["news", "g:plugins"], ["utm", "g:plugins"], ["stk", "g:plugins"], ["med", "g:plugins"],
     ["md", "g:ai"], ["cr", "g:ai"],
     ["st", "g:settings"], ["acc", "g:settings"], ["backup", "g:settings"], ["svc", "g:settings"],
     ["btns", "g:settings"], ["diag", "g:settings"], ["help", "g:settings"],
@@ -2401,7 +2402,7 @@ def _migrate_compact_menu(chat_id):
         saved = [list(x) for x in (p.get("layout") or [])]
         if saved:
             ids = {x[0] for x in saved}
-            extra = [x for x in (["g:plugins", "home"], ["news", "g:plugins"], ["stk", "g:plugins"], ["plg", "g:settings"]) if x[0] not in ids]
+            extra = [x for x in (["g:plugins", "home"], ["news", "g:plugins"], ["stk", "g:plugins"], ["med", "g:plugins"], ["plg", "g:settings"]) if x[0] not in ids]
             pos = next((i + 1 for i, x in enumerate(saved) if x[0] == "g:work"), 0)
             for x in reversed(extra):
                 saved.insert(pos if x[0] == "g:plugins" else len(saved), x)
@@ -9188,6 +9189,13 @@ if TELEGRAM_TOKEN:
     tg_app.add_handler(TypeHandler(Update, partial(telegram_guard, scope="orion")), group=-100)
     tg_app.add_handler(TypeHandler(Update, log_activity), group=-99)  # 🧾 журнал дій
     tg_app.add_handler(TypeHandler(Update, mute_guard), group=-98)  # 🔇 тиша для обмежених
+
+    async def plugin_file(update, ctx):  # 🔌 файл, на який чекає плагін (📥 Медіа: очищення метаданих, cookies)
+        if update.effective_user and allowed(update) and await PLUGINS.on_file(update, ctx):
+            from telegram.ext import ApplicationHandlerStop
+            raise ApplicationHandlerStop
+    tg_app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.VOICE
+                                                                  | filters.VIDEO_NOTE | filters.ANIMATION | filters.Sticker.ALL), plugin_file), group=-3)
     from reliability_telegram import install as install_reliability
     install_reliability(tg_app, "orion")
     from notification_telegram import install as install_notifications
