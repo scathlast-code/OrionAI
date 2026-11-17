@@ -4,6 +4,7 @@
 короткий запис ефіру. Перевірка адрес (лише публічні HTTP/HTTPS) — як в оригіналі.
 """
 import asyncio
+import os
 import ipaddress
 import json
 import mimetypes
@@ -79,6 +80,18 @@ def cookie_file(url):
             path = Path(COOKIES_DIR) / f"{site}.txt"
             return path if path.is_file() else None
     return None
+
+
+def proxy_args(url):
+    """MEDIA_PROXY у Railway (напр. http://user:pass@host:port) — запити до YouTube йдуть через нього,
+    бо YouTube блокує IP серверів. MEDIA_PROXY_ALL=1 — через проксі всі сайти."""
+    proxy = os.environ.get("MEDIA_PROXY", "").strip()
+    if not proxy:
+        return []
+    host = (urlsplit(url).hostname or "").lower()
+    if os.environ.get("MEDIA_PROXY_ALL", "").strip() in ("1", "true", "yes") or domain_matches(host, ("youtube.com", "youtu.be")):
+        return ["--proxy", proxy]
+    return []
 
 
 def cookie_args(url, flag="--cookies"):
@@ -222,9 +235,10 @@ def explain(raw):
     raw = str(raw or "").strip()
     low = raw.lower()
     if BOT_CHECK.search(raw):
-        why = ("YouTube не пускає сервер бота: просить «підтвердити, що ви не бот». Це блокування IP-адреси сервера "
-               "(Railway), посилання тут ні до чого.\n🍪 Рішення: Медіа → «🍪 Входи на сайти» → youtube → надішліть cookies.txt "
-               "зі свого браузера — тоді бот відкриватиме YouTube як ви.")
+        why = ("YouTube не пускає сервер бота: просить «підтвердити, що ви не бот». Він блокує IP-адреси серверів "
+               "(Railway), посилання тут ні до чого. Інші сайти (TikTok, Instagram, X…) працюють."
+               + ("\nПроксі MEDIA_PROXY теж заблоковано — потрібен домашній (residential) проксі." if os.environ.get("MEDIA_PROXY")
+                  else "\n🔧 Надійне рішення — домашній проксі: змінна MEDIA_PROXY у Railway. Іноді блок знімається сам за кілька годин."))
     elif re.search(r"private|log ?in|sign in|cookies|authenticat|members.only|age.restrict|inappropriate", low):
         why = "Сайт віддає це лише після входу (приватне, 18+ чи лише для підписників). 🍪 Додайте cookies цього сайту в «Входи на сайти»."
     elif "unsupported url" in low:
@@ -243,7 +257,7 @@ def explain(raw):
 
 
 async def video_probe(url, work):
-    base = (*YT, *cookie_args(url), "--dump-single-json", "--skip-download", "--flat-playlist", "--yes-playlist")
+    base = (*YT, *proxy_args(url), *cookie_args(url), "--dump-single-json", "--skip-download", "--flat-playlist", "--yes-playlist")
     extra = ()
     try:
         out = await run(*base, "--", url, cwd=work, timeout=100)
@@ -273,7 +287,7 @@ async def video_probe(url, work):
 async def gallery_probe(url, work):
     data = json.loads(await run(
         "gallery-dl", "--config-ignore", *cookie_args(url, "--cookies"), "--dump-json",
-        "--", url, cwd=work, timeout=90,
+        *proxy_args(url), "--", url, cwd=work, timeout=90,
     ))
     result = []
     shared = {}
@@ -437,7 +451,7 @@ async def fetch(item, source, options, work):
     if item.info.get("is_live") or item.info.get("live_status") == "is_live":  # 🔴 ефір — записуємо лише перші хвилини
         live = ["--downloader", "ffmpeg", "--downloader-args", f"ffmpeg:-t {int(options.live)}"]
     def args(extra):
-        return (*YT, *cookie_args(source), *extra, *entry, *convert, *subtitles, *live, "-f", selector,
+        return (*YT, *proxy_args(source), *cookie_args(source), *extra, *entry, *convert, *subtitles, *live, "-f", selector,
                 "--max-filesize", str(WEB_LIMIT), "--write-info-json",
                 "--no-write-playlist-metafiles", "-o", "media.%(ext)s", "--", source)
     limit = 2400 + (options.live if live else 0)
