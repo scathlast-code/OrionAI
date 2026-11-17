@@ -537,19 +537,57 @@ async def tumblr_probe(url, work):
 SHARE = re.compile(r"^https?://(?:(?:www|m|web)\.)?(?:facebook\.com/(?:share|story\.php|watch/?\?)|fb\.watch/|vm\.tiktok\.com/|vt\.tiktok\.com/|pin\.it/)")
 
 
+def _real_target(final):
+    """Сторінка входу часто несе справжню адресу в ?next=…"""
+    from urllib.parse import parse_qs
+    query = parse_qs(urlsplit(final).query)
+    for key in ("next", "u", "continue"):
+        for value in query.get(key, []):
+            if value.startswith(("https://", "http://")) and not SHARE.match(value):
+                return value
+    return None
+
+
+async def _peek(url, agent):
+    async with open_url(url, agent=agent) as response:
+        final = str(response.url)
+        content = bytearray()
+        async for chunk in response.aiter_bytes(65536):
+            content.extend(chunk)
+            if len(content) >= 1_500_000:
+                break
+    return final, bytes(content)
+
+
 async def resolve_share(url):
     """Короткі посилання «Поділитися» (facebook.com/share/…, fb.watch, vm.tiktok…) → справжня адреса допису,
-    бо завантажувачі їх не розпізнають. Якщо сайт веде на сторінку входу — лишаємо як було."""
+    бо завантажувачі їх не розпізнають: перенаправлення, ?next= сторінки входу, og:url / canonical / meta refresh."""
     if not SHARE.match(url):
         return url
-    try:
-        async with open_url(url, agent=BROWSER) as response:
-            final = str(response.url)
-    except (JobError, httpx.HTTPError, OSError):
-        return url
-    if re.search(r"/login|/checkpoint|login\.php", final):
-        return url
-    return final
+    for agent in (BROWSER, "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)"):
+        try:
+            final, raw = await _peek(url, agent)
+        except (JobError, httpx.HTTPError, OSError):
+            continue
+        if not SHARE.match(final) and not re.search(r"/login|/checkpoint|login\.php", final):
+            return final
+        target = _real_target(final)
+        if target:
+            return target
+        try:
+            doc = read_html(raw)
+        except Exception:  # noqa: BLE001
+            continue
+        found = (doc.xpath("string(//meta[@property='og:url']/@content)")
+                 or doc.xpath("string(//link[@rel='canonical']/@href)"))
+        refresh = doc.xpath("string(//meta[translate(@http-equiv,'REFRESH','refresh')='refresh']/@content)")
+        if not found and "url=" in refresh.lower():
+            found = refresh.split("=", 1)[1].strip(" '\"")
+        if found:
+            found = urljoin(final, found)
+            if not SHARE.match(found) and not re.search(r"/login|login\.php", found):
+                return found
+    return url
 
 
 async def inspect_link(url, work):
@@ -591,6 +629,9 @@ async def inspect_link(url, work):
         raise JobError("Threads не віддав серверу саме відео, лише обкладинку."
                        + ("" if cookie_file(url) else " Якщо допис відкривається лише після входу — 🍪 додайте cookies threads у «Входи на сайти».")
                        + (f"\n\n<i>Технічно: {html_escape(detail)}</i>" if detail else ""))
+    if SHARE.match(url) and any("unsupported url" in e[1].lower() for e in errors):
+        raise JobError("Сайт не розкрив серверу це коротке посилання «Поділитися». Спробуйте інше посилання на той самий допис: "
+                       "у Facebook — «Поділитися» → «Копіювати посилання» з самого відео (reel/… або watch/?v=…).")
     # Найзмістовніша причина — від yt-dlp (він знає сайти), далі gallery-dl, далі сторінка.
     order = {"threads_probe": 0, "tumblr_probe": 0, "video_probe": 1, "gallery_probe": 2, "page_probe": 3}
     errors.sort(key=lambda e: order.get(e[0], 3))
