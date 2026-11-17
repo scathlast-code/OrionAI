@@ -670,8 +670,21 @@ def apify_token():
     return ""
 
 
+def server_name():
+    """Де фізично працює бот: Railway (який сервіс) чи інший сервер кластера."""
+    import socket
+    svc = os.environ.get("RAILWAY_SERVICE_NAME")
+    if svc:
+        return f"Railway · сервіс «{svc}» · {os.environ.get('RAILWAY_ENVIRONMENT_NAME') or os.environ.get('RAILWAY_ENVIRONMENT') or ''}".rstrip(" ·")
+    return f"НЕ Railway · вузол «{os.environ.get('ORION_NODE_ID', 'primary')}» · {socket.gethostname()}"
+
+
 def apify_hint():
     names = [n for n in os.environ if "APIFY" in n.upper()]
+    where = server_name()
+    if not where.startswith("Railway"):
+        return (f"Зараз відповідає не Railway, а інший сервер кластера ({where}) — у нього свої змінні. "
+                "Додайте APIFY_TOKEN і туди, або вставте ключ у боті кнопкою «🔑».")
     return ("Сервер бачить змінні з «APIFY»: " + ", ".join(f"«{n}»" for n in names) + " — але без значення."
             if names else "Сервер бота не бачить жодної змінної з «APIFY» — у Railway вона не застосована до цього сервісу "
             "(натисніть «Deploy» після додавання) або додана до іншого сервісу.")

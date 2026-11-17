@@ -190,6 +190,7 @@ class Plugin(Base):
         rows.append([("« Медіа", self.cb())])
         import os as _os
         tok = M.apify_token()
+        lines.append(f"\n🖥 Працює: {esc(M.server_name())}")
         lines.append("\n<b>Ключі</b>")
         lines.append(f"{'✅' if tok else '❌'} APIFY_TOKEN (сторіс Instagram і Facebook)" + (f" · …{esc(tok[-4:])}" if tok else ""))
         if not tok:
