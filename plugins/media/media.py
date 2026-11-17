@@ -657,6 +657,12 @@ def apify_token():
     exact = os.environ.get("APIFY_TOKEN", "").strip().strip('"\'')
     if exact:
         return exact
+    if COOKIES_DIR:  # ключ, вставлений у боті (🛠 Інструменти → 🔑), лежить поруч із cookies
+        key = Path(COOKIES_DIR).parent / "apify.key"
+        if key.is_file():
+            value = key.read_text("utf-8").strip()
+            if value:
+                return value
     for name, value in os.environ.items():
         value = (value or "").strip().strip('"\'')
         if value and ("APIFY" in name.upper().replace(" ", "") or value.startswith("apify_api_")):
