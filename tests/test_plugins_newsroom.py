@@ -150,7 +150,7 @@ def test_whatsapp_signature_and_filter():
 def test_registry_toggle_and_admin(tmp_path):
     host, bot, _ = make_host(tmp_path, lambda p, n: "{}")
     reg = Registry(host)
-    assert set(reg.plugins) == {"hub", "news", "stk", "inb", "med"}
+    assert set(reg.plugins) == {"hub", "news", "stk", "inb", "med", "wx"}
     assert "m:pl:news" not in str(reg.home(5)[1]) and "лише для власника" in reg.home(5)[0]  # без кнопки, лише пояснення
     toast, _ = run(reg.route(None, None, 5, ["news"]))
     assert "власника" in toast

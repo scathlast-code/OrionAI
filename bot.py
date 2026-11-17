@@ -2324,6 +2324,7 @@ ITEMS = {
     "utm": ("🔗 UTM-мітки", "m:utm"),
     "stk": ("🧷 Стікери", "m:pl:stk"),
     "med": ("📥 Медіа", "m:pl:med"),
+    "wx": ("🌤 Погода", "m:pl:wx"),
     "sbx": ("🧪 Пісочниця", "m:sbx"),
     "imp": ("💡 Покращити", "m:imp"),
     "inbox": ("📮 Скринька", "m:pl:inb"),
@@ -2339,7 +2340,7 @@ DEFAULT_GROUPS = {
 DEFAULT_LAYOUT = [
     ["g:work", "home"], ["g:plugins", "home"], ["g:ai", "home"], ["g:settings", "home"],
     ["dl", "g:work"], ["tl", "g:work"], ["nt", "g:work"], ["pins", "g:work"], ["inbox", "g:work"],
-    ["news", "g:plugins"], ["utm", "g:plugins"], ["stk", "g:plugins"], ["med", "g:plugins"],
+    ["news", "g:plugins"], ["utm", "g:plugins"], ["stk", "g:plugins"], ["med", "g:plugins"], ["wx", "g:plugins"],
     ["md", "g:ai"], ["cr", "g:ai"],
     ["st", "g:settings"], ["acc", "g:settings"], ["backup", "g:settings"], ["svc", "g:settings"],
     ["btns", "g:settings"], ["diag", "g:settings"], ["help", "g:settings"],
@@ -2408,6 +2409,15 @@ def _migrate_compact_menu(chat_id):
                 saved.insert(pos if x[0] == "g:plugins" else len(saved), x)
             set_pref(chat_id, "layout", saved)
         set_pref(chat_id, "plugins_menu_v5", True)
+        p = prefs(chat_id)
+    if not p.get("weather_menu_v1"):
+        # 🌤 Погода — новий плагін: додаємо в «📰 Медіа» тим, хто вже має власне розташування меню.
+        saved = [list(x) for x in (p.get("layout") or [])]
+        if saved and "wx" not in {x[0] for x in saved}:
+            pos = next((i + 1 for i, x in enumerate(saved) if x[0] == "med"), len(saved))
+            saved.insert(pos, ["wx", "g:plugins"])
+            set_pref(chat_id, "layout", saved)
+        set_pref(chat_id, "weather_menu_v1", True)
         p = prefs(chat_id)
     if not p.get("media_menu_v6"):
         # «🔌 Плагіни» — технічне слово: категорія стає «📰 Медіа», а керування плагінами переходить у ⚙️ Налаштування.

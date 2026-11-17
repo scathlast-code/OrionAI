@@ -424,6 +424,9 @@ class ObservancesUI:
                         self.store.set("obs_sent", today)
                         text, rows = self.obs_home()
                         await self.host.notify_admins("🌅 " + text, rows)
+                        wx = self.host.extra.get("plugin", lambda pid: None)("wx")  # 🌤 погода — одразу після тем дня
+                        if wx and wx.on():
+                            await wx.send_morning()
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001
