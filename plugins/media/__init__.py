@@ -194,6 +194,9 @@ class Plugin(Base):
         lines.append(f"{'✅' if tok else '❌'} APIFY_TOKEN (сторіс Instagram і Facebook)" + (f" · …{esc(tok[-4:])}" if tok else ""))
         if not tok:
             lines.append("   " + esc(M.apify_hint()))
+            rows.insert(0, [("🔑 Вставити ключ Apify тут", self.cb("akey"))])
+        elif (self.dir / "apify.key").is_file():
+            rows.insert(0, [("🗑 Прибрати ключ Apify", self.cb("akeyd"))])
         lines.append(f"{'✅' if _os.environ.get('MEDIA_PROXY') else '—'} MEDIA_PROXY (YouTube)")
         lines.append(f"{'✅' if self.big.ready() else '—'} TELEGRAM_API_ID / HASH (файли до 2 ГБ)")
         lines.append("\nСайти часто змінюються — якщо щось перестало завантажуватись, оновіть завантажувачі.")
@@ -226,6 +229,13 @@ class Plugin(Base):
             return "🗑 Видалено", self.cookies_screen(chat)
         if a == "tools":
             return None, await self.tools_screen(chat)
+        if a == "akey":
+            self.ask(chat, "akey")
+            return None, ("🔑 <b>Надішліть ключ Apify</b> (починається з <code>apify_api_</code>).\n"
+                          "Бот збереже його на сервері й одразу видалить ваше повідомлення з чату.", [[("✖️ Скасувати", "m:cancel")]])
+        if a == "akeyd":
+            (self.dir / "apify.key").unlink(missing_ok=True)
+            return "🗑 Прибрано", await self.tools_screen(chat)
         if a == "chk":
             if self.busy(chat):
                 return "⏳ Попереднє завдання ще триває", None
@@ -294,6 +304,19 @@ class Plugin(Base):
 
     async def on_text(self, update, ctx, chat, key, data, text):
         text = (text or "").strip()
+        if key == "akey":
+            try:
+                await update.message.delete()  # ключ — як пароль: у чаті не лишаємо
+            except Exception:  # noqa: BLE001
+                pass
+            token = text.strip().strip('"\'')
+            if not re.fullmatch(r"apify_api_[A-Za-z0-9]{20,}", token):
+                self.ask(chat, "akey")
+                return "Не схоже на ключ", ("⚠️ Ключ Apify починається з <code>apify_api_</code>. Скопіюйте його ще раз.", [[("✖️ Скасувати", "m:cancel")]])
+            path = self.dir / "apify.key"
+            path.write_text(token, "utf-8")
+            path.chmod(0o600)
+            return "✅ Ключ збережено", await self.tools_screen(chat)
         if key == "url":
             m = re.search(r"https?://\S+", text)
             if not m:
@@ -521,8 +544,10 @@ class Plugin(Base):
         except JobError as exc:
             t = secrets.token_hex(4)
             self.offers[t] = (chat, url)
-            await self._status(chat, status, f"⚠️ <b>Не вийшло завантажити</b>\n\n{exc}"[:4000],
-                               [[("🔁 Спробувати ще раз", self.cb("re", t))], [("🍪 Входи на сайти", self.cb("ck")), ("« Медіа", self.cb())]])
+            rows = [[("🔁 Спробувати ще раз", self.cb("re", t))], [("🍪 Входи на сайти", self.cb("ck")), ("« Медіа", self.cb())]]
+            if "APIFY_TOKEN" in str(exc) and "не підходить" not in str(exc):
+                rows.insert(0, [("🔑 Вставити ключ Apify тут", self.cb("akey"))])
+            await self._status(chat, status, f"⚠️ <b>Не вийшло завантажити</b>\n\n{exc}"[:4000], rows)
             return
         job = Job(secrets.token_hex(4), url, items[:300])
         job.options.height = 1080  # швидкий режим: до 1080p, щоб не впертись у межу Telegram
