@@ -628,21 +628,11 @@ async def story_probe(url, work):
         first = str(exc)
     else:
         first = ""
-    token = os.environ.get("APIFY_TOKEN", "").strip()
-    if not token:
+    if not os.environ.get("APIFY_TOKEN", "").strip() and first:
         raise JobError("Instagram показує сторіс лише після входу. Щоб бот їх качав без вашого акаунта, як інші боти, "
                        "додайте в Railway змінну APIFY_TOKEN (apify.com → Settings → API &amp; Integrations; безкоштовних "
-                       "$5 на місяць вистачає приблизно на 300 сторіс)." + (f"\n\n<i>Технічно: {html_escape(first[-200:])}</i>" if first else ""))
-    async with httpx.AsyncClient(timeout=180, trust_env=False) as client:
-        r = await client.post(f"https://api.apify.com/v2/acts/{APIFY_ACTOR}/run-sync-get-dataset-items",
-                              params={"token": token}, json={"usernames": [user], "saveFiles": False, "maxItems": 0})
-    if r.status_code in (401, 403):
-        raise JobError("APIFY_TOKEN не підходить — перевірте ключ у Railway.")
-    if r.status_code == 402:
-        raise JobError("На Apify закінчився баланс цього місяця.")
-    if r.status_code >= 400:
-        raise JobError(f"Apify відповів помилкою {r.status_code}: {r.text[:150]}")
-    rows = [row for row in (r.json() or []) if isinstance(row, dict)]
+                       "$5 на місяць вистачає приблизно на 300 сторіс)." + f"\n\n<i>Технічно: {html_escape(first[-200:])}</i>")
+    rows = await apify_run(APIFY_ACTOR, {"usernames": [user], "saveFiles": False, "maxItems": 0}, timeout=180)
     if story_id:
         exact = [row for row in rows if str(row.get("storyId") or "").split("_")[0] == story_id]
         rows = exact or rows
@@ -659,6 +649,48 @@ async def story_probe(url, work):
     return items
 
 
+FB_STORY = re.compile(r"^https?://(?:(?:www|m|web)\.)?facebook\.com/stories/")
+FB_STORY_ACTOR = "codenest~facebook-story-downloader"
+
+
+async def apify_run(actor, payload, timeout=240):
+    token = os.environ.get("APIFY_TOKEN", "").strip()
+    if not token:
+        raise JobError("Facebook та Instagram показують сторіс лише після входу. Щоб бот їх качав без вашого акаунта, як інші боти, "
+                       "додайте в Railway змінну APIFY_TOKEN (apify.com → Settings → API &amp; Integrations).")
+    async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+        r = await client.post(f"https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items",
+                              params={"token": token}, json=payload)
+    if r.status_code in (401, 403):
+        raise JobError("APIFY_TOKEN не підходить — перевірте ключ у Railway.")
+    if r.status_code == 402:
+        raise JobError("На Apify закінчився баланс цього місяця.")
+    if r.status_code >= 400:
+        raise JobError(f"Apify відповів помилкою {r.status_code}: {r.text[:150]}")
+    data = r.json()
+    return [row for row in (data if isinstance(data, list) else []) if isinstance(row, dict)]
+
+
+async def fb_story_probe(url, work):
+    """Сторіс Facebook: yt-dlp їх не знає, тож — через сервіс Apify (APIFY_TOKEN), як інші боти-завантажувачі."""
+    rows = await apify_run(FB_STORY_ACTOR, {"story_urls": [{"url": url}], "saveToKeyValueStore": False})
+    items = []
+    for row in rows:
+        if row.get("status") == "failed":
+            continue
+        link = row.get("download_url") or row.get("kv_store_url")
+        if not link:
+            continue
+        who = row.get("uploader_name") or ""
+        info = {"title": f"Сторіс {who}".strip(), "author": who}
+        if row.get("media_type") == "video" and row.get("audio_download_url"):
+            info["_audio"] = row["audio_download_url"]  # відео й звук окремо — склеїмо
+        items.append(Item("direct", link, info))
+    if not items:
+        raise JobError("Сторіс не знайдено: минули 24 години, вона приватна або посилання неповне.")
+    return items
+
+
 async def inspect_link(url, work):
     await check_url(url)
     parsed = urlsplit(url)
@@ -670,6 +702,8 @@ async def inspect_link(url, work):
         probes = (page_probe, video_probe, gallery_probe)
     elif STORY.match(url):
         probes = (story_probe,)
+    elif FB_STORY.match(url):
+        probes = (fb_story_probe,)
     elif domain_matches(host, ("tiktok.com",)):
         probes = (video_probe, gallery_probe, page_probe)  # відео — yt-dlp; фото-каруселі — gallery-dl
     elif domain_matches(host, ("tumblr.com",)):
@@ -706,9 +740,9 @@ async def inspect_link(url, work):
         raise JobError("Сайт не розкрив серверу це коротке посилання «Поділитися». Спробуйте інше посилання на той самий допис: "
                        "у Facebook — «Поділитися» → «Копіювати посилання» з самого відео (reel/… або watch/?v=…).")
     # Найзмістовніша причина — від yt-dlp (він знає сайти), далі gallery-dl, далі сторінка.
-    order = {"story_probe": 0, "threads_probe": 0, "tumblr_probe": 0, "video_probe": 1, "gallery_probe": 2, "page_probe": 3}
+    order = {"story_probe": 0, "fb_story_probe": 0, "threads_probe": 0, "tumblr_probe": 0, "video_probe": 1, "gallery_probe": 2, "page_probe": 3}
     errors.sort(key=lambda e: order.get(e[0], 3))
-    if errors and errors[0][0] == "story_probe":
+    if errors and errors[0][0] in ("story_probe", "fb_story_probe"):
         raise JobError(errors[0][1])  # уже зрозуміле пояснення
     raise JobError(explain(errors[0][1] if errors else "Джерело не повернуло медіа або тексту."))
 
@@ -738,6 +772,21 @@ async def fetch_direct(item, source, options, work, progress=None):
                 output.write(chunk)
         if not total:
             raise JobError("Джерело повернуло порожній файл.")
+    audio = item.info.get("_audio")
+    if audio:  # окрема звукова доріжка (сторіс Facebook) — склеюємо без перекодування
+        sound = work / "audio.m4a"
+        try:
+            async with open_url(audio, referer=source) as response:
+                with sound.open("wb") as output:
+                    async for chunk in response.aiter_bytes(65536):
+                        output.write(chunk)
+            joined = work / (path.stem + "-av.mp4")
+            await run(*FF, "-i", path, "-i", sound, "-map", "0:v:0", "-map", "1:a:0", "-c", "copy",
+                      "-movflags", "+faststart", joined, timeout=300)
+            path.unlink(missing_ok=True)
+            path = joined.rename(path.with_suffix(".mp4"))
+        except (JobError, httpx.HTTPError, OSError):
+            pass  # без звуку краще, ніж нічого
     return path, [], item.info
 
 
