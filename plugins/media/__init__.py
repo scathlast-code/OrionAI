@@ -789,7 +789,8 @@ class Plugin(Base):
 
         async def one(title, ie):
             cls = getattr(E, ie + "IE", None) if E else None
-            urls = [t.get("url") for t in (cls.get_testcases(False) if cls else []) if t.get("url")][:2]
+            urls = [t.get("url") for t in (cls.get_testcases(False) if cls else [])
+                    if str(t.get("url") or "").startswith(("http://", "https://"))][:2]
             if not urls:
                 results[title] = ("➖", "немає тестового посилання")
                 return
@@ -807,7 +808,9 @@ class Plugin(Base):
                     except asyncio.CancelledError:
                         raise
                     except Exception as exc:  # noqa: BLE001
-                        last = re.sub(r"<[^>]+>", "", str(exc)).split("\n")[0][:90] or type(exc).__name__
+                        plain = re.sub(r"<[^>]+>", "", str(exc)).replace("&#x27;", "'").replace("&amp;", "&")
+                        tech = plain.split("Технічно:", 1)[1].strip() if "Технічно:" in plain else ""
+                        last = (plain.split("\n")[0][:70] + (f" · {tech[:110]}" if tech else "")) or type(exc).__name__
             results[title] = ("❌", last)
 
         await asyncio.gather(*(one(t, ie) for t, ie in self.SITES))
