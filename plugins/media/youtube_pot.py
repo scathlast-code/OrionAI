@@ -5,6 +5,7 @@ Goals:
 - Keep --no-plugin-dirs for all other sites.
 - Controlled client sequence + limited retries for datacenter IPs (Railway).
 - Semaphore so yt-dlp + FFmpeg do not run in parallel beyond memory budget.
+- Shared argument builder used by both metadata probe and actual download.
 """
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ import pathlib
 import re
 import site
 from typing import Sequence
+from urllib.parse import urlsplit
 
 # Max concurrent heavy media jobs (yt-dlp download or FFmpeg post-process).
 # 1 is safest under 1 GB Railway RAM.
@@ -34,6 +36,11 @@ YT_CLIENT_SETS: Sequence[str] = (
 )
 
 
+def is_youtube(url: str) -> bool:
+    host = (urlsplit(url).hostname or "").lower()
+    return host == "youtube.com" or host.endswith(".youtube.com") or host == "youtu.be"
+
+
 def _plugin_dirs() -> list[str]:
     """Return directories that contain yt_dlp_plugins (bgutil installs here)."""
     dirs: list[str] = []
@@ -52,13 +59,11 @@ def _plugin_dirs() -> list[str]:
         p = pathlib.Path(base) / "yt_dlp_plugins"
         if p.is_dir():
             dirs.append(str(p))
-        # Some installs put the package itself as the plugin root
         p2 = pathlib.Path(base)
-        if (p2 / "yt_dlp_plugins").is_dir() or any(p2.glob("**/yt_dlp_plugins")):
+        if (p2 / "yt_dlp_plugins").is_dir():
             dirs.append(str(p2))
-    # Deduplicate while preserving order
-    seen = set()
-    out = []
+    seen: set[str] = set()
+    out: list[str] = []
     for d in dirs:
         if d not in seen:
             seen.add(d)
@@ -103,6 +108,36 @@ def yt_args(
     return args
 
 
+def probe_command(url: str, client_set: str | None = None, allow_plugins: bool = True) -> list[str]:
+    """Full command for metadata / format probe."""
+    return yt_args(
+        allow_plugins=allow_plugins,
+        client_set=client_set or YT_CLIENT_SETS[0],
+        extra=(
+            "--dump-single-json",
+            "--skip-download",
+            "--flat-playlist",
+            "--yes-playlist",
+            "--",
+            url,
+        ),
+    )
+
+
+def download_base_args(
+    *,
+    client_set: str | None = None,
+    allow_plugins: bool = True,
+    extra: Sequence[str] = (),
+) -> list[str]:
+    """Base args for actual media download (caller adds -f, -o, etc.)."""
+    return yt_args(
+        allow_plugins=allow_plugins,
+        client_set=client_set or YT_CLIENT_SETS[0],
+        extra=extra,
+    )
+
+
 def is_bot_check(text: str) -> bool:
     return bool(BOT_CHECK.search(str(text or "")))
 
@@ -143,7 +178,10 @@ def heavy_semaphore() -> asyncio.Semaphore:
 
 
 class HeavyJob:
-    """Async context manager that limits concurrent heavy media work."""
+    """Async context manager that limits concurrent heavy media work.
+
+    Releases the slot on normal exit, exception, timeout and cancellation.
+    """
 
     def __init__(self):
         self._sem = heavy_semaphore()
