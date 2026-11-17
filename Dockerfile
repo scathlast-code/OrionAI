@@ -1,8 +1,16 @@
-FROM python:3.13-slim
+FROM node:22-bookworm-slim AS pot-build
+RUN apt-get update && apt-get install -y --no-install-recommends git python3 make g++ pkg-config libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev && rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 --branch 2.0.2 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /opt/bgutil
+WORKDIR /opt/bgutil/server
+RUN npm ci && npx tsc
+
+FROM python:3.13-slim-bookworm
+COPY --from=pot-build /usr/local/bin/node /usr/local/bin/node
+COPY --from=pot-build /opt/bgutil /opt/bgutil
 # ffmpeg — слайдшоу й голос, шрифти DejaVu — підписи кирилицею, tzdata — час завдань
 # 📥 Медіа: exiftool, mat2, 7z — метадані; nodejs — yt-dlp розгадує захист YouTube
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core tzdata \
-    libimage-exiftool-perl mat2 p7zip-full nodejs \
+    libimage-exiftool-perl mat2 p7zip-full libcairo2 libpango-1.0-0 libpangocairo-1.0-0 libjpeg62-turbo libgif7 librsvg2-2 \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY requirements.txt .

@@ -16,6 +16,6 @@ openpyxl>=3.1,<4        # Excel зі статистикою UTM
 segno>=1.6,<2            # QR-коди коротких посилань (без Pillow)
 python-docx>=1.1,<2     # Word-звіт UTM
 yt-dlp[default]>=2026.10.26,<2026.12   # 📥 Медіа: завантаження з YouTube, Instagram, TikTok… (pinned for stability + PO Token)
-bgutil-ytdlp-pot-provider>=2.0.2       # 📥 YouTube PO Token provider (on-demand / HTTP)
+bgutil-ytdlp-pot-provider==2.0.2       # 📥 YouTube PO Token provider (on-demand / HTTP)
 gallery-dl               # 📥 Медіа: альбоми й каруселі
 lxml>=5,<7               # 📥 Медіа: розбір сторінок і очищення HTML
