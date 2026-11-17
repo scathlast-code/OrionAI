@@ -1,0 +1,36 @@
+--- a/plugins/media/media.py
++++ b/plugins/media/media.py
+@@ -22,6 +22,7 @@
+ 
+ from .common import run_stream
+ from .common import JobError, URLDenied, WEB_LIMIT, run, safe_name
++from . import youtube_pot as ytp
+ 
+ BLOCKED = (
+     "line.me", "lin.ee", "line-apps.com", "line-scdn.net",
+@@ -246,9 +247,9 @@
+ # Сайти, де заголовок сторінки без самого відео — це невдача, а не результат.
+ VIDEO_HOSTS = ("youtube.com", "youtu.be", "tiktok.com", "vimeo.com", "twitch.tv", "dailymotion.com", "rumble.com",
+                "soundcloud.com", "fb.watch")
+-# Друга спроба для YouTube, коли він просить «підтвердити, що ви не бот»: інші клієнти плеєра.
+-YT_RETRY = ("--extractor-args", "youtube:player_client=default,tv,mweb,web_safari,web_embedded")
+-BOT_CHECK = re.compile(r"sign in to confirm|not a bot|confirm you.re not|po.?token", re.I)
++# YouTube retry / PO Token logic lives in youtube_pot.py (ytp).
++BOT_CHECK = ytp.BOT_CHECK
++YT_RETRY = ("--extractor-args", f"youtube:player_client={ytp.YT_CLIENT_SETS[0]}")
+ 
+ 
+ def explain(raw):
+@@ -256,10 +257,7 @@
+     raw = str(raw or "").strip()
+     low = raw.lower()
+     if BOT_CHECK.search(raw):
+-        why = ("YouTube не пускає сервер бота: просить «підтвердити, що ви не бот». Він блокує IP-адреси серверів "
+-               "(Railway), посилання тут ні до чого. Інші сайти (TikTok, Instagram, X…) працюють."
+-               + ("\nПроксі MEDIA_PROXY теж заблоковано — потрібен домашній (residential) проксі." if os.environ.get("MEDIA_PROXY")
+-                  else "\n🔧 Надійне рішення — домашній проксі: змінна MEDIA_PROXY у Railway. Іноді блок знімається сам за кілька годин."))
++        why = ytp.explain_youtube(raw, has_proxy=bool(os.environ.get("MEDIA_PROXY")))
+     elif re.search(r"http error 403|forbidden", low):
+         why = "Сайт відмовив серверу бота (403) — часто так блокують сервери; іноді допомагає повтор."
+     elif re.search(r"private|log ?in|sign in|authenticat|members.only|age.restrict|inappropriate|cookies (?:are|is) (?:required|needed)", low):
+         why = "Сайт віддає це лише після входу (приватне, 18+ чи лише для підписників). 🍪 Додайте cookies цього сайту в «Входи на сайти»."
