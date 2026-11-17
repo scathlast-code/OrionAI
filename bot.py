@@ -4962,6 +4962,9 @@ def scr_backups(chat_id):
 
 # ---------------------------------------------------------------- 🛟 нічого не губиться під час оновлень (lifeboat.py)
 import lifeboat  # noqa: E402
+import appfeed  # noqa: E402
+
+FEED = appfeed.Feed(__import__("datadir").path("app_feed.sqlite3", "ORION_FEED_DB"))
 
 JOURNAL = lifeboat.Journal(__import__("datadir").base())
 RSTATE = lifeboat.RuntimeState(__import__("datadir").base())
@@ -5150,6 +5153,8 @@ def forget_strangers():
 async def log_activity(update: Update, ctx):
     """🧾 Кожна дія в боті — у журнал (секретні введення приховуються)."""
     u = update.effective_user
+    if update.effective_chat:
+        appfeed.UPDATE_CHAT.set(update.effective_chat.id)  # відповіді на власні дії людини в стрічку подій не дублюємо
     if not u or not is_allowed_id(u.id):
         return  # незнайомих не записуємо
     mrow = member_get(u.id)
@@ -9171,7 +9176,12 @@ COMMANDS = [
 
 tg_app = None
 if TELEGRAM_TOKEN:
-    tg_app = Application.builder().token(TELEGRAM_TOKEN).concurrent_updates(16).build()  # меню й «Зупинити» працюють, поки ШІ думає
+    from telegram.ext import ExtBot
+    from telegram.request import HTTPXRequest
+    _FeedBot = appfeed.feed_bot_class(ExtBot, lambda: FEED, is_allowed_id)  # 🔔 «самостійні» повідомлення — ще й у застосунок
+    tg_app = (Application.builder().bot(_FeedBot(token=TELEGRAM_TOKEN, request=HTTPXRequest(connection_pool_size=256),
+                                                  get_updates_request=HTTPXRequest(connection_pool_size=1)))
+              .concurrent_updates(16).build())  # меню й «Зупинити» працюють, поки ШІ думає
     from telegram.ext import TypeHandler
     from security_policy import telegram_guard
     from functools import partial
@@ -9861,6 +9871,10 @@ async def main():
         if op == "tabs":  # ☰ → «✏️ Панель унизу»: які кнопки показувати внизу застосунку
             res = _mini.save_tabs(sys.modules[__name__], uid, body.get("tabs"))
             return _Resp(json.dumps(res, ensure_ascii=False), media_type="application/json")
+        if op == "feed":  # 🔔 події: що бот надіслав сам (результати фонових завдань тощо)
+            if body.get("clear"):
+                FEED.clear(uid)
+            return _Resp(json.dumps({"items": FEED.items(uid)}, ensure_ascii=False), media_type="application/json")
         if op == "chats":  # 💬 перемикач розмов і тек у застосунку
             return _Resp(json.dumps(_mini.chats(sys.modules[__name__], uid), ensure_ascii=False), media_type="application/json")
         if op == "chat":

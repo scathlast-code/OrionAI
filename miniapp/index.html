@@ -82,6 +82,9 @@ body.marking .cell,body.marking .seg button,body.marking .card{outline:1.5px das
 .cc-v{font-family:ui-monospace,Menlo,monospace;font-size:14.5px;margin-top:6px;overflow-wrap:anywhere}.copycard details{margin-top:6px;font-size:12px;color:var(--hint)}
 .cc-f{font-family:ui-monospace,Menlo,monospace;overflow-wrap:anywhere;margin:4px 0}
 details{margin:2px 0}details summary{cursor:pointer;color:var(--hint);font-size:13.5px}blockquote{margin:6px 0;padding-left:10px;border-left:3px solid var(--sep)}
+.feedcard{background:var(--card);border-radius:14px;padding:10px 12px;margin:8px 0}.feedcard.new{box-shadow:inset 3px 0 0 var(--acc)}
+.feedcard small{color:var(--hint);font-size:12px}.ftext{margin-top:4px;overflow-wrap:anywhere}.frows{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.frows button{border:0;border-radius:10px;padding:6px 10px;font:inherit;font-size:13px;background:color-mix(in srgb,var(--acc) 14%,transparent);color:var(--acc)}
 </style>
 </head>
 <body>
@@ -365,7 +368,8 @@ function renderMenu(res){
   else{ed.innerHTML='<button>📌 Налаштувати панель унизу</button>';ed.children[0].onclick=()=>{haptic();editTabs=(res.tabs||[]).map(t=>t.key);renderMenu(res)}}
   main.appendChild(ed);
   const body=document.createElement('div');main.appendChild(body);
-  const secs=editTabs?[{title:'Розмова з ШІ',items:[{key:'chat',label:'💬 Розмова',data:'chat',hint:'Чат із ШІ прямо в застосунку'}]}].concat(res.sections||[]):(res.sections||[]);
+  const secs=editTabs?[{title:'Розмова з ШІ',items:[{key:'chat',label:'💬 Розмова',data:'chat',hint:'Чат із ШІ прямо в застосунку'},
+    {key:'feed',label:'🔔 Події',data:'feed',hint:'Що бот надіслав сам: результати, нагадування'}]}].concat(res.sections||[]):(res.sections||[]);
   const draw=()=>{body.innerHTML='';const f=s.value.trim().toLowerCase();let n=0;
     for(const sec of secs){const its=sec.items.filter(i=>!f||i.label.toLowerCase().includes(f)||sec.title.toLowerCase().includes(f));if(!its.length)continue;
       const h=document.createElement('div');h.className='sec';h.textContent=sec.title;body.appendChild(h);
@@ -383,18 +387,36 @@ function renderMenu(res){
     if(!n){const e=document.createElement('div');e.className='empty';e.textContent='Нічого не знайдено';body.appendChild(e)}};
   s.oninput=()=>{draw();fitAll()}; draw(); tabs(); fitAll();
 }
-function back(){if(!hist.length)return;const h=hist.pop();curTitle='';h==='chat'?openChat(false):h==='menu'?openMenu(false):open_(h,false)}
+function back(){if(!hist.length)return;const h=hist.pop();curTitle='';h==='chat'?openChat(false):h==='menu'?openMenu(false):h==='feed'?openFeed(false):open_(h,false)}
+async function openFeed(push=true){ // 🔔 усе, що бот надіслав сам: результати фонових завдань, ньюзрум, скринька, нагадування
+  const my=++seq; if(push&&cur&&cur!=='feed') hist.push(cur); cur='feed'; curView=true; curTitle='🔔 Події'; syncBack(); tabs(); loading();
+  const res=await call('feed','feed'); if(my!==seq||!res) return;
+  const main=document.getElementById('main'); main.innerHTML=''; main.style.paddingBottom='';
+  const comp=document.getElementById('composer'); if(comp) comp.style.display='none'; const mb=document.getElementById('mbar'); if(mb) mb.remove();
+  const top=document.createElement('div');top.className='top';top.innerHTML='<h1>🔔 Події</h1>';
+  const clr=document.createElement('button');clr.className='ic pill';clr.textContent='🧹';clr.title='Очистити';
+  clr.onclick=async()=>{haptic();await call('feed','feed',{clear:1});openFeed(false)};top.appendChild(clr);main.appendChild(top);
+  const sub=document.createElement('div');sub.className='sub';sub.textContent='Що бот надіслав вам сам — результати відкладених відповідей, ньюзрум, скринька, нагадування. Те саме лежить і в чаті з ботом.';main.appendChild(sub);
+  if(!(res.items||[]).length){const e=document.createElement('div');e.className='empty';e.textContent='Поки подій немає';main.appendChild(e);return}
+  for(const it of res.items){const c=document.createElement('div');c.className='feedcard'+(it.seen?'':' new');
+    const t=document.createElement('small');t.textContent=new Date(it.ts*1000).toLocaleString('uk-UA',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})+(it.file?' · '+it.file:'');c.appendChild(t);
+    if(it.html){const b=document.createElement('div');b.className='ftext';b.innerHTML=sanitize(it.html);c.appendChild(b)}
+    if((it.rows||[]).length){const r=document.createElement('div');r.className='frows';
+      for(const row of it.rows)for(const [lbl,d] of row){const bt=document.createElement('button');bt.textContent=lbl;bt.onclick=()=>press(lbl,d);r.appendChild(bt)}c.appendChild(r)}
+    main.appendChild(c)}
+}
 function tabs(){const n=document.getElementById('tabs');n.innerHTML='';
   const all=TABS.concat([MENU_TAB]);
   const active=all.find(([d])=>cur&&(cur===d||cur.startsWith(d+':')))||MENU_TAB;
   for(const tb of all){const b=document.createElement('button');b.className=tb===active?'on':'';b.innerHTML='<span>'+tb[1]+'</span>'+tb[2];
-    b.onclick=()=>{haptic();hist=[];cur=null;curTitle='';curView=true;editTabs=null;tb[0]==='chat'?openChat(false):tb[0]==='menu'?openMenu(false):open_(tb[0],false)};n.appendChild(b)}}
+    b.onclick=()=>{haptic();hist=[];cur=null;curTitle='';curView=true;editTabs=null;tb[0]==='chat'?openChat(false):tb[0]==='menu'?openMenu(false):tb[0]==='feed'?openFeed(false):open_(tb[0],false)};n.appendChild(b)}}
 function press(label, d){
   if(marking){mark('кнопка «'+label+'»',d,'');return}
   haptic();
   if(d.startsWith('url:')){try{TG.openLink(d.slice(4))}catch(_){window.open(d.slice(4))}return}
   if(d.startsWith('app:')){toast('Ви вже в застосунку');return}
   if(d==='m:cancel'){cancelInput();return}
+  if(d==='feed'){openFeed();return}
   if(d==='m:home'){openMenu();return}
   if(!/^(m:|help:)/.test(d)){toast('Це доступно в чаті з ботом');return}
   open_(d);

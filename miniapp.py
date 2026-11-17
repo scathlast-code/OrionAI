@@ -283,7 +283,8 @@ def menu(B, uid):
     info = [("💬", "Розмова", d["title"], "m:dl"),
             ("🤖", "Відповідає", B.choice_label(B.get_choice(uid)), "m:md"),
             ("⏰", "Завдань", str(len(B.tasks_open(chat_id=uid))), "m:tl"),
-            ("📊", "Сьогодні", B.limits_brief(short=True), "m:lim")]
+            ("📊", "Сьогодні", B.limits_brief(short=True), "m:lim"),
+            ("🔔", "Події", (f"{B.FEED.unseen(uid)} нових" if B.FEED.unseen(uid) else "немає нових") if hasattr(B, "FEED") else "—", "feed")]
     return {"menu": True, "info": [{"icon": a, "label": b, "value": c, "data": e} for a, b, c, e in info], "sections": sections,
             "tabs": tabs(B, uid), "tabs_max": TABS_MAX}
 
@@ -299,6 +300,8 @@ def tabs(B, uid):
     for k in keys:
         if k == "chat":
             out.append({"key": "chat", "label": "💬 Розмова", "data": "chat"})
+        elif k == "feed":
+            out.append({"key": "feed", "label": "🔔 Події", "data": "feed"})
         elif k in getattr(B.L, "admin_items", set()) and not B.is_admin_id(uid):
             continue  # розділи лише для власника (📰 Ньюзрум тощо) учаснику не показуємо
         elif k in B.ITEMS and k not in ("menu", "app") and B.ITEMS[k][1].startswith(("m:", "help:")):
@@ -307,7 +310,7 @@ def tabs(B, uid):
 
 
 def save_tabs(B, uid, keys):
-    keys = [str(k) for k in (keys or []) if k == "chat" or k in B.ITEMS][:TABS_MAX]
+    keys = [str(k) for k in (keys or []) if k in ("chat", "feed") or k in B.ITEMS][:TABS_MAX]
     B.set_pref(uid, "app_tabs", list(dict.fromkeys(keys)))
     return menu(B, uid)
 
