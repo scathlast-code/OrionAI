@@ -24,7 +24,7 @@ from typing import Any, Awaitable, Callable
 log = logging.getLogger("orion.plugins")
 
 # Порядок — це порядок кнопок у меню «🔌 Плагіни».
-BUILTIN = ["hub", "newsroom", "stickers", "inbox", "media"]
+BUILTIN = ["hub", "newsroom", "stickers", "inbox", "media", "weather"]
 
 
 def esc(s) -> str:
