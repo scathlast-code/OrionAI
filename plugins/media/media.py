@@ -247,6 +247,8 @@ def explain(raw):
         why = "Відео недоступне: видалене, заблоковане у країні сервера або посилання неповне."
     elif re.search(r"429|too many requests|rate.?limit", low):
         why = "Сайт тимчасово обмежив запити з сервера. Спробуйте за кілька хвилин."
+    elif re.search(r"connection aborted|remotedisconnected|connection reset|без медіа", low):
+        why = "Сайт обірвав з'єднання з сервером бота або не показав йому медіа (так деякі сайти відсікають сервери)."
     elif "перевищив час" in low:
         why = "Сайт відповідав надто довго."
     else:
@@ -476,6 +478,62 @@ async def threads_probe(url, work):
     raise JobError(f"threads · сторінка {len(text) // 1024} КБ, допис {code or '?'}, {embed_note}")
 
 
+def _tumblr_media(text):
+    """Відео (va.media.tumblr.com) або фото найбільшого розміру з HTML/JSON сторінки Tumblr, без аватарок."""
+    text = text.replace("\\/", "/")
+    videos = list(dict.fromkeys(re.findall(r"https://(?:va|ve)\.media\.tumblr\.com/[\w./-]+?\.mp4", text)))
+    if videos:
+        best = {}
+        for v in videos:  # однакові відео різної якості: *_480.mp4, *_720.mp4 — беремо більшу
+            key = re.sub(r"_\d{3,4}\.mp4$", "", v)
+            size = int((re.search(r"_(\d{3,4})\.mp4$", v) or [0, 9999])[1])
+            if key not in best or size > best[key][0]:
+                best[key] = (size, v)
+        return [(v, ".mp4") for _, v in best.values()]
+    best = {}
+    for img in re.findall(r"https://\d+\.media\.tumblr\.com/[\w./-]+?\.(?:jpe?g|png|gif|webp|pnj|gifv)", text):
+        if "avatar" in img:
+            continue
+        key = img.split("/")[3]
+        m = re.search(r"/s(\d+)x(\d+)", img)
+        size = int(m[1]) * int(m[2]) if m else 0
+        if key not in best or size > best[key][0]:
+            best[key] = (size, img)
+    return [(v, ".jpg") for _, v in best.values()]
+
+
+async def tumblr_probe(url, work):
+    """Tumblr часто обриває з'єднання завантажувачам — читаємо сторінку як браузер (спершу блог-піддомен, потім www)."""
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").lower()
+    parts = [p for p in parsed.path.split("/") if p]
+    blog = post_id = None
+    if host in ("www.tumblr.com", "tumblr.com") and len(parts) >= 2 and parts[1].isdigit():
+        blog, post_id = parts[0], parts[1]
+    elif host.endswith(".tumblr.com") and len(parts) >= 2 and parts[0] == "post":
+        blog, post_id = host.split(".")[0], parts[1]
+    candidates = [url]
+    if blog and post_id:
+        candidates = [f"https://{blog}.tumblr.com/post/{post_id}", f"https://www.tumblr.com/{blog}/{post_id}", url]
+    notes = []
+    for address in dict.fromkeys(candidates):
+        try:
+            final, text = await _grab(address, 6_000_000)
+        except (JobError, httpx.HTTPError) as exc:
+            notes.append(f"{urlsplit(address).hostname}: {str(exc)[:60] or type(exc).__name__}")
+            continue
+        links = _tumblr_media(text)
+        if links:
+            meta = {(t.get("property") or t.get("name") or "").lower(): t.get("content")
+                    for t in read_html(text.encode("utf-8")).xpath("//meta[@content]")}
+            info = {"title": (meta.get("og:title") or f"Tumblr {post_id or ''}")[:80],
+                    "description": meta.get("og:description") or "", "author": blog or "",
+                    "author_url": f"https://{blog}.tumblr.com" if blog else ""}
+            return [Item("direct", link, dict(info)) for link, _ in links[:40]]
+        notes.append(f"{urlsplit(address).hostname}: {len(text) // 1024} КБ без медіа")
+    raise JobError("tumblr · " + "; ".join(notes))
+
+
 async def inspect_link(url, work):
     await check_url(url)
     parsed = urlsplit(url)
@@ -485,6 +543,8 @@ async def inspect_link(url, work):
         or domain_matches(host, ("discordapp.com", "discordapp.net", "t.me", "telegram.me"))
     ):
         probes = (page_probe, video_probe, gallery_probe)
+    elif domain_matches(host, ("tumblr.com",)):
+        probes = (tumblr_probe, gallery_probe, video_probe, page_probe)
     elif domain_matches(host, ("threads.net", "threads.com")):
         probes = (threads_probe, gallery_probe, video_probe, page_probe)
     elif domain_matches(host, GALLERY):
@@ -514,7 +574,7 @@ async def inspect_link(url, work):
                        + ("" if cookie_file(url) else " Якщо допис відкривається лише після входу — 🍪 додайте cookies threads у «Входи на сайти».")
                        + (f"\n\n<i>Технічно: {html_escape(detail)}</i>" if detail else ""))
     # Найзмістовніша причина — від yt-dlp (він знає сайти), далі gallery-dl, далі сторінка.
-    order = {"video_probe": 0, "gallery_probe": 1, "page_probe": 2}
+    order = {"threads_probe": 0, "tumblr_probe": 0, "video_probe": 1, "gallery_probe": 2, "page_probe": 3}
     errors.sort(key=lambda e: order.get(e[0], 3))
     raise JobError(explain(errors[0][1] if errors else "Джерело не повернуло медіа або тексту."))
 
