@@ -5,7 +5,7 @@ import signal
 from contextlib import suppress
 from pathlib import Path
 
-WEB_LIMIT = 512_000_000
+WEB_LIMIT = 2000 * 1024 * 1024  # до 2 ГБ: великі файли йдуть через MTProto (bigsend.py)
 TELEGRAM_IN = 20_000_000
 TELEGRAM_OUT = 50_000_000
 

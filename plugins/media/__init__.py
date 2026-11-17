@@ -23,6 +23,7 @@ from plugins import Plugin as Base, esc
 from . import media as M
 from .common import JobError, TELEGRAM_IN, TELEGRAM_OUT, run, safe_name
 from .metadata import REPORT_ONLY, clean, report, suffix
+from .bigsend import BIG_LIMIT, Big, Progress
 
 log = logging.getLogger("orion.plugins.media")
 PAGE = 12
@@ -51,6 +52,8 @@ class Pending:
     file_id: str
     name: str
     size: int | None
+    msg_id: int = 0
+    chat: int = 0
 
 
 def mb(n):
@@ -77,6 +80,7 @@ class Plugin(Base):
         self.armed: dict[int, str] = {}       # чат -> "clean" | "cookie:<сайт>": чекаємо файл
         self.tasks: dict[int, asyncio.Task] = {}
         self.offers: dict[str, tuple[int, str]] = {}
+        self.big = Big(self.dir, host.token)  # 🚀 файли до 2 ГБ через MTProto
         self.commands = [("media", self.cmd_media, "Медіа: завантажити за посиланням")]
 
     # ================================================================ екрани
@@ -84,7 +88,9 @@ class Plugin(Base):
         busy = self.busy(chat)
         t = ("📥 <b>Медіа</b>\n<blockquote expandable>ℹ️ Що вміє\n" + esc(self.summary) +
              "\n\nПосилання можна просто надіслати в чат — якщо це відео з відомого сайту, бот запропонує завантажити."
-             "\nTelegram дає боту отримати файл до 20 МБ і надіслати до 50 МБ.</blockquote>")
+             "\n" + ("🚀 Великі файли — до 2 ГБ (пряме з'єднання з Telegram увімкнено)." if self.big.ready() else
+                     "⚠️ Без TELEGRAM_API_ID і TELEGRAM_API_HASH у Railway бот надсилає лише до 50 МБ і приймає до 20 МБ; "
+                     "з ними — до 2 ГБ (як інші боти-завантажувачі). Ключі: my.telegram.org → API development tools.") + "</blockquote>")
         if busy:
             t += "\n\n⏳ Зараз виконується ваше завдання."
         rows = [[("🔗 Завантажити за посиланням", self.cb("url"))], [("🧽 Метадані файлу: звіт і очищення", self.cb("clean"))]]
@@ -355,7 +361,7 @@ class Plugin(Base):
             await msg.reply_text("Для очищення надішліть власний файл, а не пересланий.")
             return True
         name = getattr(file, "file_name", None) or default
-        p = Pending(secrets.token_hex(4), file.file_id, safe_name(name), getattr(file, "file_size", None))
+        p = Pending(secrets.token_hex(4), file.file_id, safe_name(name), getattr(file, "file_size", None), msg.message_id, chat)
         self._bg(chat, self.inspect_file(chat, p))
         return True
 
@@ -416,12 +422,7 @@ class Plugin(Base):
                         if opts.target == "zip":
                             bundle.append(out)
                             continue
-                        if out.stat().st_size > TELEGRAM_OUT:
-                            raise JobError(f"{out.name}: {mb(out.stat().st_size)} — більше за ліміт Telegram 50 МБ. Оберіть нижчу якість, "
-                                           "MP3 або таймкоди.")
-                        with out.open("rb") as fh:
-                            await bot.send_document(chat, fh, filename=out.name, caption=(f"📎 {out.name} · {mb(out.stat().st_size)}" + cap_tail)[:1000],
-                                                    read_timeout=120, write_timeout=120)
+                        await self.send_doc(chat, out, (f"📎 {out.name} · {mb(out.stat().st_size)}" + cap_tail)[:1000])
                         sent.append(out.name)
                     if opts.post and desc and desc not in shown:
                         body = f"📝 {info.get('title') or item.title}\n👤 {who or 'автор не вказаний'}" + (f" · {link}" if link else "") + f"\n🔗 {job.url}\n\n{desc}"
@@ -434,8 +435,7 @@ class Plugin(Base):
                         else:
                             note = work / "текст-допису.txt"
                             note.write_text(body, encoding="utf-8")
-                            with note.open("rb") as fh:
-                                await bot.send_document(chat, fh, filename=note.name)
+                            await self.send_doc(chat, note, "📝 Текст допису")
                         shown.add(desc)
                     if opts.subs != "off" and item.engine == "yt" and not tracks:
                         failed.append(f"{n} · субтитрів мовою «{opts.subs}» немає")
@@ -453,12 +453,11 @@ class Plugin(Base):
                 with zipfile.ZipFile(pack, "w", zipfile.ZIP_STORED) as z:
                     for f in bundle:
                         z.write(f, f"{f.parent.name}-{f.name}" if len(nums) > 1 else f.name)
-                if pack.stat().st_size > TELEGRAM_OUT:
-                    failed.append(f"ZIP {mb(pack.stat().st_size)} — більше за 50 МБ; надішліть без ZIP або оберіть меншу якість")
-                else:
-                    with pack.open("rb") as fh:
-                        await bot.send_document(chat, fh, filename=pack.name, caption=f"📦 {len(bundle)} файл(ів)", read_timeout=180, write_timeout=180)
+                try:
+                    await self.send_doc(chat, pack, f"📦 {len(bundle)} файл(ів) · {mb(pack.stat().st_size)}")
                     sent.append(pack.name)
+                except JobError as exc:
+                    failed.append(f"ZIP · {exc}")
         msg = f"✅ Надіслано файлів: {len(sent)}"
         if failed:
             msg += "\n\n⚠️ Не вдалося:\n" + "\n".join(esc(f) for f in failed[:30])
@@ -467,8 +466,8 @@ class Plugin(Base):
         await self.host.notify(chat, msg[:4000], [[("📋 До набору", self.cb("menu", job.token)), ("« Медіа", self.cb())]])
 
     async def inspect_file(self, chat, p):
-        if p.size and p.size > TELEGRAM_IN:
-            raise JobError("Telegram дає боту отримати файл лише до 20 МБ.")
+        if p.size and p.size > TELEGRAM_IN and not self.big.ready():
+            raise JobError("Telegram дає боту отримати файл лише до 20 МБ. Щоб до 2 ГБ — додайте TELEGRAM_API_ID і TELEGRAM_API_HASH у Railway.")
         with tempfile.TemporaryDirectory(prefix="orion-media-") as work:
             src = await self._receive(p, Path(work))
             body = await report(src)
@@ -484,17 +483,42 @@ class Plugin(Base):
         with tempfile.TemporaryDirectory(prefix="orion-media-") as work:
             src = await self._receive(p, Path(work))
             out = await clean(src)
-            if out.stat().st_size > TELEGRAM_OUT:
-                raise JobError("Очищена копія більша за 50 МБ — Telegram її не прийме.")
-            with out.open("rb") as fh:
-                await bot.send_document(chat, fh, filename=out.name, caption="🧽 Очищена копія")
+            await self.send_doc(chat, out, "🧽 Очищена копія")
             await self._send_report(chat, await report(out), Path(work), "🔎 Після очищення")
 
     async def _receive(self, p, work):
-        f = await self.host.bot().get_file(p.file_id, read_timeout=40)
         path = work / p.name
+        if p.size and p.size > TELEGRAM_IN:  # 🚀 більший за 20 МБ — через пряме з'єднання
+            prog = Progress(self.host.bot(), p.chat, f"⬇️ Отримую файл ({mb(p.size)})")
+            await prog.start()
+            try:
+                return await self.big.download(p.chat, p.msg_id, path, progress=prog)
+            finally:
+                await prog.done()
+        f = await self.host.bot().get_file(p.file_id, read_timeout=40)
         await f.download_to_drive(path, read_timeout=60)
         return path
+
+    async def send_doc(self, chat, path, caption=""):
+        """До 50 МБ — звичайно; більше (до 2 ГБ) — через пряме з'єднання з Telegram від імені бота."""
+        size = path.stat().st_size
+        if size <= TELEGRAM_OUT - 512 * 1024:
+            with path.open("rb") as fh:
+                return await self.host.bot().send_document(chat, fh, filename=path.name, caption=caption, read_timeout=180, write_timeout=180)
+        if not self.big.ready():
+            raise JobError(f"{path.name}: {mb(size)}. Звичайний Telegram-бот надсилає лише до 50 МБ. Щоб до 2 ГБ — додайте "
+                           "TELEGRAM_API_ID і TELEGRAM_API_HASH у Railway (my.telegram.org → API development tools), "
+                           "або оберіть нижчу якість, MP3 чи таймкоди.")
+        if size > BIG_LIMIT:
+            raise JobError(f"{path.name}: {mb(size)} — більше за 2 ГБ, межу Telegram. Оберіть нижчу якість, MP3 чи таймкоди.")
+        prog = Progress(self.host.bot(), chat, f"⬆️ Надсилаю {path.name} ({mb(size)})")
+        await prog.start()
+        try:
+            await self.big.send(chat, path, caption, progress=prog)
+        except Exception as exc:  # noqa: BLE001
+            raise JobError(f"Не вдалося надіслати великий файл: {type(exc).__name__}: {str(exc)[:200]}") from None
+        finally:
+            await prog.done()
 
     async def _send_report(self, chat, body, work, title):
         if len(body) <= 3300:
