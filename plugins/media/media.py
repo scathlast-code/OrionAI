@@ -20,6 +20,7 @@ from lxml import html
 
 from html import escape as html_escape
 
+from .common import run_stream
 from .common import JobError, URLDenied, WEB_LIMIT, run, safe_name
 
 BLOCKED = (
@@ -638,7 +639,7 @@ async def inspect_link(url, work):
     raise JobError(explain(errors[0][1] if errors else "Джерело не повернуло медіа або тексту."))
 
 
-async def fetch_direct(item, source, options, work):
+async def fetch_direct(item, source, options, work, progress=None):
     if options.audio != "auto" or options.subs != "off":
         raise JobError("Прямий файл має власну доріжку. Вибери /audio auto і /subs off.")
     async with open_url(item.url, referer=source) as response:
@@ -649,9 +650,15 @@ async def fetch_direct(item, source, options, work):
         stem = Path(safe_name(candidate or item.title, "media")).stem
         path = work / (stem + extension)
         total = 0
+        size = int(response.headers.get("content-length") or 0)
+        started = asyncio.get_running_loop().time()
         with path.open("wb") as output:
             async for chunk in response.aiter_bytes(65536):
                 total += len(chunk)
+                if progress:
+                    spent = max(asyncio.get_running_loop().time() - started, 0.001)
+                    speed = total / spent
+                    await progress(total, size, speed, (size - total) / speed if size and speed else 0)
                 if total > WEB_LIMIT:
                     raise JobError("Розмір перевищує ліміт завантаження.")
                 output.write(chunk)
@@ -660,11 +667,24 @@ async def fetch_direct(item, source, options, work):
     return path, [], item.info
 
 
-async def fetch(item, source, options, work):
+PROGRESS = ("--newline", "--progress-template",
+            "download:ORP %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.total_bytes_estimate)s "
+            "%(progress.speed)s %(progress.eta)s")
+
+
+def _num(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+async def fetch(item, source, options, work, progress=None):
+    """progress(done_bytes, total_bytes, speed_bytes_s, eta_s) — для живих відсотків."""
     if item.engine == "text":
         return None, [], item.info
     if item.engine == "direct":
-        return await fetch_direct(item, source, options, work)
+        return await fetch_direct(item, source, options, work, progress)
 
     allow_extractor(item.info)
     entry_url = item.info.get("webpage_url") or item.info.get("url")
@@ -699,8 +719,22 @@ async def fetch(item, source, options, work):
                 "--no-write-playlist-metafiles", "-o", "media.%(ext)s", "--", source)
     limit = 2400 + (options.live if live else 0)
     extra = tuple(item.info.get("_yt_args") or ())
+    async def on_line(line):
+        if progress and line.startswith("ORP "):
+            parts = line.split()[1:]
+            done, total, estimate, speed, eta = (_num(v) for v in (parts + ["0"] * 5)[:5])
+            await progress(done, total or estimate, speed, eta)
+
+    async def go(extra_args):
+        if progress:
+            plain = tuple(a for a in args(extra_args) if a != "--no-progress")
+            cut = plain.index("--")
+            await run_stream(*plain[:cut], *PROGRESS, *plain[cut:], on_line=on_line, cwd=work, timeout=limit)
+        else:
+            await run(*args(extra_args), cwd=work, timeout=limit)
+
     try:
-        await run(*args(extra), cwd=work, timeout=limit)
+        await go(extra)
     except JobError as exc:
         if extra or not BOT_CHECK.search(str(exc)) or not domain_matches(
                 (urlsplit(source).hostname or "").lower(), ("youtube.com", "youtu.be")):
@@ -708,7 +742,7 @@ async def fetch(item, source, options, work):
         for leftover in work.iterdir():
             if leftover.is_file():
                 leftover.unlink()
-        await run(*args(YT_RETRY), cwd=work, timeout=limit)
+        await go(YT_RETRY)
     outputs = [path for path in work.iterdir() if path.is_file()]
     files = [
         path for path in outputs

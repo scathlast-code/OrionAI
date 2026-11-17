@@ -62,6 +62,16 @@ def mb(n):
     return f"{n / 1048576:.1f} МБ"
 
 
+def bar(done, total, speed=0, eta=0):
+    """▓▓▓▓░░░░░░ 42% · 12.3 з 30.1 МБ · 2.1 МБ/с · ще 0:12"""
+    if not total:
+        return f"{mb(done)}" + (f" · {mb(speed)}/с" if speed else "")
+    pct = max(0, min(100, int(done * 100 / total)))
+    eta = int(eta or 0)
+    return (f"{'▓' * (pct // 10)}{'░' * (10 - pct // 10)} {pct}% · {done / 1048576:.1f} з {mb(total)}"
+            + (f" · {mb(speed)}/с" if speed else "") + (f" · ще {eta // 60}:{eta % 60:02d}" if eta else ""))
+
+
 class Plugin(Base):
     id = "med"
     icon = "📥"
@@ -483,15 +493,33 @@ class Plugin(Base):
         sent, failed, shown, bundle = [], [], set(), []
         quick = status is not None
         title = job.items[nums[0] - 1].title if len(nums) == 1 else f"{len(nums)} елементів"
-        status = await self._status(chat, status, f"⬇️ Завантажую: {esc(title[:100])}…", [[("⏹ Зупинити", self.cb("stop"))]])
+        stop = [[("⏹ Зупинити", self.cb("stop"))]]
+        status = await self._status(chat, status, f"⬇️ Завантажую: {esc(title[:100])}…", stop)
+        last = [0.0]
+
+        async def stage(text, force=False):
+            """Живий стан: застосунок бачить кожне оновлення, повідомлення в чаті — не частіше ніж раз на 3 с."""
+            nonlocal status
+            self.live[chat] = (text, [])
+            now = asyncio.get_running_loop().time()
+            if force or now - last[0] >= 3:
+                last[0] = now
+                status = await self._status(chat, status, text, stop)
         with tempfile.TemporaryDirectory(prefix="orion-media-") as root:
             root = Path(root)
-            for n in nums:
+            for k, n in enumerate(nums, 1):
                 item = job.items[n - 1]
                 work = root / f"{n:03d}"
                 work.mkdir()
+                head = f"⬇️ Завантажую" + (f" {k}/{len(nums)}" if len(nums) > 1 else "") + f": {esc(item.title[:90])}"
+
+                async def on_dl(done, total, speed, eta, head=head):
+                    await stage(f"{head}\n{bar(done, total, speed, eta)}")
                 try:
-                    path, tracks, info = await M.fetch(item, job.url, opts, work)
+                    await stage(head + "…", force=True)
+                    path, tracks, info = await M.fetch(item, job.url, opts, work, progress=on_dl)
+                    if path and (opts.mode != "video" or opts.cuts):
+                        await stage(f"⚙️ Обробляю: {esc(item.title[:90])}…", force=True)
                     who, link = M.author(info)
                     desc = M.post_text(info)
                     outs = await M.render(path, opts, work, item.engine == "direct") if path else []
@@ -500,7 +528,13 @@ class Plugin(Base):
                         if opts.target == "zip":
                             bundle.append(out)
                             continue
-                        await self.send_doc(chat, out, (f"📎 {out.name} · {mb(out.stat().st_size)}" + cap_tail)[:1000])
+                        size_ = out.stat().st_size
+                        up = f"⬆️ Надсилаю {esc(out.name[:60])} ({mb(size_)})"
+                        await stage(up + "…", force=True)
+
+                        async def on_up(done, total, up=up):
+                            await stage(f"{up}\n{bar(done, total)}")
+                        await self.send_doc(chat, out, (f"📎 {out.name} · {mb(size_)}" + cap_tail)[:1000], on_progress=on_up)
                         sent.append(out.name)
                     if opts.post and desc and desc not in shown:
                         body = f"📝 {info.get('title') or item.title}\n👤 {who or 'автор не вказаний'}" + (f" · {link}" if link else "") + f"\n🔗 {job.url}\n\n{desc}"
@@ -589,7 +623,7 @@ class Plugin(Base):
         await f.download_to_drive(path, read_timeout=60)
         return path
 
-    async def send_doc(self, chat, path, caption=""):
+    async def send_doc(self, chat, path, caption="", on_progress=None):
         """До 50 МБ — звичайно; більше (до 2 ГБ) — через пряме з'єднання з Telegram від імені бота."""
         size = path.stat().st_size
         if size <= TELEGRAM_OUT - 512 * 1024:
@@ -601,14 +635,16 @@ class Plugin(Base):
                            "або оберіть нижчу якість, MP3 чи таймкоди.")
         if size > BIG_LIMIT:
             raise JobError(f"{path.name}: {mb(size)} — більше за 2 ГБ, межу Telegram. Оберіть нижчу якість, MP3 чи таймкоди.")
-        prog = Progress(self.host.bot(), chat, f"⬆️ Надсилаю {path.name} ({mb(size)})")
-        await prog.start()
+        prog = None if on_progress else Progress(self.host.bot(), chat, f"⬆️ Надсилаю {path.name} ({mb(size)})")
+        if prog:
+            await prog.start()
         try:
-            await self.big.send(chat, path, caption, progress=prog)
+            await self.big.send(chat, path, caption, progress=on_progress or prog)
         except Exception as exc:  # noqa: BLE001
             raise JobError(f"Не вдалося надіслати великий файл: {type(exc).__name__}: {str(exc)[:200]}") from None
         finally:
-            await prog.done()
+            if prog:
+                await prog.done()
 
     async def _send_report(self, chat, body, work, title):
         if len(body) <= 3300:
