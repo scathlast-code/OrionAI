@@ -198,6 +198,7 @@ class Plugin(Base):
             rows.insert(0, [("🔑 Вставити ключ Apify тут", self.cb("akey"))])
         elif (self.dir / "apify.key").is_file():
             rows.insert(0, [("🗑 Прибрати ключ Apify", self.cb("akeyd"))])
+        lines.append(f"{'✅' if M.pot_ready() else '—'} YouTube PO Token (bgutil, безкоштовно)")
         lines.append(f"{'✅' if _os.environ.get('MEDIA_PROXY') else '—'} MEDIA_PROXY (YouTube)")
         lines.append(f"{'✅' if self.big.ready() else '—'} TELEGRAM_API_ID / HASH (файли до 2 ГБ)")
         lines.append("\nСайти часто змінюються — якщо щось перестало завантажуватись, оновіть завантажувачі.")

@@ -45,6 +45,34 @@ YT = (
     "--no-progress", "--no-warnings", "--socket-timeout", "15",
     "--retries", "1", "--js-runtimes", "node",
 )
+# ---- YouTube: PO Token (bgutil-ytdlp-pot-provider). Для YouTube дозволяємо плагіни yt-dlp (провайдер стоїть
+# через pip у site-packages); для решти сайтів плагіни, як і раніше, вимкнені. Скрипт генерації (Node) лежить у
+# /opt/bgutil/server (Dockerfile) і запускається лише на час запиту — постійного сервера немає (ліміт RAM).
+POT_HOME = os.environ.get("BGUTIL_SERVER_HOME", "/opt/bgutil/server")
+YT_HEAVY = asyncio.Semaphore(int(os.environ.get("MEDIA_HEAVY_SLOTS", "1") or 1))  # YouTube-запити по одному: економимо RAM
+
+
+def is_youtube(url):
+    url = str(url or "")
+    if url.startswith(("ytsearch", "ytdl")):
+        return True
+    return domain_matches((urlsplit(url).hostname or "").lower(), ("youtube.com", "youtu.be"))
+
+
+def pot_ready():
+    return Path(POT_HOME, "build", "generate_once.js").is_file()
+
+
+def yt_base(url):
+    """Базові аргументи yt-dlp: для YouTube — з провайдером PO Token, для інших — без плагінів."""
+    if not is_youtube(url):
+        return YT
+    base = tuple(a for a in YT if a != "--no-plugin-dirs")
+    if pot_ready():
+        base += ("--extractor-args", f"youtubepot-bgutilscript:server_home={POT_HOME}")
+    return base
+
+
 FF = (
     "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
     "-protocol_whitelist", "file,pipe",
@@ -256,10 +284,11 @@ def explain(raw):
     raw = str(raw or "").strip()
     low = raw.lower()
     if BOT_CHECK.search(raw):
-        why = ("YouTube не пускає сервер бота: просить «підтвердити, що ви не бот». Він блокує IP-адреси серверів "
-               "(Railway), посилання тут ні до чого. Інші сайти (TikTok, Instagram, X…) працюють."
+        tried = "з токеном PO Token і кількома клієнтами YouTube" if pot_ready() else "з кількома клієнтами YouTube"
+        why = (f"YouTube не пускає сервер бота: просить «підтвердити, що ви не бот» (спроба {tried} не допомогла). "
+               "Так YouTube блокує IP-адреси серверів (Railway), посилання тут ні до чого. Інші сайти (TikTok, Instagram, X…) працюють."
                + ("\nПроксі MEDIA_PROXY теж заблоковано — потрібен домашній (residential) проксі." if os.environ.get("MEDIA_PROXY")
-                  else "\n🔧 Надійне рішення — домашній проксі: змінна MEDIA_PROXY у Railway. Іноді блок знімається сам за кілька годин."))
+                  else "\n🔧 Що ще може допомогти: cookies YouTube у «🍪 Входи на сайти» або домашній проксі (змінна MEDIA_PROXY). Іноді блок знімається сам."))
     elif re.search(r"http error 403|forbidden", low):
         why = "Сайт відмовив серверу бота (403) — часто так блокують сервери; іноді допомагає повтор."
     elif re.search(r"private|log ?in|sign in|authenticat|members.only|age.restrict|inappropriate|cookies (?:are|is) (?:required|needed)", low):
@@ -282,16 +311,22 @@ def explain(raw):
 
 
 async def video_probe(url, work):
-    base = (*YT, *proxy_args(url), *cookie_args(url), "--dump-single-json", "--skip-download", "--flat-playlist", "--yes-playlist")
+    base = (*yt_base(url), *proxy_args(url), *cookie_args(url), "--dump-single-json", "--skip-download", "--flat-playlist", "--yes-playlist")
     extra = ()
+    yt = is_youtube(url)
+    if yt:
+        await YT_HEAVY.acquire()
     try:
-        out = await run(*base, "--", url, cwd=work, timeout=100)
-    except JobError as exc:
-        host = (urlsplit(url).hostname or "").lower()
-        if not (domain_matches(host, ("youtube.com", "youtu.be")) and BOT_CHECK.search(str(exc))):
-            raise
-        extra = YT_RETRY
-        out = await run(*base, *extra, "--", url, cwd=work, timeout=100)
+        try:
+            out = await run(*base, "--", url, cwd=work, timeout=150 if yt else 100)
+        except JobError as exc:
+            if not (yt and (BOT_CHECK.search(str(exc)) or "403" in str(exc))):
+                raise
+            extra = YT_RETRY
+            out = await run(*base, *extra, "--", url, cwd=work, timeout=150)
+    finally:
+        if yt:
+            YT_HEAVY.release()
     data = json.loads(out)
     if extra:
         data["_yt_args"] = list(extra)
@@ -878,7 +913,7 @@ async def fetch(item, source, options, work, progress=None):
     if item.info.get("is_live") or item.info.get("live_status") == "is_live":  # 🔴 ефір — записуємо лише перші хвилини
         live = ["--downloader", "ffmpeg", "--downloader-args", f"ffmpeg:-t {int(options.live)}"]
     def args(extra):
-        return (*YT, *proxy_args(source), *cookie_args(source), *extra, *entry, *convert, *subtitles, *live, "-f", selector,
+        return (*yt_base(source), *proxy_args(source), *cookie_args(source), *extra, *entry, *convert, *subtitles, *live, "-f", selector,
                 "--max-filesize", str(WEB_LIMIT), "--write-info-json",
                 "--no-write-playlist-metafiles", "-o", "media.%(ext)s", "--", source)
     limit = 2400 + (options.live if live else 0)
@@ -897,16 +932,22 @@ async def fetch(item, source, options, work, progress=None):
         else:
             await run(*args(extra_args), cwd=work, timeout=limit)
 
+    yt = is_youtube(source)
+    if yt:
+        await YT_HEAVY.acquire()
     try:
-        await go(extra)
-    except JobError as exc:
-        if extra or not (BOT_CHECK.search(str(exc)) or "403" in str(exc)) or not domain_matches(
-                (urlsplit(source).hostname or "").lower(), ("youtube.com", "youtu.be")):
-            raise
-        for leftover in work.iterdir():
-            if leftover.is_file():
-                leftover.unlink()
-        await go(YT_RETRY)
+        try:
+            await go(extra)
+        except JobError as exc:
+            if extra or not yt or not (BOT_CHECK.search(str(exc)) or "403" in str(exc)):
+                raise
+            for leftover in work.iterdir():
+                if leftover.is_file():
+                    leftover.unlink()
+            await go(YT_RETRY)
+    finally:
+        if yt:
+            YT_HEAVY.release()
     outputs = [path for path in work.iterdir() if path.is_file()]
     files = [
         path for path in outputs

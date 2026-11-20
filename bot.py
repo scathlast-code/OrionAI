@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import sqlite3
+import socket
 import time
 from contextlib import closing
 from datetime import datetime, timedelta
@@ -5574,9 +5575,46 @@ async def apply_receiving():
         log.info("Telegram: вебхук — бот може засинати між повідомленнями")
     else:
         if up and not up.running:
+            # Інший екземпляр бота (інший сервіс Railway з тим самим токеном) уже приймає повідомлення вебхуком?
+            # Тоді НЕ знімаємо його вебхук — інакше цей екземпляр (без публічної адреси, без своїх змінних) перехопить
+            # усі повідомлення: зникне кнопка застосунку, ключі «не видно» тощо. Перехоплюємо лише якщо той вебхук мертвий.
+            try:
+                info = await tg_app.bot.get_webhook_info()
+                ours = public_base() and (info.url or "").startswith(public_base())
+                dead = bool(info.last_error_date) and (time.time() - info.last_error_date.timestamp() < 900) and (info.pending_update_count or 0) > 0
+                if info.url and not ours and not dead and os.environ.get("ORION_FORCE_POLLING") != "1":
+                    host = (info.url.split("/")[2] if "//" in info.url else info.url)
+                    log.warning("Telegram: повідомлення вже приймає інший сервер (%s) — цей стоїть осторонь", host)
+                    HOOK_ON["on"] = False
+                    if kv_get("other_hook_warned") != host:
+                        kv_set("other_hook_warned", host)
+                        await notify_owner(f"⚠️ Запущено ще один екземпляр бота з тим самим токеном "
+                                           f"({os.environ.get('RAILWAY_SERVICE_NAME') or socket.gethostname()}). Повідомлення приймає "
+                                           f"{host}, тож цей не втручається. Зайвий сервіс у Railway краще зупинити.")
+                    return
+            except Exception:  # noqa: BLE001
+                log.exception("webhook check")
             await tg_app.bot.delete_webhook(drop_pending_updates=False)
-            await up.start_polling(drop_pending_updates=False, allowed_updates=Update.ALL_TYPES)
+            await up.start_polling(drop_pending_updates=False, allowed_updates=Update.ALL_TYPES, error_callback=_polling_error)
         HOOK_ON["on"] = False
+
+
+_CONFLICT_SEEN = {"t": 0.0}
+
+
+def _polling_error(exc):
+    """Telegram «Conflict»: цей самий токен опитує ще хтось — інший сервер чи копія бота."""
+    from telegram.error import Conflict
+    if isinstance(exc, Conflict):
+        now = time.time()
+        if now - _CONFLICT_SEEN["t"] > 6 * 3600:
+            _CONFLICT_SEEN["t"] = now
+            log.warning("Telegram Conflict: той самий токен використовує ще один екземпляр")
+            asyncio.get_event_loop().create_task(notify_owner(
+                "⚠️ Telegram каже: цим самим токеном користується ще один запущений бот (інший сервіс Railway чи копія). "
+                "Через це повідомлення губляться або відповідає не той сервер. Залиште запущеним лише один сервіс."))
+    else:
+        log.warning("polling error: %s", exc)
 
 
 async def activate_node():
