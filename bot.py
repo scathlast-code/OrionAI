@@ -113,6 +113,9 @@ SYSTEM_PROMPT = env(
 SYSTEM_PROMPT += (
     "\nУ цій розмові раніше могли відповідати інші моделі ШІ (бот перемикається між ними). "
     "Вважай усі попередні відповіді асистента своїми й продовжуй з того самого місця, нічого не повторюючи без потреби."
+    "\nМова: відповідай тією мовою, якою користувач почав цю розмову (за його першими повідомленнями), і тримайся її далі, "
+    "навіть якщо в розмові трапляються цитати, репости чи матеріали іншими мовами — їх розумій і враховуй, але відповідай мовою розмови. "
+    "Перемикайся на іншу мову лише тоді, коли користувач сам почне писати нею чи попросить."
 )
 # Режим «спати, коли нічого не відбувається» (Railway Serverless): Telegram сам будить бота вебхуком,
 # а бот не тримає постійного з'єднання з Telegram, тож через 10 хв тиші Railway його присипляє і не рахує гроші.
@@ -2900,8 +2903,13 @@ def scr_tasks(chat_id):
         f"⏳ Чекають вільну модель: <b>{len(groups['deferred'])}</b>\n"
         f"❓ Чекають вашого рішення: <b>{len(groups['choice'])}</b>"
     )
+    if groups["choice"]:
+        text += ("\n\n<i>❓ — це не завдання, які ви ставили, а питання, на які моделі тоді не змогли відповісти (збій чи ліміт). "
+                 "Торкніться, щоб повторити чи скасувати; непотрібні приберіть кнопкою нижче — або вони зникнуть самі за 12 год.</i>")
     mode = sort_mode(chat_id, "tasks")
     rows = [sort_row(chat_id, "tasks"), [("➕ Нове відкладене завдання", "m:tnew"), ("ℹ️", "help:g:tasks")]]
+    if groups["choice"]:
+        rows.insert(1, [(f"🧹 Прибрати ❓ без відповіді · {len(groups['choice'])}", "m:tclr")])
     head = None
     for t in sort_tasks(items, mode)[:14]:
         h = task_group_head(t, mode)
@@ -4111,7 +4119,22 @@ def task_update(tid, **fields):
         con.execute(f"UPDATE tasks SET {sets} WHERE id=?", (*fields.values(), tid))
 
 
+FALLBACK_TTL = 12 * 3600  # ❓ питання, на яке моделі тоді не відповіли, — саме зникає за 12 год (людина вже пішла далі)
+
+
+def tasks_expire_fallback():
+    with closing(db()) as con, con:
+        rows = con.execute("SELECT id, msg_id FROM tasks WHERE state='active' AND status='choice' AND COALESCE(kind,'fallback')='fallback' AND created<?",
+                           (time.time() - FALLBACK_TTL,)).fetchall()
+        for r in rows:
+            con.execute("UPDATE tasks SET status='cancelled' WHERE id=?", (r["id"],))
+            if r["msg_id"]:
+                con.execute("UPDATE messages SET pending=0, in_context=0 WHERE id=?", (r["msg_id"],))
+    return len(rows)
+
+
 def tasks_open(chat_id=None, status=None):
+    tasks_expire_fallback()
     q, args = f"SELECT * FROM tasks WHERE state='active' AND status IN ({','.join('?' * len(OPEN))})", list(OPEN)
     if chat_id is not None:
         q += " AND chat_id=?"
@@ -5434,11 +5457,28 @@ async def col_summarize(bot, chat_id, auto=False, kind="summary"):
                 return  # решта ще вміщається — чекаємо нових репостів або команди
 
 
+async def media_mod_transcribe(data, name):
+    return await media.transcribe(data, name)
+
+
+ALBUM_OK = {}  # media_group_id -> час: на альбом (кілька фото/відео одним репостом) — одне «ок»
+
+
 async def take_forward(update, ctx, text, fwd=True):
     """Переслане (чи надіслане в режимі збору) — лише «ок» і збереження; стежимо за пам'яттю зведення."""
     chat_id = update.effective_chat.id
-    COLLECT.add(chat_id, text, fwd)
-    await update.effective_message.reply_text("ок", disable_notification=True)
+    msg = update.effective_message
+    if text:
+        COLLECT.add(chat_id, text, fwd)
+    grp = getattr(msg, "media_group_id", None)
+    if grp:
+        now = time.time()
+        for k in [k for k, t in ALBUM_OK.items() if now - t > 120]:
+            ALBUM_OK.pop(k, None)
+        if grp in ALBUM_OK:
+            return
+        ALBUM_OK[grp] = now
+    await msg.reply_text("ок", disable_notification=True)
     chars = BATCH.pending_chars(chat_id)
     if chars >= collect_mod.LIMIT:
         asyncio.get_running_loop().create_task(col_summarize(ctx.bot, chat_id, auto=True))
@@ -7682,6 +7722,15 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         screen = scr_limits(arg)
     elif a == "st":
         screen = scr_settings(chat_id)
+    elif a == "tclr":  # 🧹 скасувати всі «❓ чекають рішення» (питання без відповіді)
+        n = 0
+        for t in tasks_open(chat_id=chat_id, status="choice"):
+            task_update(t["id"], status="cancelled")
+            if t["msg_id"]:
+                set_msg(t["msg_id"], pending=0, in_context=0)
+            n += 1
+        toast = f"Прибрано: {n}"
+        screen = scr_tasks(chat_id)
     elif a == "tr":  # 🌐 переклад тексту іншою мовою
         tok = arg or ""
         code = parts[3] if len(parts) > 3 else ""
@@ -10238,8 +10287,36 @@ if TELEGRAM_TOKEN:
     async def on_plugin_private(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """📮 Скринька й інші плагіни бачать приватні повідомлення раніше за перевірку доступу (незнайомі пишуть власнику)."""
         from telegram.ext import ApplicationHandlerStop
+        u, m = update.effective_user, update.effective_message
+        if u is None or u.is_bot or (m and (m.pinned_message or m.new_chat_members or m.left_chat_member)):
+            raise ApplicationHandlerStop  # службові повідомлення («бот закріпив файл») і власні — не лист від людини
         if await PLUGINS.on_private(update, ctx):
             raise ApplicationHandlerStop
+
+    async def on_forward_any(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """📥 Будь-яке переслане — текст, фото, відео, альбом, голосове, кружечок, файл — лише «ок» і в зведення.
+        Розшифровка звуку — тихо і лише якщо є сервіс; без нього зберігаємо підпис чи позначку, без жодних повідомлень про помилки."""
+        from telegram.ext import ApplicationHandlerStop
+        m, u = update.effective_message, update.effective_user
+        if not m or not u or u.is_bot or not allowed(update) or update.effective_chat.id in AWAIT:
+            return
+        text = m.text or m.caption or ""
+        media = m.voice or m.audio or m.video_note or m.video
+        if media and not text and getattr(media, "file_size", 0) and media.file_size < 20 * 1024 * 1024:
+            try:
+                data = bytes(await (await media.get_file()).download_as_bytearray())
+                tr, _prov, _err = await media_mod_transcribe(data, getattr(media, "file_name", None) or "audio.ogg")
+                text = ("🎙 " + tr) if tr else ""
+            except Exception:  # noqa: BLE001
+                text = ""
+        if not text:
+            kind = ("фото" if m.photo else "відео" if m.video else "кружечок" if m.video_note else "голосове" if m.voice
+                    else "аудіо" if m.audio else "файл" if m.document else "повідомлення")
+            text = "" if getattr(m, "media_group_id", None) else f"[переслано: {kind} без тексту]"
+        await take_forward(update, ctx, text)
+        raise ApplicationHandlerStop
+
+    tg_app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.FORWARDED, on_forward_any), group=-5)
 
     tg_app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE, on_plugin_private), group=-4)
     tg_app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST | (filters.ChatType.GROUPS & filters.UpdateType.MESSAGE),
