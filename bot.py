@@ -3278,10 +3278,16 @@ def scr_collect(chat_id):
                "Команди й кнопки працюють як завжди." if on else
                "⚪ Вимкнено. Увімкніть — і все, що надішлете чи перешлете без команди, я мовчки збиратиму, а потім напишу з цього новину "
                "або поверну все разом.")
-            + f"\n\nЗібрано: <b>{n}</b>")
+            + f"\n\nЗібрано: <b>{n}</b> · ще не в зведенні: <b>{BATCH.pending_chars(chat_id)}</b> з {collect_mod.LIMIT} знаків"
+            + "\n\nПереслане в бот збирається завжди, навіть коли режим вимкнено: я відповідаю лише «ок». Напишіть «готуй зведення» "
+              "або «напиши новину» — зроблю з того, що ще не було в зведенні. Заповниться пам'ять — спершу спитаю, а якщо мовчатимете, "
+              "зроблю зведення сам і продовжу збирати.")
+    out = prefs(chat_id).get("col_out", "msg")
     rows = [[("⏹ Зупинити збір", "m:col:off") if on else ("▶️ Почати збір", "m:col:on")]]
     if n:
-        rows += [[("✍️ Написати новину", "m:col:news")],
+        rows += [[("🧾 Зведення", "m:col:sum"), ("✍️ Новина", "m:col:snews")],
+                 [(("● " if out == v else "") + lbl, f"m:col:out:{v}") for v, lbl in (("msg", "💬 Текстом"), ("txt", "📄 txt"), ("doc", "📝 Word"))],
+                 [("✍️ Новина з усього", "m:col:news")],
                  [("💬 Повідомленнями", "m:col:msg"), ("📄 .txt", "m:col:txt"), ("📝 Word", "m:col:doc")],
                  [("↩️ Прибрати останнє", "m:col:undo"), ("🗑 Очистити все", "m:col:clr")]]
     rows.append([HOME])
@@ -5265,6 +5271,90 @@ async def do_translate(update, ctx, text, target, custom=None, chat_id=None):
 
 SPACES = spaces_mod.Spaces(__import__("datadir").path("spaces.sqlite3", "ORION_SPACES_DB"))
 COLLECT = collect_mod.Collect(__import__("datadir").path("collected.sqlite3", "ORION_COLLECT_DB"))
+BATCH = collect_mod.Batches(COLLECT)
+SUM_LOCKS = {}  # чат -> asyncio.Lock: одне зведення за раз, нові репости тим часом просто зберігаються
+
+
+async def _col_deliver(bot, chat_id, title, sections, fname):
+    """Віддати зведення у вибраному людиною вигляді: повідомленнями / .txt / Word."""
+    how = prefs(chat_id).get("col_out", "msg")
+    stamp = f"{datetime.now(TZ):%Y%m%d-%H%M}"
+    if how == "doc":
+        data = await asyncio.to_thread(collect_mod.docx_of, title, sections)
+        return await bot.send_document(chat_id, InputFile(io.BytesIO(data), filename=f"{fname}-{stamp}.docx"), caption=title[:1000])
+    body = "\n\n".join(f"{h}\n\n{t}" for h, t in sections)
+    if how == "txt":
+        return await bot.send_document(chat_id, InputFile(io.BytesIO(body.encode("utf-8")), filename=f"{fname}-{stamp}.txt"), caption=title[:1000])
+    parts = collect_mod.chunks(f"{title}\n\n{body}")
+    for i, part in enumerate(parts):
+        await bot.send_message(chat_id, part if len(parts) == 1 else f"({i + 1}/{len(parts)})\n{part}")
+
+
+def _col_span(items):
+    a, b = items[0]["ts"], items[-1]["ts"]
+    return f"{len(items)} повідомл. · {datetime.fromtimestamp(a, TZ):%d.%m %H:%M} – {datetime.fromtimestamp(b, TZ):%d.%m %H:%M}"
+
+
+async def col_summarize(bot, chat_id, auto=False, kind="summary"):
+    """Зведення по непідсумованих репостах. Межа рухається лише на те, що реально увійшло, тож усе,
+    що прийшло, поки писалось зведення, лишається для наступного. Авто — коли пам'ять (20000 знаків) заповнилась."""
+    lock = SUM_LOCKS.setdefault(chat_id, asyncio.Lock())
+    if lock.locked():
+        if not auto:
+            await bot.send_message(chat_id, "⏳ Уже пишу зведення — щойно закінчу, візьмуся за решту.")
+        return
+    async with lock:
+        first = True
+        while True:
+            items = BATCH.take(chat_id)
+            if not items:
+                if first and not auto:
+                    await bot.send_message(chat_id, "Нових матеріалів після останнього зведення немає.")
+                return
+            first = False
+            prompt = collect_mod.NEWS_PROMPT if kind == "news" else collect_mod.SUMMARY_PROMPT
+            text, _m = await _plugin_ai(prompt + "\n\n———\n\n".join(i["text"] for i in items),
+                                        label="📥 " + ("Новина" if kind == "news" else "Зведення") + " з пересланого")
+            text = (text or "").strip()
+            if not text:
+                await bot.send_message(chat_id, "⚠️ Не вдалося написати зведення — моделі зараз недоступні. Матеріали збережено, спробую ще раз пізніше "
+                                       "або напишіть «готуй зведення».")
+                return
+            prev = [] if auto else BATCH.autos_since_manual(chat_id)
+            BATCH.mark(chat_id, items, text, auto)
+            what = "Новина" if kind == "news" else "Зведення"
+            if auto:
+                title = (f"🧾 {what} (зроблено самостійно: пам'ять заповнилась) · {_col_span(items)}\n"
+                         "Нові репости й далі зберігаю — вони підуть у наступне зведення.")
+                await _col_deliver(bot, chat_id, title, [(f"{what} · {_col_span(items)}", text)], "zvedennya-avto")
+            elif prev:
+                title = (f"🧾 {what} · {_col_span(items)}\n⚠️ До цього я вже {len(prev)} раз(и) робив зведення сам, бо пам'ять заповнювалась — "
+                         "додаю їх разом з новим.")
+                secs = [(f"Самостійне зведення №{n} · {datetime.fromtimestamp(x['ts'], TZ):%d.%m %H:%M}", x["text"]) for n, x in enumerate(prev, 1)]
+                await _col_deliver(bot, chat_id, title, secs + [(f"Нове {what.lower()} · {_col_span(items)}", text)], "zvedennya-vse")
+            else:
+                await _col_deliver(bot, chat_id, f"🧾 {what} · {_col_span(items)}", [(what, text)], "zvedennya")
+            if not BATCH.pending(chat_id):
+                return
+            if auto and BATCH.pending_chars(chat_id) < collect_mod.LIMIT:
+                return  # решта ще вміщається — чекаємо нових репостів або команди
+
+
+async def take_forward(update, ctx, text, fwd=True):
+    """Переслане (чи надіслане в режимі збору) — лише «ок» і збереження; стежимо за пам'яттю зведення."""
+    chat_id = update.effective_chat.id
+    COLLECT.add(chat_id, text, fwd)
+    await update.effective_message.reply_text("ок", disable_notification=True)
+    chars = BATCH.pending_chars(chat_id)
+    if chars >= collect_mod.LIMIT:
+        asyncio.get_running_loop().create_task(col_summarize(ctx.bot, chat_id, auto=True))
+    elif chars >= collect_mod.WARN_AT and not BATCH.warned(chat_id):
+        BATCH.set_warned(chat_id)
+        await ctx.bot.send_message(
+            chat_id, f"📥 Пам'ять зведення майже заповнена: {chars} з {collect_mod.LIMIT} знаків від першого репосту. Що робити?\n"
+                     "Якщо не відповісте й надсилатимете далі — я сам зроблю зведення по вже зібраному, а нове збиратиму для наступного.",
+            reply_markup=kb([[("🧾 Зведення зараз", "m:col:sum"), ("✍️ Новина", "m:col:snews")],
+                             [("📄 Віддати як файл", "m:col:txt"), ("➡️ Продовжуй", "m:col:go")]]))
 
 notify.setup(lambda cid: prefs(cid).get("notify") or {}, lambda cid, v: set_pref(cid, "notify", v))
 
@@ -6927,13 +7017,17 @@ async def on_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     p = prefs(chat_id)
     forwarded = msg.forward_origin is not None
-    await ctx.bot.send_chat_action(chat_id, ChatAction.TYPING)
+    if not forwarded:
+        await ctx.bot.send_chat_action(chat_id, ChatAction.TYPING)
     file = await att.get_file()
     data = bytes(await file.download_as_bytearray())
     name = getattr(att, "file_name", None) or ("voice.ogg" if msg.voice else "audio.mp4")
     try:
-        async with Progress(ctx.bot, chat_id, "Розшифровую голосове", stop=False, delay=2.5):
+        if forwarded:
             text, prov, errors = await media.transcribe(data, name)
+        else:
+            async with Progress(ctx.bot, chat_id, "Розшифровую голосове", stop=False, delay=2.5):
+                text, prov, errors = await media.transcribe(data, name)
     except media.MediaError as e:
         return await msg.reply_text(f"⚠️ Не вдалося розшифрувати: {e.detail[:300]}\nЯк підключити: /help voice")
     for pr, _ in errors:
@@ -6941,7 +7035,9 @@ async def on_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     count_request("stt:" + prov)
     vid = secrets.token_hex(4)
     VOICE_TEXTS[vid] = text
-    if forwarded or p.get("voice_mode", "ask") == "text":
+    if forwarded:  # 📥 переслане голосове — розшифровка йде в зведення, у відповідь лише «ок»
+        return await take_forward(update, ctx, "🎙 " + text)
+    if p.get("voice_mode", "ask") == "text":
         body, rows = transcript_view(vid)
         return await msg.reply_text(body, parse_mode=ParseMode.HTML, reply_markup=kb(rows))
     if p.get("voice_show", True):
@@ -7555,6 +7651,14 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
             COLLECT.pop_last(chat_id)
         elif sub == "clr":
             COLLECT.clear(chat_id)
+            BATCH.reset(chat_id)
+        elif sub == "out" and len(parts) > 3:
+            set_pref(chat_id, "col_out", parts[3])
+        elif sub == "go":
+            toast = "Добре, збираю далі — заповниться, зроблю зведення сам"
+        elif sub in ("sum", "snews"):
+            asyncio.get_running_loop().create_task(col_summarize(ctx.bot, chat_id, kind="news" if sub == "snews" else "summary"))
+            toast = "🧾 Готую — надішлю, щойно буде"
         elif sub in ("msg", "txt", "doc", "news") and not COLLECT.count(chat_id):
             toast = "Поки нічого не зібрано"
         elif sub == "msg":
@@ -9565,6 +9669,9 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         mid = improve.add(update.effective_user.id, "reply", L.current(chat_id) or "", "повідомлення бота", "",
                           (r.text or r.caption or "")[:300], msg.text.lstrip()[1:].strip())
         return await msg.reply_text(f"💡 Додано в «Покращити» #{mid}")
+    if getattr(msg, "forward_origin", None) is not None and chat_id not in AWAIT:  # 📥 переслане — завжди лише «ок» і в зведення
+        body = msg.text or msg.caption or ("[фото без підпису]" if msg.photo else "[переслане без тексту]")
+        return await take_forward(update, ctx, body)
     if msg.text and chat_id not in AWAIT and not CM.wants_text(chat_id):  # 🌐 «переклади …» — саме переклад, а не відповідь ШІ
         r0 = msg.reply_to_message
         req = translate_mod.parse_request(msg.text, (r0.text or r0.caption) if r0 else None)
@@ -9581,9 +9688,12 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await show(update, *scr, edit=False)
     if msg.text and chat_id in AWAIT:
         return await handle_awaited(update, ctx, msg.text.strip())
+    cm = collect_mod.CMD_RE.match(msg.text or "")
+    if cm and (BATCH.pending(chat_id) or BATCH.autos_since_manual(chat_id)):  # «готуй зведення» / «напиши новину» по пересланому
+        asyncio.get_running_loop().create_task(col_summarize(ctx.bot, chat_id, kind="news" if cm.group(2).lower() == "новину" else "summary"))
+        return await msg.reply_text("🧾 Готую — надішлю, щойно буде.")
     if prefs(chat_id).get("collect") and (msg.text or msg.caption) and not (msg.text or "").startswith("/"):
-        COLLECT.add(chat_id, msg.text or msg.caption, getattr(msg, "forward_origin", None) is not None)
-        return await msg.reply_text("ок", disable_notification=True)  # 📥 режим збору: мовчки складаємо
+        return await take_forward(update, ctx, msg.text or msg.caption, False)  # 📥 режим збору: мовчки складаємо
     choice = get_choice(chat_id)
     preferred = None if choice == "auto" else choice
     want, forever = addressed_model(msg.text or msg.caption or "")
