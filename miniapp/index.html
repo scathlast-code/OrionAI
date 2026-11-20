@@ -128,7 +128,7 @@ function sanitize(html){
   (function walk(n){for(const c of [...n.childNodes]){if(c.nodeType===1){const t=c.tagName.toLowerCase();
     if(!['b','strong','i','em','u','s','code','pre','a','br','details','summary','blockquote'].includes(t)){c.replaceWith(...c.childNodes);continue}
     for(const a of [...c.attributes]) if(!(t==='a'&&a.name==='href'&&/^https?:/.test(a.value))) c.removeAttribute(a.name);
-    if(t==='a'){c.target='_blank';c.onclick=e=>{e.preventDefault();try{TG.openLink(c.href)}catch(_){window.open(c.href)}}}
+    if(t==='a'){c.target='_blank';c.onclick=e=>{e.preventDefault();const ib=c.href.match(/[?&]start=inb_(\d+)/);if(ib){haptic();open_('m:pl:inb:t:'+ib[1]);return}try{TG.openLink(c.href)}catch(_){window.open(c.href)}}}
     walk(c)}}})(d);return d.innerHTML}
 function split(label){
   const m=label.match(/^(\p{Extended_Pictographic}(?:️|‍\p{Extended_Pictographic})*|[●▫️«])\s*/u);
