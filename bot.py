@@ -2558,7 +2558,8 @@ PLUGINS = orion_plugins.Registry(orion_plugins.Host(
            "miniapp_url": miniapp_url(),
            "awaiting": lambda chat: chat in AWAIT or CM.wants_text(chat),
            "node_active": lambda: NODE.active,
-           "users": lambda: [m["user_id"] for m in members_list("approved")],  # усі схвалені учасники (без імен)
+           "users": lambda: [m["user_id"] for m in members_list("approved")],
+           "translate_screen": lambda text, title=None: tr_screen(tr_token(text), *( [title] if title else [])),  # 🌐 кнопка перекладу  # усі схвалені учасники (без імен)
            "app_media": APP_MEDIA,  # 📥 файли, які застосунок покаже плеєром
            "in_app": lambda: __import__("miniapp").CAPTURE.get() is not None,  # запит прийшов із Mini App  # фонові цикли плагінів працюють лише на активному вузлі кластера
            "preinvited": lambda user: bool(preinvite_match(user)) and member_status(user.id) != "blocked"},
@@ -5183,6 +5184,39 @@ import notify  # noqa: E402
 import collect as collect_mod  # noqa: E402
 
 import spaces as spaces_mod  # noqa: E402
+import translate as translate_mod  # noqa: E402
+
+TR_SRC = {}  # токен -> текст, який перекладаємо (щоб переклати ще іншою мовою кнопкою)
+
+
+async def translate_text(text, target, custom=None):
+    out, _model = await _plugin_ai(text[:12000], system=translate_mod.prompt(target, custom), label="🌐 Переклад")
+    return (out or "").strip()
+
+
+def tr_token(text):
+    tok = secrets.token_hex(4)
+    TR_SRC[tok] = text
+    while len(TR_SRC) > 300:
+        TR_SRC.pop(next(iter(TR_SRC)))
+    return tok
+
+
+def tr_screen(tok, title="🌐 <b>Переклад</b> — оберіть мову:"):
+    return title, translate_mod.lang_rows(lambda c: f"m:tr:{tok}:{c}") + [[("⌨️ Інша мова", f"m:tr:{tok}:x")]]
+
+
+async def do_translate(update, ctx, text, target, custom=None, chat_id=None):
+    chat_id = chat_id or update.effective_chat.id
+    tok = tr_token(text)
+    await ctx.bot.send_chat_action(chat_id, ChatAction.TYPING)
+    out = await translate_text(text, target, custom)
+    if not out:
+        return await ctx.bot.send_message(chat_id, "⚠️ Не вдалося перекласти — моделі зараз недоступні. Спробуйте ще раз.")
+    rows = [[("🌐 Іншою мовою", f"m:tr:{tok}")]]
+    parts = collect_mod.chunks(out)
+    for i, part in enumerate(parts):
+        await ctx.bot.send_message(chat_id, part, reply_markup=kb(rows) if i == len(parts) - 1 else None)
 
 SPACES = spaces_mod.Spaces(__import__("datadir").path("spaces.sqlite3", "ORION_SPACES_DB"))
 COLLECT = collect_mod.Collect(__import__("datadir").path("collected.sqlite3", "ORION_COLLECT_DB"))
@@ -7402,6 +7436,24 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         screen = scr_limits(arg)
     elif a == "st":
         screen = scr_settings(chat_id)
+    elif a == "tr":  # 🌐 переклад тексту іншою мовою
+        tok = arg or ""
+        code = parts[3] if len(parts) > 3 else ""
+        if tok not in TR_SRC:
+            screen = ("Текст для перекладу вже забувся (бот перезапускався) — надішліть його ще раз зі словом «переклади».", [[HOME]])
+        elif code == "x":
+            ask_input(chat_id, "trc", tok)
+            screen = ("⌨️ Якою мовою? Напишіть назву, напр. «литовською», «suomi», «мовою жестів — описово».", [[("✖️ Скасувати", "m:cancel")]])
+        elif code:
+            if q:
+                try:
+                    await q.answer("Перекладаю…")
+                except BadRequest:
+                    pass
+            await do_translate(update, ctx, TR_SRC[tok], code, chat_id=chat_id)
+            return
+        else:
+            screen = tr_screen(tok)
     elif a == "sp":  # 🤝 спільні простори
         sid = parts[3] if len(parts) > 3 else ""
         sp = SPACES.get(sid) if sid.isdigit() else None
@@ -8390,6 +8442,11 @@ async def handle_awaited(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text):
             await update.message.reply_text(toast)
         if screen:
             return await show(update, *screen, edit=False)
+        return
+    if act == "trc":
+        AWAIT.pop(chat_id, None)
+        if data in TR_SRC:
+            return await do_translate(update, ctx, TR_SRC[data], "", custom=text.strip()[:40])
         return
     if act in ("spnew", "spn", "spt", "spm", "spai", "spren"):
         AWAIT.pop(chat_id, None)
@@ -9463,6 +9520,11 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         mid = improve.add(update.effective_user.id, "reply", L.current(chat_id) or "", "повідомлення бота", "",
                           (r.text or r.caption or "")[:300], msg.text.lstrip()[1:].strip())
         return await msg.reply_text(f"💡 Додано в «Покращити» #{mid}")
+    if msg.text and chat_id not in AWAIT and not CM.wants_text(chat_id):  # 🌐 «переклади …» — саме переклад, а не відповідь ШІ
+        r0 = msg.reply_to_message
+        req = translate_mod.parse_request(msg.text, (r0.text or r0.caption) if r0 else None)
+        if req:
+            return await do_translate(update, ctx, *req)
     if await PLUGINS.intercept(update, ctx):  # 🔌 режим прийому ньюзруму, посилання на стікери тощо
         return
     if not msg.text and not msg.photo:
