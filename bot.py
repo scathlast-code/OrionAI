@@ -10688,16 +10688,18 @@ async def main():
     server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="info"))
 
     if tg_app:
-        for attempt in range(1, 31):  # Telegram на старті може не відповісти (збій мережі Railway) — не падаємо, а пробуємо ще
+        attempt = 0
+        while True:  # Telegram на старті може не відповідати (збій Cloud Bot API для бота) — чекаємо, скільки треба, і не падаємо
+            attempt += 1
             try:
                 await tg_app.initialize()
+                if attempt > 1:
+                    log.warning("Telegram знову відповідає — запускаюсь (спроба %d)", attempt)
                 break
             except (TimedOut, NetworkError) as exc:
                 wait = min(60, 5 * attempt)
                 log.warning("Telegram не відповідає на старті (%s), спроба %d — повтор через %d с", type(exc).__name__, attempt, wait)
                 await asyncio.sleep(wait)
-        else:
-            raise SystemExit("Telegram недоступний 30 спроб поспіль")
         try:
             await tg_app.bot.set_my_commands([BotCommand(c, d) for c, d in COMMANDS])
         except Exception:  # noqa: BLE001
