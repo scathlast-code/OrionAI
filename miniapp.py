@@ -255,6 +255,15 @@ def chat_action(B, uid, body):
             B.APP_REPLY[uid] = m["text"][:1500]
     elif act == "noreply":
         B.APP_REPLY.pop(uid, None)
+    elif act == "del":  # 🗑 видалити повідомлення і з розмови, і з чату з ботом
+        import asyncio
+        mid = int(body.get("mid") or 0)
+        bot = B.tg_app.bot if B.tg_app else None
+        if mid and bot:
+            asyncio.get_running_loop().create_task(B.delete_everywhere(bot, uid, db_ids=[mid]))
+        elif mid:
+            with B.closing(B.db()) as con, con:
+                con.execute("DELETE FROM messages WHERE id=? AND chat_id=?", (mid, uid))
     return chats(B, uid)
 
 

@@ -10,6 +10,13 @@ import time
 from contextlib import closing
 
 UPDATE_CHAT = contextvars.ContextVar("update_chat", default=None)  # чат, чию дію бот зараз обробляє
+SENT = contextvars.ContextVar("sent_ids", default=None)  # список, куди складати id надісланих повідомлень (зв'язок із розмовою)
+
+
+def _note_sent(m):
+    lst = SENT.get()
+    if lst is not None and getattr(m, "message_id", None):
+        lst.append(m.message_id)
 KEEP = 100
 
 
@@ -94,12 +101,14 @@ def feed_bot_class(base, feed_getter, is_private_id):
         async def send_message(self, chat_id, text, *a, **k):
             self._quiet(chat_id, k)
             m = await super().send_message(chat_id, text, *a, **k)
+            _note_sent(m)
             self._feed(chat_id, text if k.get("parse_mode") else _esc(text), k.get("reply_markup"))
             return m
 
         async def send_document(self, chat_id, document, *a, **k):
             self._quiet(chat_id, k)
             m = await super().send_document(chat_id, document, *a, **k)
+            _note_sent(m)
             name = getattr(getattr(m, "document", None), "file_name", "") or "файл"
             self._feed(chat_id, k.get("caption") or "", k.get("reply_markup"), "📎 " + name)
             return m

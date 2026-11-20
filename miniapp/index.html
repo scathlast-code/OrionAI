@@ -36,7 +36,7 @@ display:flex;justify-content:space-around;padding:6px 4px calc(6px + env(safe-ar
 nav button{max-width:20%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:0;background:none;color:var(--hint);font:inherit;font-size:11px;display:flex;flex-direction:column;align-items:center;gap:2px;padding:4px 8px;cursor:pointer;min-width:58px}
 nav button span{font-size:21px;filter:grayscale(.6);opacity:.8}nav button.on{color:var(--acc)}nav button.on span{filter:none;opacity:1}
 .sheet{position:fixed;left:0;right:0;bottom:0;background:var(--card);border-radius:18px 18px 0 0;padding:14px 16px calc(16px + env(safe-area-inset-bottom));box-shadow:0 -10px 30px #0007;transform:translateY(110%);transition:.25s;z-index:5}
-#bugfab{position:fixed;right:12px;bottom:calc(84px + env(safe-area-inset-bottom));width:40px;height:40px;border-radius:20px;border:0;background:var(--card);box-shadow:0 4px 14px #0005;font-size:20px;z-index:4;opacity:.85}
+#bugfab{position:fixed;right:0;top:42%;width:34px;height:40px;border-radius:12px 0 0 12px;border:0;background:var(--card);box-shadow:0 2px 10px #0004;font-size:17px;z-index:4;opacity:.75;touch-action:none;padding:0}
 .sheet.on{transform:none}.sheet textarea{width:100%;min-height:96px;border-radius:12px;border:1px solid var(--sep);background:var(--bg);color:var(--txt);padding:10px;font:inherit}
 .sheet .row{display:flex;gap:8px;margin-top:10px}.sheet .row button{flex:1;border:0;border-radius:12px;padding:12px;font:inherit;cursor:pointer;background:var(--bg);color:var(--txt)}
 .sheet .row .pri{background:var(--acc);color:var(--acct);font-weight:650}
@@ -95,7 +95,7 @@ details{margin:2px 0}details summary{cursor:pointer;color:var(--hint);font-size:
 <input type="file" id="filein" style="display:none">
 <div class="sheet" id="sheet"><div id="sheetq" class="sub" style="margin:0 0 8px"></div><input type="hidden" id="sheetmode"><textarea id="sheett"></textarea>
 <div class="row"><button onclick="cancelInput()">Скасувати</button><button id="sheetfile" onclick="pickFile(document.getElementById('sheett').value)">📎 Файл</button><button class="pri" onclick="sendInput()">Готово</button></div></div>
-<button id="bugfab" title="Повідомити про помилку" onclick="bugOpen()">🐞</button>
+<button id="bugfab" title="Помилка чи побажання (можна перетягнути вгору-вниз)">🐞</button>
 <div class="sheet" id="bugsheet"><div class="seg" id="bugkind"><button class="sel" data-k="bug" onclick="bugKind('bug')">🐞 Помилка</button><button data-k="wish" onclick="bugKind('wish')">💡 Побажання</button></div>
 <div class="sub" id="bughint" style="margin:8px 0">Опишіть, що не так і що мало бути. Можна додати скриншот — позначка запам'ятає цей екран, і її врахують під час наступного вдосконалення.</div>
 <textarea id="bugtext" placeholder="Напр.: кнопка «Оновити» нічого не робить"></textarea>
@@ -213,7 +213,9 @@ function msgActions(m){haptic();const who=m.role==='user'?'Ваше повідо
     {label:'↩️ Відповісти на це повідомлення',fn:async()=>{await chatAct({act:'reply',mid:m.id});document.querySelector('#composer textarea').focus()}},
     {label:'🌿 Нова гілка звідси',fn:async()=>{await chatAct({act:'branch',mid:m.id});toast('🌿 Нова розмова з історією до цього повідомлення')}},
     {label:'↪️ Відповісти в іншому чаті…',fn:()=>pickChat('Де відповісти на це повідомлення?',async d=>{await chatAct({act:'reply',mid:m.id,target:d});toast('Відповідь піде в цей чат')})},
-    {label:'📋 Копіювати текст',fn:()=>{navigator.clipboard&&navigator.clipboard.writeText(m.text).then(()=>toast('Скопійовано'),()=>toast('Не вдалося скопіювати'))}}])}
+    {label:'📋 Копіювати текст',fn:()=>{navigator.clipboard&&navigator.clipboard.writeText(m.text).then(()=>toast('Скопійовано'),()=>toast('Не вдалося скопіювати'))}},
+    {label:'🗑 Видалити (і в чаті з ботом)',fn:()=>acts('Видалити це повідомлення тут і в чаті з ботом? Telegram дає видаляти лише повідомлення, молодші за 48 год.',[
+      {label:'🗑 Так, видалити',fn:async()=>{await chatAct({act:'del',mid:m.id});toast('🗑 Видалено')}},{label:'Скасувати',fn:()=>{}}])}])}
 async function pickChat(title,fn){const r=await call('chats','chat');if(!r)return;const fname={};for(const f of r.folders)fname[f.id]=f.name;
   acts(title,r.dialogs.filter(d=>d.id!==r.current).map(d=>({label:(d.folder?'📁 '+fname[d.folder]+' › ':'💬 ')+d.title,fn:()=>fn(d.id)})))}
 async function openChats(){haptic();const r=await call('chats','chat');if(!r)return;
@@ -478,6 +480,13 @@ function bugKind(k,reset){if(reset){bugK={bug:k==='bug',wish:k==='wish'}}else{bu
   document.querySelectorAll('#bugkind button').forEach(b=>b.classList.toggle('sel',!!bugK[b.dataset.k]));
   document.getElementById('bughint').textContent=bugK.bug&&bugK.wish?'Опишіть, що не так, і що варто покращити чи додати. Можна обидва кнопки одночасно; скриншот — за бажанням.':bugK.bug?'Опишіть, що не так і що мало бути. Можна додати скриншот — позначка запам\'ятає цей екран, і її врахують під час наступного вдосконалення.':'Що покращити чи додати тут? Можна додати скриншот чи приклад — позначка запам\'ятає цей екран.'}
 function bugOpen(){haptic();bugImg='';bugKind('bug',true);document.getElementById('bugtext').value='';document.getElementById('bugprev').textContent='';document.getElementById('bugsheet').classList.add('on')}
+// 🐞 «язичок» біля правого краю: не перекриває кнопки; тягніть вгору-вниз — місце запам'ятається
+(function(){const f=document.getElementById('bugfab');let y0=null,top0=0,moved=false;
+  try{const t=localStorage.getItem('bugfab_top');if(t)f.style.top=t}catch(_){}
+  f.addEventListener('pointerdown',e=>{y0=e.clientY;top0=f.getBoundingClientRect().top;moved=false;f.setPointerCapture(e.pointerId)});
+  f.addEventListener('pointermove',e=>{if(y0===null)return;const dy=e.clientY-y0;if(Math.abs(dy)>6)moved=true;
+    if(moved){const t=Math.max(60,Math.min(innerHeight-180,top0+dy));f.style.top=t+'px'}});
+  f.addEventListener('pointerup',()=>{if(y0===null)return;y0=null;if(moved){try{localStorage.setItem('bugfab_top',f.style.top)}catch(_){}}else bugOpen()});})();
 function bugClose(){document.getElementById('bugsheet').classList.remove('on')}
 document.getElementById('bugfile').addEventListener('change',e=>{const f=e.target.files[0];if(!f)return;
   if(f.size>8*1048576){toast('Скриншот завеликий (до 8 МБ)');return}
