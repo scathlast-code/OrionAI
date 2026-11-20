@@ -2328,6 +2328,7 @@ ITEMS = {
     "stk": ("🧷 Стікери", "m:pl:stk"),
     "med": ("📥 Медіа", "m:pl:med"),
     "wx": ("🌤 Погода", "m:pl:wx"),
+    "col": ("📥 Збір текстів", "m:col"),
     "sbx": ("🧪 Пісочниця", "m:sbx"),
     "imp": ("💡 Покращити", "m:imp"),
     "inbox": ("📮 Скринька", "m:pl:inb"),
@@ -2342,7 +2343,7 @@ DEFAULT_GROUPS = {
 }
 DEFAULT_LAYOUT = [
     ["g:work", "home"], ["g:plugins", "home"], ["g:ai", "home"], ["g:settings", "home"],
-    ["dl", "g:work"], ["tl", "g:work"], ["nt", "g:work"], ["pins", "g:work"], ["inbox", "g:work"],
+    ["dl", "g:work"], ["tl", "g:work"], ["nt", "g:work"], ["col", "g:work"], ["pins", "g:work"], ["inbox", "g:work"],
     ["news", "g:plugins"], ["utm", "g:plugins"], ["stk", "g:plugins"], ["med", "g:plugins"], ["wx", "g:plugins"],
     ["md", "g:ai"], ["cr", "g:ai"],
     ["st", "g:settings"], ["acc", "g:settings"], ["backup", "g:settings"], ["svc", "g:settings"],
@@ -2421,6 +2422,15 @@ def _migrate_compact_menu(chat_id):
             saved.insert(pos, ["wx", "g:plugins"])
             set_pref(chat_id, "layout", saved)
         set_pref(chat_id, "weather_menu_v1", True)
+        p = prefs(chat_id)
+    if not p.get("collect_menu_v1"):
+        # 📥 Збір текстів — новий пункт у «💬 Робота» для тих, хто має власне розташування меню.
+        saved = [list(x) for x in (p.get("layout") or [])]
+        if saved and "col" not in {x[0] for x in saved}:
+            pos = next((i + 1 for i, x in enumerate(saved) if x[0] == "nt"), len(saved))
+            saved.insert(pos, ["col", "g:work"])
+            set_pref(chat_id, "layout", saved)
+        set_pref(chat_id, "collect_menu_v1", True)
         p = prefs(chat_id)
     if not p.get("media_menu_v6"):
         # «🔌 Плагіни» — технічне слово: категорія стає «📰 Медіа», а керування плагінами переходить у ⚙️ Налаштування.
@@ -2628,6 +2638,8 @@ async def show(update: Update, text, rows, edit=True, nav=True):
     if wk and not any(d.startswith("m:why:") for r in rows for _, d in r):  # «❔ Що це» — пояснення розділу
         rows = [list(r) for r in rows] or [[]]
         rows[-1].insert(0, ("❔ Що це", f"m:why:{wk}"))
+    LAST_SCREEN[chat] = (SCREEN.get() or "", re.sub(r"<[^>]+>", "", text or "")[:1500],
+                         [t for r in rows for t, d in r if not d.startswith(("m:nav", "imp:", "m:why"))][:30], time.time())
     import miniapp
     cap = miniapp.CAPTURE.get()
     if cap is not None:  # запит із Mini App: віддаємо екран застосунку, а не в чат
@@ -3131,6 +3143,24 @@ def generators_report():
 
 SHAPE_OPTS = [("square", "⬜ 1:1"), ("portrait", "📱 4:5"), ("landscape", "🖥 16:9"), ("story", "📲 9:16")]
 LENGTH_OPTS = [("short", "Коротко"), ("normal", "Звичайно"), ("long", "Детально")]
+
+
+def scr_collect(chat_id):
+    on = bool(prefs(chat_id).get("collect"))
+    n = COLLECT.count(chat_id)
+    text = ("📥 <b>Режим збору текстів</b>\n\n"
+            + ("🟢 <b>Увімкнено.</b> Надсилайте чи пересилайте тексти — я мовчки складаю їх і відповідаю лише «ок». "
+               "Команди й кнопки працюють як завжди." if on else
+               "⚪ Вимкнено. Увімкніть — і все, що надішлете чи перешлете без команди, я мовчки збиратиму, а потім напишу з цього новину "
+               "або поверну все разом.")
+            + f"\n\nЗібрано: <b>{n}</b>")
+    rows = [[("⏹ Зупинити збір", "m:col:off") if on else ("▶️ Почати збір", "m:col:on")]]
+    if n:
+        rows += [[("✍️ Написати новину", "m:col:news")],
+                 [("💬 Повідомленнями", "m:col:msg"), ("📄 .txt", "m:col:txt"), ("📝 Word", "m:col:doc")],
+                 [("↩️ Прибрати останнє", "m:col:undo"), ("🗑 Очистити все", "m:col:clr")]]
+    rows.append([HOME])
+    return text, rows
 
 
 def scr_settings(chat_id):
@@ -4521,6 +4551,23 @@ def cross_context(chat_id, did, scope, budget=12000):
             + "\n\n---\nКінець вмісту інших розмов. Відповідай у поточній розмові.\n\n")
 
 
+LAST_SCREEN = {}  # чат -> (екран, текст екрана, кнопки, час): про що людина питає, якщо пише просто з меню
+SCREEN_CTX_TTL = 20 * 60
+
+
+def screen_note(chat_id):
+    """Людина пише боту, стоячи в якомусь розділі (погода, теми дня, медіа…) — даємо ШІ цей контекст, щоб відповідь була по темі.
+    Використовується один раз: далі розмова вже має цю тему в історії."""
+    sc = LAST_SCREEN.pop(chat_id, None)
+    if not sc or time.time() - sc[3] > SCREEN_CTX_TTL or sc[0] in ("", "m:home", "m:dl") or sc[0].startswith(("m:dl:", "m:d:")):
+        return ""
+    lines = sc[1].strip().splitlines()
+    title = lines[0] if lines else sc[0]
+    return (f"[Контекст: користувач написав, перебуваючи в розділі бота «{title[:80]}». Вміст екрана:\n{sc[1][:1200]}\n"
+            f"Кнопки: {', '.join(sc[2])[:400]}.\nЯкщо повідомлення стосується цього розділу — відповідай саме по ньому "
+            "(можна підказати, яку кнопку натиснути); якщо ні — відповідай звичайно.]\n\n")
+
+
 def quote_note(quote):
     return f"Користувач відповідає на це повідомлення:\n«{quote[:1500]}»\n\n" if quote else ""
 
@@ -5054,6 +5101,9 @@ def scr_backups(chat_id):
 import lifeboat  # noqa: E402
 import appfeed  # noqa: E402
 import notify  # noqa: E402
+import collect as collect_mod  # noqa: E402
+
+COLLECT = collect_mod.Collect(__import__("datadir").path("collected.sqlite3", "ORION_COLLECT_DB"))
 
 notify.setup(lambda cid: prefs(cid).get("notify") or {}, lambda cid, v: set_pref(cid, "notify", v))
 
@@ -7270,6 +7320,36 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         screen = scr_limits(arg)
     elif a == "st":
         screen = scr_settings(chat_id)
+    elif a == "col":  # 📥 режим збору текстів
+        sub = arg or ""
+        if sub == "on":
+            set_pref(chat_id, "collect", True)
+        elif sub == "off":
+            set_pref(chat_id, "collect", False)
+        elif sub == "undo":
+            COLLECT.pop_last(chat_id)
+        elif sub == "clr":
+            COLLECT.clear(chat_id)
+        elif sub in ("msg", "txt", "doc", "news") and not COLLECT.count(chat_id):
+            toast = "Поки нічого не зібрано"
+        elif sub == "msg":
+            for part in collect_mod.chunks(COLLECT.joined(chat_id)):
+                await ctx.bot.send_message(chat_id, part)
+        elif sub == "txt":
+            await ctx.bot.send_document(chat_id, InputFile(io.BytesIO(COLLECT.txt(chat_id)), filename=f"zibrano-{datetime.now(TZ):%Y%m%d-%H%M}.txt"))
+        elif sub == "doc":
+            data = await asyncio.to_thread(COLLECT.docx, chat_id)
+            await ctx.bot.send_document(chat_id, InputFile(io.BytesIO(data), filename=f"zibrano-{datetime.now(TZ):%Y%m%d-%H%M}.docx"))
+        elif sub == "news":
+            if q:
+                try:
+                    await q.answer("Пишу новину…")
+                except BadRequest:
+                    pass
+            text, _model = await _plugin_ai(collect_mod.NEWS_PROMPT + COLLECT.joined(chat_id)[:24000], label="📥 Новина із зібраного")
+            for part in collect_mod.chunks(text or "Не вдалося написати — спробуйте ще раз."):
+                await ctx.bot.send_message(chat_id, part)
+        screen = scr_collect(chat_id)
     elif a == "ntf":  # 🔔 режими сповіщень за типами
         if arg == "c" and len(parts) > 3:
             notify.cycle(chat_id, parts[3])
@@ -9222,6 +9302,9 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await show(update, *scr, edit=False)
     if msg.text and chat_id in AWAIT:
         return await handle_awaited(update, ctx, msg.text.strip())
+    if prefs(chat_id).get("collect") and (msg.text or msg.caption) and not (msg.text or "").startswith("/"):
+        COLLECT.add(chat_id, msg.text or msg.caption, getattr(msg, "forward_origin", None) is not None)
+        return await msg.reply_text("ок", disable_notification=True)  # 📥 режим збору: мовчки складаємо
     choice = get_choice(chat_id)
     preferred = None if choice == "auto" else choice
     want, forever = addressed_model(msg.text or msg.caption or "")
@@ -9265,6 +9348,7 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if quote:
             content = quote_note(quote) + content
             text = f"↩️ «{short_q(quote.replace(chr(10), ' '), 120)}»\n{text}"
+        content = screen_note(chat_id) + content  # 🧭 пише з якогось розділу — відповідь по темі розділу
         await answer(update, ctx, content, text, preferred)
 
 
@@ -9461,6 +9545,7 @@ if TELEGRAM_TOKEN:
         ("trash", screen_cmd("box:trash")),
         ("access", screen_cmd("acc")),
         ("backup", screen_cmd("backup")),
+        ("collect", screen_cmd("col")),
     ]:
         tg_app.add_handler(CommandHandler(name, fn))
     from access_telegram import install as install_access_commands
