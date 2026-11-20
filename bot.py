@@ -7454,7 +7454,13 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
     elif a == "impimg":  # 🖼 скриншот позначки
         import improve
         data = improve.image_bytes(arg) if (arg or "").isdigit() else None
-        if data:
+        name = improve.media_name(arg) if data else ""
+        ext = name.rsplit(".", 1)[-1] if "." in name else "jpg"
+        if data and ext in ("ogg", "mp3", "m4a", "wav"):
+            await ctx.bot.send_audio(chat_id, InputFile(io.BytesIO(data), filename=f"bug-{arg}.{ext}"), caption=f"🎙 Голосове до позначки #{arg}")
+        elif data and ext in ("mp4", "mov", "webm"):
+            await ctx.bot.send_video(chat_id, InputFile(io.BytesIO(data), filename=f"bug-{arg}.{ext}"), caption=f"🎬 Відео до позначки #{arg}")
+        elif data:
             await ctx.bot.send_photo(chat_id, InputFile(io.BytesIO(data), filename=f"bug-{arg}.jpg"), caption=f"🐞 Скриншот до позначки #{arg}")
         else:
             toast = "Скриншот не знайдено"
@@ -7480,7 +7486,8 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         lines = ["💡 <b>Покращити</b> — помилки, недоробки й ідеї, позначені 💡", "",
                  f"🆕 нових: {c.get('new', 0)} · ✅ зроблено: {c.get('done', 0)} · ❌ відхилено: {c.get('no', 0)}", "",
                  "Позначити: 💡 у куті будь-якого екрана · відповідь на повідомлення бота текстом із 💡 · /improve текст\n"
-                 "🐞 Помилка — «баг …» або «🐞 …»; 💡 побажання — «ідея …» чи «побажання …»; можна й разом: «баг … і побажання …». Пишіть з того місця, де це бачите, "
+                 "🐞 Помилка — «баг …» або «🐞 …»; 💡 побажання — «ідея …» чи «побажання …»; можна й разом: «баг … і побажання …». "
+                 "Можна надіслати голосове чи коротке відео з таким підписом (або одразу після позначки) — бот розшифрує. Пишіть з того місця, де це бачите, "
                  "або надішліть скриншот із таким підписом; у застосунку — плаваюча кнопка 🐞.", ""]
         rows = [[(("● " if flt == k else "") + t, f"m:imp:{k}") for k, t in (("new", "🆕 Нові"), ("done", "✅ Зроблені"), ("no", "❌ Відхилені"))]]
         for m in improve.items(flt, limit=6):
@@ -9933,23 +9940,44 @@ BUG_KINDS = {(True, False): "🐞 помилка", (False, True): "💡 поба
 BUG_WAIT = {}  # чат -> (id позначки, час): наступний скриншот без підпису прикріпиться до неї
 
 
+async def bug_attach_media(ctx, msg, mid, av):
+    """🎙/🎬 Голосове чи коротке відео до позначки: зберегти й розшифрувати (текст допишеться до позначки)."""
+    import improve
+    if getattr(av, "file_size", 0) and av.file_size > 20 * 1024 * 1024:
+        return await msg.reply_text("Файл завеликий (до 20 МБ). Запишіть коротше або опишіть текстом.")
+    data = bytes(await (await av.get_file()).download_as_bytearray())
+    ext = "mp4" if (msg.video or msg.video_note) else ("mp3" if msg.audio else "ogg")
+    improve.set_image(mid, data, ext)
+    try:
+        tr, _p, _e = await media.transcribe(data, f"bug.{ext}")
+        improve.add_note(mid, "🎙 розшифровка: " + tr)
+        await msg.reply_text(f"🐞 Додав до позначки #{mid} і розшифрував:\n«{short_q(tr, 300)}»")
+    except Exception:  # noqa: BLE001
+        await msg.reply_text(f"🐞 Додав до позначки #{mid}. Розшифрувати зараз не вдалося — файл збережено, його прослухають під час аналізу.")
+
+
 async def bug_mark(update, ctx, note, wish=False, bug=True):
     """🐞 «баг …» / 💡 «ідея …», або скриншот із таким підписом — позначка помилки чи побажання саме на тому екрані, де людина зараз."""
     import improve
     chat_id = update.effective_chat.id
     msg = update.effective_message
     wait = BUG_WAIT.get(chat_id)
-    if msg.photo and not note and wait and time.time() - wait[1] < 600:
+    if (msg.photo or msg.voice or msg.video or msg.video_note or msg.audio) and not note and wait and time.time() - wait[1] < 600:
         mid = wait[0]
     else:
         sc = LAST_SCREEN.get(chat_id) or (L.current(chat_id) or "", "", [], 0)
         mid = improve.add(update.effective_user.id, "chat", sc[0] or (L.current(chat_id) or ""), BUG_KINDS[(bug, wish)], "",
-                          (sc[1] or "")[:600], note or ("(скриншот)" if msg.photo else ""))
+                          (sc[1] or "")[:600], note or ("(скриншот)" if msg.photo else "(голосове чи відео)" if (msg.voice or msg.video or msg.video_note or msg.audio) else ""))
     if msg.photo:
         data = bytes(await (await msg.photo[-1].get_file()).download_as_bytearray())
         improve.set_image(mid, data)
         BUG_WAIT.pop(chat_id, None)
         return await msg.reply_text(f"🐞 Скриншот додано до позначки #{mid}. Дякую — виправлю під час наступного аналізу бота.")
+    av = msg.voice or msg.audio or msg.video_note or msg.video
+    if av:
+        await bug_attach_media(ctx, msg, mid, av)
+        BUG_WAIT.pop(chat_id, None)
+        return
     BUG_WAIT[chat_id] = (mid, time.time())
     what = {(True, True): "🐞💡 помилку й побажання", (False, True): "💡 побажання"}.get((bug, wish), "🐞 помилку")
     return await msg.reply_text(f"Записав {what} #{mid} з прив'язкою до екрана, де ви зараз. Можете одразу надіслати "
@@ -10317,6 +10345,25 @@ if TELEGRAM_TOKEN:
         raise ApplicationHandlerStop
 
     tg_app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.FORWARDED, on_forward_any), group=-5)
+
+    async def on_bug_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """🐞 Голосове чи відео з підписом «баг …»/«ідея …» або одразу після позначки — до позначки, з розшифровкою."""
+        from telegram.ext import ApplicationHandlerStop
+        m = update.effective_message
+        if not m or not allowed(update):
+            return
+        cid = update.effective_chat.id
+        b = BUG_RE.match(m.caption or "")
+        waiting = cid in BUG_WAIT and time.time() - BUG_WAIT[cid][1] < 600 and not m.caption
+        if not (b or waiting):
+            return
+        note = (m.caption or "")[b.end():].strip() if b else ""
+        is_wish = bool(b and b.group("wish"))
+        await bug_mark(update, ctx, note, wish=is_wish, bug=not is_wish or bool(b and b.group("bug")))
+        raise ApplicationHandlerStop
+
+    tg_app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.FORWARDED & (filters.VOICE | filters.VIDEO | filters.VIDEO_NOTE | filters.AUDIO),
+                                      on_bug_media), group=-5)
 
     tg_app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE, on_plugin_private), group=-4)
     tg_app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST | (filters.ChatType.GROUPS & filters.UpdateType.MESSAGE),
@@ -10761,10 +10808,22 @@ async def main():
             mid = improve.add(uid, str(m.get("where") or "app")[:20], str(m.get("screen") or "")[:200], str(m.get("target") or "")[:200],
                               str(m.get("action") or "")[:120], str(m.get("excerpt") or "")[:600], str(m.get("note") or "")[:2000])
             img = str(m.get("image") or "")
-            if img.startswith("data:image/") and "," in img:  # 🐞 скриншот із застосунку
+            if img.startswith(("data:image/", "data:video/", "data:audio/")) and "," in img:  # 🐞 скриншот, відео чи голосове із застосунку
                 try:
-                    ext = "png" if img.startswith("data:image/png") else "webp" if img.startswith("data:image/webp") else "jpg"
-                    improve.set_image(mid, base64.b64decode(img.split(",", 1)[1][:12_000_000]), ext)
+                    head = img[:40]
+                    ext = ("png" if "image/png" in head else "webp" if "image/webp" in head else "jpg" if head.startswith("data:image/")
+                           else "mov" if "quicktime" in head else "webm" if "webm" in head else "mp4" if head.startswith("data:video/")
+                           else "m4a" if ("mp4" in head or "m4a" in head or "aac" in head) else "mp3" if "mpeg" in head else "wav" if "wav" in head else "ogg")
+                    raw = base64.b64decode(img.split(",", 1)[1][:28_000_000])
+                    improve.set_image(mid, raw, ext)
+                    if not head.startswith("data:image/"):
+                        async def _tr(mid=mid, raw=raw, ext=ext):
+                            try:
+                                tr, _p, _e = await media.transcribe(raw, f"bug.{ext}")
+                                improve.add_note(mid, "🎙 розшифровка: " + tr)
+                            except Exception:  # noqa: BLE001
+                                improve.add_note(mid, "(розшифрувати не вдалося — файл збережено)")
+                        asyncio.get_running_loop().create_task(_tr())
                 except (ValueError, OSError):
                     pass
             n += 1

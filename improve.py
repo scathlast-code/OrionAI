@@ -44,11 +44,14 @@ def img_dir():
     return d
 
 
+MEDIA_EXT = ("jpg", "png", "webp", "ogg", "mp3", "m4a", "wav", "mp4", "mov", "webm")
+
+
 def set_image(mid, data: bytes, ext="jpg"):
-    """Зберегти скриншот до позначки (до 8 МБ)."""
-    if not data or len(data) > 8 * 1024 * 1024:
+    """Зберегти скриншот, голосове чи коротке відео до позначки (до 20 МБ)."""
+    if not data or len(data) > 20 * 1024 * 1024:
         return ""
-    f = img_dir() / f"{int(mid)}.{ext if ext in ('jpg', 'png', 'webp') else 'jpg'}"
+    f = img_dir() / f"{int(mid)}.{ext if ext in MEDIA_EXT else 'jpg'}"
     f.write_bytes(data)
     with closing(db()) as con, con:
         con.execute("UPDATE marks SET image=? WHERE id=?", (f.name, int(mid)))
@@ -62,6 +65,18 @@ def image_bytes(mid):
         return None
     f = img_dir() / r["image"]
     return f.read_bytes() if f.exists() else None
+
+
+def media_name(mid):
+    with closing(db()) as con:
+        r = con.execute("SELECT image FROM marks WHERE id=?", (int(mid),)).fetchone()
+    return (r["image"] if r else "") or ""
+
+
+def add_note(mid, extra):
+    """Дописати до позначки (напр. розшифровку голосового чи відео)."""
+    with closing(db()) as con, con:
+        con.execute("UPDATE marks SET note=TRIM(note || char(10) || ?) WHERE id=?", (extra[:4000], int(mid)))
 
 
 def add(user, where_, screen="", target="", action="", excerpt="", note="", bot="orion"):
@@ -111,14 +126,19 @@ def describe(m):
         parts.append(f"текст: «{m['excerpt'][:160]}»")
     if m["note"]:
         parts.append(f"💬 {m['note']}")
-    if dict(m).get("image"):
-        parts.append("🖼 є скриншот")
+    img = dict(m).get("image") or ""
+    if img:
+        ext = img.rsplit(".", 1)[-1]
+        parts.append("🎙 є голосове" if ext in ("ogg", "mp3", "m4a", "wav") else "🎬 є відео" if ext in ("mp4", "mov", "webm") else "🖼 є скриншот")
     return "\n".join(parts)
 
 
 def export_md():
     rows = items(limit=100000)
-    out = ["# 💡 Покращити — OrionAI", f"Вивантажено {time.strftime('%d.%m.%Y %H:%M')} · усього {len(rows)}", ""]
+    out = ["# 💡 Покращити — OrionAI", f"Вивантажено {time.strftime('%d.%m.%Y %H:%M')} · усього {len(rows)}", "",
+           "Для будь-якого ШІ-редактора бота: це помилки (🐞) й побажання (💡), позначені користувачами саме там, де вони їх побачили. "
+           "«де» — екран бота чи застосунку, «уривок» — текст того екрана, «пояснення» — опис і розшифровка голосового/відео. "
+           "Після виправлення позначте пункт як зроблений.", ""]
     for st, title in (("new", "Нове"), ("done", "Зроблено"), ("no", "Відхилено")):
         part = [m for m in rows if m["status"] == st]
         if not part:
@@ -133,7 +153,7 @@ def export_md():
             if m["note"]:
                 out.append(f"  - пояснення: {m['note']}")
             if m.get("image"):
-                out.append(f"  - скриншот: improve_img/{m['image']}")
+                out.append(f"  - файл (скриншот/голосове/відео): improve_img/{m['image']}")
         out.append("")
     return "\n".join(out).encode("utf-8")
 
