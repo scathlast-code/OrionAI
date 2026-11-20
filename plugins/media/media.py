@@ -4,6 +4,7 @@
 короткий запис ефіру. Перевірка адрес (лише публічні HTTP/HTTPS) — як в оригіналі.
 """
 import asyncio
+import datetime as dt
 import os
 import ipaddress
 import json
@@ -50,6 +51,61 @@ YT = (
 # /opt/bgutil/server (Dockerfile) і запускається лише на час запиту — постійного сервера немає (ліміт RAM).
 POT_HOME = os.environ.get("BGUTIL_SERVER_HOME", "/opt/bgutil/server")
 YT_HEAVY = asyncio.Semaphore(int(os.environ.get("MEDIA_HEAVY_SLOTS", "1") or 1))  # YouTube-запити по одному: економимо RAM
+
+
+import contextvars as _cv
+
+NOTE = _cv.ContextVar("media_note", default=None)  # async fn(text) — показати поточний крок пошуку
+
+
+async def note(text):
+    fn = NOTE.get()
+    if fn:
+        try:
+            await fn(text)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+SITE_NAMES = (("youtube.com", "YouTube"), ("youtu.be", "YouTube"), ("tiktok.com", "TikTok"), ("instagram.com", "Instagram"),
+              ("facebook.com", "Facebook"), ("fb.watch", "Facebook"), ("threads.net", "Threads"), ("threads.com", "Threads"),
+              ("x.com", "X"), ("twitter.com", "X"), ("reddit.com", "Reddit"), ("vimeo.com", "Vimeo"), ("tumblr.com", "Tumblr"),
+              ("t.me", "Telegram"), ("soundcloud.com", "SoundCloud"), ("pinterest.", "Pinterest"), ("bsky.app", "Bluesky"),
+              ("twitch.tv", "Twitch"), ("dailymotion.com", "Dailymotion"), ("vk.com", "VK"), ("linkedin.com", "LinkedIn"))
+
+
+def site_name(url):
+    host = (urlsplit(str(url)).hostname or "").lower()
+    for key, name in SITE_NAMES:
+        if key in host:
+            return name
+    return host.removeprefix("www.") or "сайт"
+
+
+def describe_source(url):
+    """«Instagram · сторіс @user», «TikTok · @user», «YouTube» — звідки саме качаємо."""
+    url = str(url)
+    site = site_name(url)
+    path = urlsplit(url).path
+    m = re.search(r"/stories/(?:highlights/)?([A-Za-z0-9_.]+)", path)
+    if m and m[1] not in ("highlights",):
+        return f"{site} · сторіс {'@' if site != 'Facebook' else ''}{m[1]}"
+    m = re.search(r"/@([A-Za-z0-9_.-]+)", path)
+    if m:
+        return f"{site} · @{m[1]}"
+    m = re.match(r"/([A-Za-z0-9_.]{3,})/(?:p|reel|reels|status|post|video|videos)/", path)
+    if m:
+        return f"{site} · @{m[1]}" if site != "Facebook" else f"{site} · {m[1]}"
+    if site in ("Telegram",):
+        part = path.strip("/").split("/")[0]
+        if part and part not in ("s", "c"):
+            return f"Telegram · @{part}"
+    return site
+
+
+def is_story(url):
+    url = str(url)
+    return bool(STORY.match(url) or FB_STORY.match(url) or re.search(r"tiktok\.com/.*/story/|/stories/", url))
 
 
 def is_youtube(url):
@@ -669,21 +725,42 @@ async def story_probe(url, work):
         raise JobError("Instagram показує сторіс лише після входу. Щоб бот їх качав без вашого акаунта, як інші боти, "
                        "додайте в Railway змінну APIFY_TOKEN (apify.com → Settings → API &amp; Integrations; безкоштовних "
                        "$5 на місяць вистачає приблизно на 300 сторіс).\n\n🔎 " + apify_hint() + f"\n\n<i>Технічно: {html_escape(first[-200:])}</i>")
-    rows = await apify_run(APIFY_ACTOR, {"usernames": [user], "saveFiles": False, "maxItems": 0}, timeout=180)
-    if story_id:
-        exact = [row for row in rows if str(row.get("storyId") or "").split("_")[0] == story_id]
-        rows = exact or rows
+    rows = await apify_run(APIFY_ACTOR, {"usernames": [user], "saveFiles": True, "maxItems": 0}, timeout=180)
     items = []
     for row in rows:
         link = row.get("videoUrl") if row.get("mediaType") == "video" else None
-        link = link or row.get("videoUrl") or row.get("imageUrl")
+        link = row.get("savedFile") or link or row.get("videoUrl") or row.get("imageUrl")
         if link:
-            items.append(Item("direct", link, {"title": f"Сторіс @{user}", "author": user,
-                                               "author_url": f"https://www.instagram.com/{user}/",
+            exact = bool(story_id) and str(row.get("storyId") or "").split("_")[0] == story_id
+            items.append(Item("direct", link, {"title": f"Сторіс @{user}", "author": user, "when": story_time(row),
+                                               "author_url": f"https://www.instagram.com/{user}/", "_exact": exact,
+                                               "_fallback": row.get("videoUrl") or row.get("imageUrl"),
                                                "description": " ".join(row.get("links") or [])}))
     if not items:
         raise JobError(f"У @{user} зараз немає доступних сторіс (минули 24 години або акаунт приватний).")
     return items
+
+
+def story_time(row):
+    """Час публікації сторіс (як «14:05»), якщо сервіс його віддав."""
+    for key in ("takenAt", "taken_at", "timestamp", "created_time", "createdAt", "publish_time", "date"):
+        v = row.get(key)
+        if not v:
+            continue
+        try:
+            when = dt.datetime.fromtimestamp(float(v), dt.timezone.utc) if str(v).replace(".", "").isdigit() else \
+                dt.datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+            return when.astimezone(dt.timezone(dt.timedelta(hours=2))).strftime("%d.%m %H:%M")
+        except (ValueError, OverflowError, OSError):
+            continue
+    return ""
+
+
+def apify_auth(url):
+    """Записи зі сховища Apify (api.apify.com/…/records/…) віддаються лише з ключем."""
+    if "api.apify.com/" in str(url) and "token=" not in str(url) and apify_token():
+        return str(url) + ("&" if "?" in str(url) else "?") + "token=" + apify_token()
+    return url
 
 
 def apify_token():
@@ -749,16 +826,18 @@ async def apify_run(actor, payload, timeout=240):
 
 async def fb_story_probe(url, work):
     """Сторіс Facebook: yt-dlp їх не знає, тож — через сервіс Apify (APIFY_TOKEN), як інші боти-завантажувачі."""
-    rows = await apify_run(FB_STORY_ACTOR, {"story_urls": [{"url": url}], "saveToKeyValueStore": False})
+    # Файли просимо зберегти в сховище Apify: пряме посилання Facebook прив'язане до сервера Apify й швидко спливає
+    # (бот отримував сторінку замість відео). Зі сховища забираємо за ключем — див. apify_auth().
+    rows = await apify_run(FB_STORY_ACTOR, {"story_urls": [{"url": url}], "saveToKeyValueStore": True})
     items = []
     for row in rows:
         if row.get("status") == "failed":
             continue
-        link = row.get("download_url") or row.get("kv_store_url")
+        link = row.get("kv_store_url") or row.get("download_url")
         if not link:
             continue
         who = row.get("uploader_name") or ""
-        info = {"title": f"Сторіс {who}".strip(), "author": who}
+        info = {"title": f"Сторіс {who}".strip(), "author": who, "when": story_time(row), "_fallback": row.get("download_url")}
         if row.get("media_type") == "video" and row.get("audio_download_url"):
             info["_audio"] = row["audio_download_url"]  # відео й звук окремо — склеїмо
         items.append(Item("direct", link, info))
@@ -793,7 +872,11 @@ async def inspect_link(url, work):
 
     video_site = domain_matches(host, VIDEO_HOSTS)
     errors = []
+    labels = {"video_probe": "завантажувач yt-dlp", "gallery_probe": "альбоми (gallery-dl)", "page_probe": "сторінка допису",
+              "threads_probe": "Threads", "tumblr_probe": "Tumblr", "story_probe": "сторіс: напряму, далі через Apify (до 1–2 хв)",
+              "fb_story_probe": "сторіс через Apify (до 1–2 хв)"}
     for probe in probes:
+        await note(labels.get(probe.__name__, probe.__name__))
         try:
             items = await probe(url, work)
         except URLDenied:
@@ -826,7 +909,17 @@ async def inspect_link(url, work):
 async def fetch_direct(item, source, options, work, progress=None):
     if options.audio != "auto" or options.subs != "off":
         raise JobError("Прямий файл має власну доріжку. Вибери /audio auto і /subs off.")
-    async with open_url(item.url, referer=source) as response:
+    urls = [apify_auth(item.url)] + ([item.info["_fallback"]] if item.info.get("_fallback") else [])
+    for attempt, address in enumerate(urls):
+        try:
+            return await _fetch_direct_one(item, address, source, work, progress)
+        except (JobError, httpx.HTTPError):
+            if attempt == len(urls) - 1:
+                raise
+
+
+async def _fetch_direct_one(item, address, source, work, progress):
+    async with open_url(address, referer=None if "api.apify.com" in address else source) as response:
         extension = media_extension(response)
         if not extension:
             raise JobError("За адресою відкрилася сторінка замість медіафайла.")

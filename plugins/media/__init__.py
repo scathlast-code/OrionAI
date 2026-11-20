@@ -10,6 +10,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import sys
 import contextvars
 import logging
 import re
@@ -62,6 +65,17 @@ class Pending:
 
 def mb(n):
     return f"{n / 1048576:.1f} МБ"
+
+
+def parse_numbers(text, n):
+    """«1, 3-5 7» → [1, 3, 4, 5, 7] у межах 1..n."""
+    out = []
+    for a, b in re.findall(r"(\d+)\s*(?:[-–—]\s*(\d+))?", text or ""):
+        lo, hi = int(a), int(b or a)
+        for k in range(min(lo, hi), max(lo, hi) + 1):
+            if 1 <= k <= n and k not in out:
+                out.append(k)
+    return out
 
 
 def bar(done, total, speed=0, eta=0):
@@ -256,6 +270,39 @@ class Plugin(Base):
         if a == "off" and x in self.offers:  # старі кнопки «Знайти й завантажити» з попередньої версії
             c, url = self.offers.pop(x)
             return self.start_quick(chat, url) or "🔎 Шукаю…", (self.live_screen(chat) if self.in_app() else None)
+        if a in ("fq", "fa", "fp", "ff", "fr", "fall", "sp", "spn"):
+            job = self.job_by(chat, x)
+            if not job:
+                return "Посилання застаріло — надішліть його ще раз", None
+            if self.busy(chat) and a != "fp":
+                return "⏳ Ще завантажую попереднє", None
+            if a == "fq":
+                self._bg(chat, self.fmt_go(chat, job, [1], mode="video", height=int(y or 0) or 0, cuts=()))
+            elif a == "fa":
+                self._bg(chat, self.fmt_go(chat, job, [1], mode="audio", cuts=()))
+            elif a == "fp":
+                thumb = job.items[0].info.get("thumbnail")
+                if not thumb:
+                    return "Превʼю немає", None
+                await self.host.bot().send_photo(chat, thumb, caption="🖼 Превʼю")
+                return "🖼", None
+            elif a == "ff":
+                self._bg(chat, self.full_song(chat, job))
+            elif a == "fr":
+                self._bg(chat, self.recognize(chat, job))
+            elif a == "fall":
+                nums = list(range(1, len(job.items) + 1))
+                self._bg(chat, self.fmt_go(chat, job, nums, **({"mode": "audio"} if y == "a" else {"mode": "video", "height": 720})))
+            elif a == "sp":
+                n = len(job.items)
+                nums = list(range(1, n + 1)) if y == "all" else [n] if y == "last" else [int(y)] if str(y).isdigit() and 1 <= int(y) <= n else []
+                if not nums:
+                    return "Немає такого номера", None
+                self._bg(chat, self.fmt_go(chat, job, nums))
+            elif a == "spn":
+                self.ask(chat, "spn", job.token)
+                return None, (f"🔢 Напишіть номери сторіс (1–{len(job.items)}), напр. <code>1, 3-5</code>.", [[("✖️ Скасувати", "m:cancel")]])
+            return "⬇️ Починаю", (self.live_screen(chat) if self.in_app() else None)
         if a == "st":
             return None, self.live_screen(chat)
         if a == "re" and x in self.offers:  # 🔁 повторити після помилки
@@ -306,6 +353,16 @@ class Plugin(Base):
 
     async def on_text(self, update, ctx, chat, key, data, text):
         text = (text or "").strip()
+        if key == "spn":  # номери сторіс: «1, 3-5»
+            job = self.job_by(chat, data)
+            if not job:
+                return "Посилання застаріло", None
+            nums = parse_numbers(text, len(job.items))
+            if not nums:
+                self.ask(chat, "spn", data)
+                return "Не бачу номерів", (f"🔢 Номери від 1 до {len(job.items)}, напр. <code>1, 3-5</code>.", [[("✖️ Скасувати", "m:cancel")]])
+            self._bg(chat, self.fmt_go(chat, job, nums))
+            return f"⬇️ Завантажую: {', '.join(map(str, nums))}", (self.live_screen(chat) if self.in_app() else None)
         if key == "akey":
             try:
                 await update.message.delete()  # ключ — як пароль: у чаті не лишаємо
@@ -449,6 +506,8 @@ class Plugin(Base):
             except Exception as exc:  # noqa: BLE001
                 log.exception("media job failed")
                 await self.host.notify(chat, f"⚠️ Не вдалося: {esc(type(exc).__name__)}")
+            finally:
+                self._active(chat, done=True)
         # Чистий контекст: якщо завдання почали з Mini App, його повідомлення й файли мають іти в справжній чат,
         # а не в «перехоплювач» запиту застосунку, який уже завершився.
         task = asyncio.get_running_loop().create_task(wrap(), context=contextvars.Context())
@@ -459,7 +518,7 @@ class Plugin(Base):
         """Повертає текст лише якщо почати не можна; інакше все показує саме повідомлення-статус."""
         if self.busy(chat):
             return "⏳ Ще завантажую попереднє — дочекайтесь або зупиніть: /media"
-        self.live[chat] = ("🔎 Шукаю відео за посиланням…", [])
+        self.live[chat] = (f"🔎 Шукаю: {esc(M.describe_source(url))}…", [])
         self._bg(chat, self.quick(chat, url))
         return None
 
@@ -533,15 +592,67 @@ class Plugin(Base):
                     return msg
         return await self.host.notify(chat, text, rows) or msg
 
+    # ---- статуси, що пережили б перезапуск: бот відмічає, а після старту виправляє «завислі» повідомлення
+    def _active_path(self):
+        return self.dir / "active.json"
+
+    def _active(self, chat, status=None, url=None, done=False):
+        try:
+            data = json.loads(self._active_path().read_text("utf-8"))
+        except Exception:  # noqa: BLE001
+            data = {}
+        if done:
+            data.pop(str(chat), None)
+        elif status is not None:
+            data[str(chat)] = [getattr(status, "message_id", 0), url or "", int(time.time())]
+        try:
+            self._active_path().write_text(json.dumps(data), "utf-8")
+        except OSError:
+            pass
+
+    async def start(self):
+        """Після перезапуску: «🔎 Шукаю…» чи «⬇️ Завантажую…», що лишились від перерваного завдання — чесно позначити."""
+        try:
+            data = json.loads(self._active_path().read_text("utf-8"))
+        except Exception:  # noqa: BLE001
+            return
+        self._active_path().unlink(missing_ok=True)
+        await asyncio.sleep(5)
+        for chat, (mid, url, _t) in data.items():
+            t = secrets.token_hex(4)
+            self.offers[t] = (int(chat), url)
+            try:
+                await self.host.bot().edit_message_text(
+                    "⚠️ Завантаження перервалося: бот перезапускався (оновлення). Натисніть, щоб почати знову.",
+                    chat_id=int(chat), message_id=int(mid),
+                    reply_markup=self._markup([[("🔁 Спробувати ще раз", self.cb("re", t))]]))
+            except Exception:  # noqa: BLE001
+                pass
+
     async def quick(self, chat, url):
         stop = [[("⏹ Зупинити", self.cb("stop"))]]
-        status = await self._status(chat, None, "🔎 Шукаю відео за посиланням…", stop)
+        src = M.describe_source(url)
+        status = await self._status(chat, None, f"🔎 Шукаю: <b>{esc(src)}</b>…", stop)
+        self._active(chat, status, url)
+        started, step = time.time(), {"t": "перевіряю посилання"}
+
+        async def ticker():  # кожні 5 с — скільки минуло й що зараз пробуємо: видно, що бот не завис
+            while True:
+                await asyncio.sleep(5)
+                el = int(time.time() - started)
+                await self._status(chat, status, f"🔎 Шукаю: <b>{esc(src)}</b>\n⏱ {el // 60}:{el % 60:02d} · {esc(step['t'])}…", stop)
+
+        async def set_note(text):
+            step["t"] = text
+        tick = asyncio.get_running_loop().create_task(ticker())
+        token = M.NOTE.set(set_note)
         try:
             url = await M.resolve_share(url)
             with tempfile.TemporaryDirectory(prefix="orion-media-") as work:
                 items = await M.inspect_link(url, Path(work))
         except M.URLDenied as exc:
             await self._status(chat, status, f"⚠️ {esc(str(exc))}")
+            self._active(chat, done=True)
             return
         except JobError as exc:
             t = secrets.token_hex(4)
@@ -549,16 +660,244 @@ class Plugin(Base):
             rows = [[("🔁 Спробувати ще раз", self.cb("re", t))], [("🍪 Входи на сайти", self.cb("ck")), ("« Медіа", self.cb())]]
             if "APIFY_TOKEN" in str(exc) and "не підходить" not in str(exc):
                 rows.insert(0, [("🔑 Вставити ключ Apify тут", self.cb("akey"))])
-            await self._status(chat, status, f"⚠️ <b>Не вийшло завантажити</b>\n\n{exc}"[:4000], rows)
+            await self._status(chat, status, f"⚠️ <b>Не вийшло завантажити</b> · {esc(src)}\n\n{exc}"[:4000], rows)
+            self._active(chat, done=True)
             return
+        finally:
+            tick.cancel()
+            M.NOTE.reset(token)
         job = Job(secrets.token_hex(4), url, items[:300])
-        job.options.height = 1080  # швидкий режим: до 1080p, щоб не впертись у межу Telegram
+        job.options.height = 1080  # до 1080p, щоб не впертись у межу Telegram
+        job.__dict__["src"] = src
         self.jobs[chat] = job
-        if len(job.items) > QUICK_MAX:  # плейлист чи канал — тут без вибору ніяк
+        self._active(chat, done=True)
+        if M.is_story(url) and len(job.items) > 1:  # кілька сторіс за день: вибір
+            await self.show_stories(chat, job, status)
+            return
+        if len(job.items) > 1 and job.items[0].engine == "yt":  # плейлист / канал: список одним повідомленням
+            await self.show_playlist(chat, job, status)
+            return
+        if len(job.items) == 1 and job.items[0].engine == "yt":  # одне відео: меню форматів із розмірами
+            await self.show_formats(chat, job, status)
+            return
+        if len(job.items) > QUICK_MAX:
             t, rows = self.job_screen(chat)
-            await self._status(chat, status, f"📋 Тут {len(job.items)} елементів — виберіть, що завантажити.\n\n" + t, rows)
+            await self._status(chat, status, f"📋 {esc(src)} · {len(job.items)} елементів — виберіть, що завантажити.\n\n" + t, rows)
             return
         await self.download(chat, job, list(range(1, len(job.items) + 1)), status=status)
+
+    # ---------------------------------------------------------------- сторіс: вибір
+    async def show_stories(self, chat, job, status):
+        n, tok = len(job.items), job.token
+        lines = [f"📚 <b>{esc(job.__dict__.get('src') or 'Сторіс')}</b> · сторіс за добу: {n}", ""]
+        for k, it in enumerate(job.items[:50], 1):
+            kind = "🎬" if str(it.url).split("?")[0].lower().endswith((".mp4", ".mov")) or "video" in str(it.info.get("_fallback") or "") else "🖼"
+            mark = " ← з посилання" if it.info.get("_exact") else ""
+            lines.append(f"{k}. {kind} {esc(it.info.get('when') or '')}{mark}".rstrip())
+        lines += ["", f"⏱ Орієнтовно: ≈{max(1, n * 10 // 60)} хв на всі" if n * 10 >= 60 else f"⏱ Орієнтовно: ≈{n * 10} с на всі",
+                  self.limits_line()]
+        rows = []
+        exact = next((k for k, it in enumerate(job.items, 1) if it.info.get("_exact")), None)
+        if exact:
+            rows.append([(f"📌 Саме цю (№{exact})", self.cb("sp", tok, exact))])
+        rows.append([("🆕 Лише останню", self.cb("sp", tok, "last")), (f"⬇️ Усі ({n})", self.cb("sp", tok, "all"))])
+        nums = [(f"{k}", self.cb("sp", tok, k)) for k in range(1, min(n, 10) + 1)]
+        rows += [nums[i:i + 5] for i in range(0, len(nums), 5)]
+        rows.append([("🔢 Вибрати кілька номерів", self.cb("spn", tok))])
+        text = "\n".join(lines)[:4000]
+        self.live[chat] = (text, rows)
+        await self._status(chat, status, text, rows)
+
+    # ---------------------------------------------------------------- меню форматів
+    def tg_limit(self):
+        return BIG_LIMIT if self.big.ready() else TELEGRAM_OUT
+
+    @staticmethod
+    def sizes(info):
+        """[(висота, байтів або None)] для кожної якості + розмір найкращого звуку."""
+        fmts = [f for f in (info.get("formats") or []) if isinstance(f, dict)]
+        size = lambda f: f.get("filesize") or f.get("filesize_approx")
+        audio = [f for f in fmts if f.get("vcodec") in (None, "none") and f.get("acodec") not in (None, "none")]
+        best_a = max(audio, key=lambda f: f.get("abr") or f.get("tbr") or 0, default=None)
+        a_size = size(best_a) if best_a else None
+        by_h = {}
+        for f in fmts:
+            h = f.get("height")
+            if not h or f.get("vcodec") in (None, "none") or h < 144:
+                continue
+            if h not in by_h or (f.get("tbr") or 0) > (by_h[h].get("tbr") or 0):
+                by_h[h] = f
+        out = []
+        for h in sorted(by_h):
+            f = by_h[h]
+            s = size(f)
+            if s and f.get("acodec") in (None, "none") and a_size:
+                s += a_size
+            out.append((h, s))
+        if not out and (info.get("filesize") or info.get("filesize_approx")):
+            out.append((info.get("height") or 0, info.get("filesize") or info.get("filesize_approx")))
+        return out, a_size
+
+    @staticmethod
+    def music(info):
+        """(виконавець, назва, накладена?) — соцмережі пишуть, яка пісня звучить (TikTok, YouTube, частково Instagram)."""
+        track = (info.get("track") or "").strip()
+        artist = (info.get("artist") or ", ".join(info.get("artists") or []) or "").strip()
+        if not track:
+            return None
+        original = re.search(r"original sound|оригінальний звук|оригинальный звук|son original|sonido original|orijinal ses|suara asli", track, re.I)
+        return artist, track, not original
+
+    def limits_line(self):
+        lim = self.tg_limit()
+        return f"ℹ️ Ліміт Telegram: файл до {'2 ГБ' if lim >= 1024 ** 3 else mb(lim)}" + ("" if self.big.ready() else " (більше — з TELEGRAM_API_ID)")
+
+    async def show_formats(self, chat, job, status):
+        item = job.items[0]
+        info = item.info
+        sizes, a_size = self.sizes(info)
+        lim, tok = self.tg_limit(), job.token
+        who = info.get("uploader") or info.get("channel") or info.get("creator") or ""
+        dur = int(info.get("duration") or 0)
+        lines = [f"🎬 <b>{esc(item.title[:200])}</b>", f"📍 {esc(job.__dict__.get('src') or M.site_name(job.url))}"
+                 + (f" · 👤 {esc(who)}" if who else "") + (f" · ⏱ {dur // 60}:{dur % 60:02d}" if dur else "")]
+        rows, line = [], []
+        if sizes:
+            lines.append("")
+            for h, s in sizes:
+                fits = not s or s <= lim
+                label = f"{h}p" if h else "Відео"
+                lines.append(f"{'✅' if fits else '⛔'} <code>{label:>6}</code> " + (mb(s) if s else "розмір невідомий"))
+                line.append((f"🎬 {label}", self.cb("fq", tok, h or 0)))
+                if len(line) == 3:
+                    rows.append(line)
+                    line = []
+            if line:
+                rows.append(line)
+        else:
+            rows.append([("🎬 Відео", self.cb("fq", tok, 0))])
+        rows.append([("🔊 Звук (MP3)" + (f" · {mb(a_size)}" if a_size else ""), self.cb("fa", tok)), ("🖼 Превʼю", self.cb("fp", tok))])
+        song = job.__dict__.get("song") or self.music(info)
+        if song:
+            artist, track, added = song
+            name = f"{artist} — {track}" if artist else track
+            lines.append(f"\n🎵 {'Музика у відео' if added else 'Звук'}: <b>{esc(name[:120])}</b>")
+            if added:
+                rows.append([("🎵 Фрагмент з відео", self.cb("fa", tok)), ("🎶 Повна пісня", self.cb("ff", tok))])
+        else:
+            rows.append([("🔎 Розпізнати музику", self.cb("fr", tok))])
+        rows.append([("✂️ Обрізка, GIF, субтитри", self.cb("menu", tok))])
+        lines += ["", self.limits_line()]
+        text = "\n".join(lines)[:1000]
+        self.live[chat] = (text, rows)
+        thumb = info.get("thumbnail")
+        if thumb:
+            try:
+                await self.host.bot().send_photo(chat, thumb, caption=text, parse_mode="HTML", reply_markup=self._markup(rows))
+                try:
+                    await self.host.bot().delete_message(chat, status.message_id)
+                except Exception:  # noqa: BLE001
+                    pass
+                return
+            except Exception:  # noqa: BLE001 — превʼю не віддалось: меню текстом
+                pass
+        await self._status(chat, status, text, rows)
+
+    async def show_playlist(self, chat, job, status):
+        """Як у ботів-завантажувачів: усі відео списком (назва-посилання, тривалість) одним повідомленням."""
+        def link(it):
+            i = it.info
+            u = i.get("webpage_url") or i.get("url") or ""
+            if not str(u).startswith("http") and i.get("id"):
+                u = f"https://youtu.be/{i['id']}"
+            return u
+        head = f"📋 <b>Плейлист · {len(job.items)}</b> · {esc(job.__dict__.get('src') or '')}"
+        chunks, cur = [], head + "\n"
+        for n, it in enumerate(job.items[:100], 1):
+            d = int(it.info.get("duration") or 0)
+            row = f"\n{n}. <a href=\"{esc(link(it))}\">{esc(it.title[:80])}</a>" + (f" · {d // 60}:{d % 60:02d}" if d else "")
+            if len(cur) + len(row) > 3800:
+                chunks.append(cur)
+                cur = ""
+            cur += row
+        if len(job.items) > 100:
+            cur += f"\n\n…і ще {len(job.items) - 100}"
+        chunks.append(cur + "\n\n" + self.limits_line())
+        tok = job.token
+        rows = [[("⬇️ Усі відео (720p)", self.cb("fall", tok, "v")), ("🔊 Усі MP3", self.cb("fall", tok, "a"))],
+                [("☑️ Вибрати окремі", self.cb("menu", tok))]]
+        for i, c in enumerate(chunks):
+            last = i == len(chunks) - 1
+            if i == 0:
+                status = await self._status(chat, status, c, rows if last else [])
+            else:
+                await self.host.bot().send_message(chat, c, parse_mode="HTML", disable_web_page_preview=True,
+                                                   reply_markup=self._markup(rows) if last else None)
+        self.live[chat] = (chunks[0][:3500], rows)
+
+    def job_by(self, chat, tok):
+        job = self.jobs.get(chat)
+        return job if job and job.token == tok else None
+
+    async def fmt_go(self, chat, job, nums, **opts):
+        """Вибраний формат / сторіс: окреме повідомлення-статус і завантаження."""
+        for k, v in opts.items():
+            setattr(job.options, k, v)
+        status = await self._status(chat, None, f"⬇️ Готую: {esc(job.__dict__.get('src') or '')}…", [[("⏹ Зупинити", self.cb("stop"))]])
+        await self.download(chat, job, nums, status=status)
+
+    async def full_song(self, chat, job):
+        artist, track, _ = job.__dict__.get("song") or self.music(job.items[0].info) or ("", "", False)
+        query = f"{artist} {track}".strip()
+        status = await self._status(chat, None, f"🔎 Шукаю повну пісню: {esc(query[:80])}…", [[("⏹ Зупинити", self.cb("stop"))]])
+        engines = (["ytsearch1"] if os.environ.get("MEDIA_PROXY") else []) + ["scsearch1", "ytsearch1"]
+        last = ""
+        for eng in dict.fromkeys(engines):
+            try:
+                with tempfile.TemporaryDirectory(prefix="orion-song-") as work:
+                    items = await M.video_probe(f"{eng}:{query}", Path(work))
+                if items:
+                    song = Job(secrets.token_hex(4), f"{eng}:{query}", items[:1])
+                    song.options.mode = "audio"
+                    song.options.post = False
+                    song.__dict__["src"] = "SoundCloud" if eng.startswith("sc") else "YouTube"
+                    self.jobs[chat] = song
+                    await self.download(chat, song, [1], status=status)
+                    return
+            except JobError as exc:
+                last = str(exc)
+        await self._status(chat, status, "⚠️ Повну пісню не знайшов на SoundCloud/YouTube." + (f"\n\n{esc(last[:300])}" if last else ""),
+                           [[("« Медіа", self.cb())]])
+
+    async def recognize(self, chat, job):
+        """🔎 Розпізнати музику (Shazam): 25 секунд звуку з відео → назва й виконавець."""
+        status = await self._status(chat, None, "🔎 Слухаю музику у відео…", [[("⏹ Зупинити", self.cb("stop"))]])
+        try:
+            try:
+                from shazamio import Shazam
+            except ImportError:
+                await self._status(chat, status, "📦 Перший запуск: встановлюю розпізнавач (≈1 хв)…")
+                await run(sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "shazamio", timeout=600)
+                import importlib
+                importlib.invalidate_caches()
+                from shazamio import Shazam
+            opts = replace(job.options, mode="audio", cuts=())
+            with tempfile.TemporaryDirectory(prefix="orion-rec-") as work:
+                work = Path(work)
+                path, _t, _i = await M.fetch(job.items[0], job.url, opts, work)
+                clip = work / "clip.mp3"
+                await run("ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-t", "25", "-i", path, "-ac", "1", clip, timeout=120)
+                sh = Shazam()
+                out = await (sh.recognize(str(clip)) if hasattr(sh, "recognize") else sh.recognize_song(str(clip)))
+            tr = (out or {}).get("track") or {}
+            if not tr.get("title"):
+                await self._status(chat, status, "🤷 Не впізнав музику — можливо, це оригінальний звук або голос.", [[("« Медіа", self.cb())]])
+                return
+            job.__dict__["song"] = (tr.get("subtitle") or "", tr["title"], True)
+            await self._status(chat, status, f"🎵 Це: <b>{esc(tr.get('subtitle') or '')} — {esc(tr['title'])}</b>",
+                               [[("🎵 Фрагмент з відео", self.cb("fa", job.token)), ("🎶 Повна пісня", self.cb("ff", job.token))]])
+        except (JobError, ImportError) as exc:
+            await self._status(chat, status, f"⚠️ Розпізнати не вдалося: {esc(str(exc)[:300])}", [[("« Медіа", self.cb())]])
 
     def start_inspect(self, chat, url):
         if self.busy(chat):
@@ -582,8 +921,11 @@ class Plugin(Base):
         quick = status is not None
         title = job.items[nums[0] - 1].title if len(nums) == 1 else f"{len(nums)} елементів"
         stop = [[("⏹ Зупинити", self.cb("stop"))]]
-        status = await self._status(chat, status, f"⬇️ Завантажую: {esc(title[:100])}…", stop)
+        src = job.__dict__.get("src") or M.describe_source(job.url)
+        status = await self._status(chat, status, f"⬇️ Завантажую: {esc(title[:100])}\n📍 {esc(src)}…", stop)
+        self._active(chat, status, job.url)
         last = [0.0]
+        t0 = time.time()
 
         async def stage(text, force=False):
             """Живий стан: застосунок бачить кожне оновлення, повідомлення в чаті — не частіше ніж раз на 3 с."""
@@ -599,7 +941,13 @@ class Plugin(Base):
                 item = job.items[n - 1]
                 work = root / f"{n:03d}"
                 work.mkdir()
-                head = f"⬇️ Завантажую" + (f" {k}/{len(nums)}" if len(nums) > 1 else "") + f": {esc(item.title[:90])}"
+                left = ""
+                if len(nums) > 1 and k > 1:  # скільки ще на всі: за середнім часом уже завантажених
+                    per = (time.time() - t0) / (k - 1)
+                    rest = int(per * (len(nums) - k + 1))
+                    left = f" · усі ще ≈{rest // 60}:{rest % 60:02d}"
+                head = (f"⬇️ Завантажую" + (f" {k}/{len(nums)}" if len(nums) > 1 else "") + f": {esc(item.title[:90])}"
+                        + f"\n📍 {esc(src)}{left}")
 
                 async def on_dl(done, total, speed, eta, head=head):
                     await stage(f"{head}\n{bar(done, total, speed, eta)}")
@@ -614,8 +962,10 @@ class Plugin(Base):
                     # Опис і автор — у підписі самого файлу (Telegram дозволяє 1024 символи); довший текст — ще й окремо
                     # Підпис HTML: довгі адреси — короткими посиланнями «Автор» / «Допис»; ліміт Telegram — 1024 видимі символи
                     who_html = (f'<a href="{esc(link)}">{esc(who)}</a>' if link else esc(who)) if who else ""
-                    tail = (f"\n\n👤 {who_html}" if who else "\n") + f' · <a href="{esc(job.url)}">🔗 Допис</a>'
-                    tail_len = len(f"\n\n👤 {who} · 🔗 Допис")
+                    site = M.site_name(job.url) if str(job.url).startswith("http") else (job.__dict__.get("src") or "")
+                    tail = (f"\n\n👤 {who_html}" if who else "\n") + (f" · {esc(site)}" if site else "") \
+                        + (f' · <a href="{esc(job.url)}">🔗 Допис</a>' if str(job.url).startswith("http") else "")
+                    tail_len = len(f"\n\n👤 {who} · {site} · 🔗 Допис")
                     first = True
                     for out in outs + tracks:
                         cap = ""
@@ -700,6 +1050,7 @@ class Plugin(Base):
                 status = None
             except Exception:  # noqa: BLE001
                 pass
+        self._active(chat, done=True)
         await self._status(chat, status, msg[:4000], rows)
 
     async def inspect_file(self, chat, p):
