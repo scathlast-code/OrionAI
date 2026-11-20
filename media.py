@@ -285,10 +285,39 @@ async def make_slideshow(slides, music=None, size=(1080, 1920), seconds=4):
 GROQ_KEY = env("GROQ_API_KEY", "")
 STT_MODEL_GROQ = env("STT_MODEL_GROQ", "whisper-large-v3")
 STT_MODEL_CF = env("STT_MODEL_CF", "@cf/openai/whisper-large-v3-turbo")
+GEMINI_KEY = env("GEMINI_API_KEY", "")
+GEMINI_STT_MODEL = env("GEMINI_STT_MODEL", "") or env("GEMINI_MODEL", "") or "gemini-flash-latest"
 STT_PROVIDERS = {
     "groq_stt": {"title": "Groq Whisper", "ready": lambda: bool(GROQ_KEY)},
     "cloudflare_stt": {"title": "Cloudflare Whisper", "ready": lambda: bool(CF_TOKEN and CF_ACCOUNT)},
+    "gemini_stt": {"title": "Gemini (аудіо й відео)", "ready": lambda: bool(GEMINI_KEY)},
 }
+MIME_BY_EXT = {"ogg": "audio/ogg", "oga": "audio/ogg", "opus": "audio/ogg", "mp3": "audio/mpeg", "m4a": "audio/mp4", "wav": "audio/wav",
+               "aac": "audio/aac", "flac": "audio/flac", "mp4": "video/mp4", "mov": "video/quicktime", "webm": "video/webm",
+               "mpeg": "video/mpeg", "3gp": "video/3gpp"}
+
+
+async def stt_gemini(data, filename, language=None):
+    """Розшифровка через Gemini: приймає і голосові, і відео (до ~20 МБ), будь-якою мовою — дослівно, без перекладу."""
+    import base64 as _b64
+    ext = (filename.rsplit(".", 1)[-1] if "." in filename else "ogg").lower()
+    mime = MIME_BY_EXT.get(ext, "audio/ogg")
+    if len(data) > 19 * 1024 * 1024:
+        raise MediaError("gemini_stt", "too_big", "файл завеликий для розшифровки (до 19 МБ)")
+    body = {"contents": [{"parts": [
+        {"text": "Дослівно розшифруй мовлення з цього запису тією мовою, якою говорять (не перекладай). "
+                 "Якщо це відео без мовлення — коротко опиши українською, що на ньому видно. Лише текст, без пояснень."},
+        {"inline_data": {"mime_type": mime, "data": _b64.b64encode(data).decode()}}]}]}
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_STT_MODEL}:generateContent?key={GEMINI_KEY}"
+    async with httpx.AsyncClient(timeout=120) as c:
+        r = await c.post(url, json=body)
+    if r.status_code != 200:
+        raise MediaError("gemini_stt", "bad_request" if r.status_code < 500 else "network", f"HTTP {r.status_code}")
+    try:
+        parts = r.json()["candidates"][0]["content"]["parts"]
+        return "".join(p.get("text", "") for p in parts).strip()
+    except (KeyError, IndexError, ValueError):
+        raise MediaError("gemini_stt", "empty", "порожня відповідь")
 VOICES = {"polina": ("uk-UA-PolinaNeural", "Поліна"), "ostap": ("uk-UA-OstapNeural", "Остап")}
 
 
@@ -336,7 +365,7 @@ async def stt_cloudflare(data, filename, language):
 async def transcribe(data, filename="voice.ogg", language=None):
     """Розшифровка голосу. Повертає (текст, провайдер, помилки)."""
     errors = []
-    for pid, fn in (("groq_stt", stt_groq), ("cloudflare_stt", stt_cloudflare)):
+    for pid, fn in (("groq_stt", stt_groq), ("cloudflare_stt", stt_cloudflare), ("gemini_stt", stt_gemini)):
         if not STT_PROVIDERS[pid]["ready"]():
             continue
         try:
@@ -350,7 +379,7 @@ async def transcribe(data, filename="voice.ogg", language=None):
             errors.append((pid, MediaError(pid, "timeout", "не відповів вчасно")))
         except httpx.HTTPError as e:
             errors.append((pid, MediaError(pid, "network", str(e) or type(e).__name__)))
-    raise MediaError("all", "unavailable", "; ".join(f"{p}: {e.kind}" for p, e in errors) or "немає сервісу розшифровки: потрібен GROQ_API_KEY або Cloudflare")
+    raise MediaError("all", "unavailable", "; ".join(f"{p}: {e.kind}" for p, e in errors) or "немає сервісу розшифровки: потрібен GROQ_API_KEY, Cloudflare або GEMINI_API_KEY")
 
 
 async def tts(text, voice="polina", rate=0):

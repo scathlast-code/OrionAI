@@ -97,10 +97,10 @@ details{margin:2px 0}details summary{cursor:pointer;color:var(--hint);font-size:
 <div class="row"><button onclick="cancelInput()">Скасувати</button><button id="sheetfile" onclick="pickFile(document.getElementById('sheett').value)">📎 Файл</button><button class="pri" onclick="sendInput()">Готово</button></div></div>
 <button id="bugfab" title="Помилка чи побажання (можна перетягнути вгору-вниз)">🐞</button>
 <div class="sheet" id="bugsheet"><div class="seg" id="bugkind"><button class="sel" data-k="bug" onclick="bugKind('bug')">🐞 Помилка</button><button data-k="wish" onclick="bugKind('wish')">💡 Побажання</button></div>
-<div class="sub" id="bughint" style="margin:8px 0">Опишіть, що не так і що мало бути. Можна додати скриншот — позначка запам'ятає цей екран, і її врахують під час наступного вдосконалення.</div>
+<div class="sub" id="bughint" style="margin:8px 0">Опишіть, що не так і що мало бути. Можна додати скриншот, коротке відео з оглядом чи голосове — бот розшифрує їх. Позначка запам'ятає цей екран; її побачить будь-який ШІ, що вдосконалює бота.</div>
 <textarea id="bugtext" placeholder="Напр.: кнопка «Оновити» нічого не робить"></textarea>
-<div id="bugprev" class="sub" style="margin:6px 0"></div><input type="file" id="bugfile" accept="image/*" style="display:none">
-<div class="row"><button onclick="bugClose()">Скасувати</button><button onclick="document.getElementById('bugfile').click()">📷 Скриншот</button><button class="pri" onclick="bugSend()">Надіслати</button></div></div>
+<div id="bugprev" class="sub" style="margin:6px 0"></div><input type="file" id="bugfile" accept="image/*,video/*,audio/*" style="display:none">
+<div class="row"><button onclick="bugClose()">Скасувати</button><button onclick="document.getElementById('bugfile').click()">📎 Фото · відео · голос</button><button class="pri" onclick="bugSend()">Надіслати</button></div></div>
 <div class="toast" id="toast"></div>
 <script>
 const TG = window.Telegram && Telegram.WebApp;
@@ -489,7 +489,7 @@ function bugOpen(){haptic();bugImg='';bugKind('bug',true);document.getElementByI
   f.addEventListener('pointerup',()=>{if(y0===null)return;y0=null;if(moved){try{localStorage.setItem('bugfab_top',f.style.top)}catch(_){}}else bugOpen()});})();
 function bugClose(){document.getElementById('bugsheet').classList.remove('on')}
 document.getElementById('bugfile').addEventListener('change',e=>{const f=e.target.files[0];if(!f)return;
-  if(f.size>8*1048576){toast('Скриншот завеликий (до 8 МБ)');return}
+  if(f.size>20*1048576){toast('Файл завеликий (до 20 МБ) — запишіть коротше');return}
   const r=new FileReader();r.onload=()=>{bugImg=r.result;document.getElementById('bugprev').textContent='📎 '+f.name+' · '+(f.size/1024|0)+' КБ'};r.readAsDataURL(f);e.target.value=''});
 async function bugSend(){const note=document.getElementById('bugtext').value.trim();if(!note&&!bugImg){toast('Опишіть помилку або додайте скриншот');return}
   const ex=(document.getElementById('main').innerText||'').slice(0,600);
