@@ -94,6 +94,7 @@ DB_EXISTED = os.path.exists(DB_PATH)  # 🛟 щойно створена баз�
 HISTORY_LIMIT = int(env("HISTORY_LIMIT", "30"))
 MAX_TOKENS = int(env("MAX_TOKENS", "2000"))
 REQUEST_TIMEOUT = float(env("REQUEST_TIMEOUT", "45"))  # довше — краще одразу спитати іншу модель
+STREAM_IDLE = float(env("STREAM_IDLE_TIMEOUT", "18"))  # ✍️ модель пише потоком: тиша довша за це — одразу інша модель (а не чекати 45 с)
 OLLAMA_TIMEOUT = float(env("OLLAMA_TIMEOUT", "300"))  # своя модель на процесорі думає довше за хмарні
 PORT = int(env("PORT", "8000"))
 TZ = ZoneInfo(env("BOT_TZ", "Europe/Kyiv"))
@@ -1285,7 +1286,7 @@ def advice(pid, kind, until=None):
         "rate_minute": "Пауза на кілька секунд, нічого робити не треба.",
         "rate": f"Бот спробує знову{when}.",
         "overloaded": "Проблема на боці сервісу, зазвичай минає за кілька хвилин.",
-        "timeout": "Сервіс відповідає занадто довго. Можна збільшити REQUEST_TIMEOUT або обрати легшу модель.",
+        "timeout": "Сервіс відповідає занадто довго — зазвичай минає саме. Бот уже переходить до іншої моделі; для довгих відповідей можна збільшити STREAM_IDLE_TIMEOUT / REQUEST_TIMEOUT.",
         "network": "Перевірте адресу й доступність сервісу" + (" (OLLAMA_URL, чи увімкнений комп'ютер)." if pid == "ollama_local" else "."),
         "bad_request": "Подивіться фрагмент відповіді сервісу нижче.",
         "bad_response": "Сервіс відповів у неочікуваному форматі; можливо, змінилась адреса чи модель.",
@@ -1509,8 +1510,10 @@ async def post_chat(client, p, messages, use_tools):
         prog.partial = ""  # інша модель починає з чистого аркуша
     try:
         if stream:  # ✍️ текст з'являється, щойно модель почала писати
+            idle = OLLAMA_TIMEOUT if p["id"] == "ollama_local" else STREAM_IDLE
             r = await client.send(client.build_request("POST", f"{p['base_url']}/chat/completions",
-                                                       headers={"Authorization": f"Bearer {p['key']}"}, json=body), stream=True)
+                                                       headers={"Authorization": f"Bearer {p['key']}"}, json=body,
+                                                       timeout=httpx.Timeout(idle, connect=8)), stream=True)
             if r.status_code != 200:
                 await r.aread()
                 await r.aclose()
@@ -1520,7 +1523,7 @@ async def post_chat(client, p, messages, use_tools):
             )
     except httpx.TimeoutException:
         count_request(p["id"], error=True)
-        raise ProviderError("timeout", f"не відповів за {int(OLLAMA_TIMEOUT if p['id'] == 'ollama_local' else REQUEST_TIMEOUT)} с", 15)  # коротка пауза: наступне повідомлення вже знову спробує
+        raise ProviderError("timeout", f"мовчав {int(OLLAMA_TIMEOUT if p['id'] == 'ollama_local' else (STREAM_IDLE if stream else REQUEST_TIMEOUT))} с", 15)  # коротка пауза: наступне повідомлення вже знову спробує
     except httpx.HTTPError as e:
         count_request(p["id"], error=True)
         raise ProviderError("network", str(e) or type(e).__name__, 300 if p["id"] == "ollama_local" else 120)
@@ -1696,7 +1699,7 @@ RK = Ranks(kv_get, kv_set)
 # Для ботів і ШІ, що питали: пауза — це не відмова. Вони мають чекати, а не кидати завдання чи слати його знову.
 KEEP_WAITING = "Не скасовуйте й не надсилайте повторно — просто чекайте своєї черги: завдання збережене й буде виконане."
 QUEUE_FLAGS = {"queued": True, "keep_waiting": True, "do_not_retry": True, "do_not_cancel": True}
-WQ = WorkQueue(int(env("LLM_PARALLEL", "2") or 2))
+WQ = WorkQueue(int(env("LLM_PARALLEL", "4") or 4))  # більше місць — фонові зведення й назви не тримають ваші запити
 PRIO = contextvars.ContextVar("prio", default=None)  # {"score", "label", "chat", "notify"}
 
 
@@ -1897,7 +1900,7 @@ async def _ask_llm(history, user_content, preferred=None, fallback=True, exclude
     cands = ready + (paused if fallback else [])
     for k, pid in enumerate(cands, 1):
         prev = [a for a in attempts if a[1].get("kind") != "paused"]
-        limit = int(OLLAMA_TIMEOUT if pid == "ollama_local" else REQUEST_TIMEOUT)
+        limit = int(OLLAMA_TIMEOUT if pid == "ollama_local" else (STREAM_IDLE if PROGRESS.get() and STREAMING and pid not in NO_STREAM and not IN_BRIDGE else REQUEST_TIMEOUT))
         progress_stage((f"↪️ {PROVIDERS[prev[-1][0]]['title']} не відповіла ({ERR_SHORT.get(prev[-1][1]['kind'], prev[-1][1]['kind'])}) — " if prev else "")
                        + f"🤖 {PROVIDERS[pid]['title']} думає… (чекаю до {limit} с"
                        + (", далі — інша модель)" if k < len(cands) else ")") + (f" · спроба {k} з {len(cands)}" if k > 1 else ""), 2, 3)
@@ -4223,8 +4226,35 @@ def short_q(t, n=120):
     return t if len(t) <= n else t[: n - 1] + "…"
 
 
+FIX_SHORT = {  # 💡 простими словами: що з цим робити людині
+    "timeout": "сервіс зараз повільний — зазвичай минає за хвилину-дві; спробуйте ще раз або іншу модель",
+    "overloaded": "перевантаження на боці сервісу, минає саме за кілька хвилин; тим часом — інша модель",
+    "network": "немає зв'язку із сервісом; повторіть за хвилину",
+    "empty": "модель відповіла порожнім — переформулюйте коротше або оберіть іншу модель",
+    "bad_response": "дивна відповідь сервісу — оберіть іншу модель; якщо повторюється, назва моделі могла застаріти (🤖 Моделі)",
+    "bad_request": "сервіс не зрозумів запит (часто через фото чи дуже довгу розмову) — спробуйте нову розмову або іншу модель",
+    "rate_minute": "ліміт за хвилину — бот сам повторить за кілька секунд",
+    "rate_day": "денний ліміт вичерпано — до оновлення відповідають інші моделі; можна додати ще один акаунт цієї моделі",
+    "rate_month": "місячний ліміт вичерпано — до оновлення відповідають інші моделі",
+    "rate": "ліміт сервісу — бот повторить сам, щойно мине пауза",
+    "auth": "ключ недійсний — потрібен новий ключ у змінних Railway (власнику прийшла інструкція)",
+    "payment": "сервіс просить оплату — бот обходиться безкоштовними моделями",
+    "forbidden": "доступ заборонено — перевірте умови сервісу або приберіть ключ",
+    "region": "сервіс не працює з країни сервера — приберіть ключ або перенесіть сервер",
+    "model": "назва моделі застаріла — змініть її в 🤖 Моделі",
+    "paused": "модель на паузі після ліміту — бот спробує, щойно мине пауза",
+}
+
+
 def reasons_text(attempts):
-    return "\n".join(attempt_line(p, i) for p, i in attempts)
+    """Чому не відповіли моделі — і що з цим робити, для кожної окремо."""
+    out = []
+    for p, i in attempts:
+        out.append(attempt_line(p, i))
+        fix = FIX_SHORT.get(i.get("kind"))
+        if fix:
+            out.append(f"   💡 {fix}")
+    return "\n".join(out)
 
 
 def options_keyboard(task):
