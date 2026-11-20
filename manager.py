@@ -940,7 +940,7 @@ def scr_home(chat):
     return "\n".join(lines), L.place_rows(chat, "home", badges)
 
 
-BOT_SORTS = [("status", "🚦 Стан"), ("az", "🔤 А–Я"), ("kind", "🗂 Тип"), ("new", "🆕 Нові спершу")]
+BOT_SORTS = [("status", "🚦 Стан"), ("az", "🔤 А–Я"), ("kind", "🗂 Тип"), ("new", "🆕 Свіжі")]
 
 
 def scr_bots(chat):
