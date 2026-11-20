@@ -1,0 +1,207 @@
+"""📖 Довідник дня для «Тем дня»: розділи сторінки дати у Вікіпедії (події, народились, померли, іменини, народний календар),
+астрономія (фаза Місяця, схід/захід Сонця для Києва, явища) й астрологія (знак Сонця) — без мережі й без ШІ.
+Плюс автоматична важливість тем: «важливі» (агро, здоров'я, енергетика, екологія) і «дуже важливі» (державні свята, великі еко-дні).
+"""
+from __future__ import annotations
+
+import datetime as dt
+import math
+import re
+
+CATS = {  # ключ → (заголовок, порядок у ранковому зведенні)
+    "lore": ("📜 Народний календар і прикмети", 1),
+    "names": ("👤 Іменини", 2),
+    "born": ("🎂 Народились", 3),
+    "died": ("🕯 Померли", 4),
+    "history": ("🏛 Історія й відкриття", 5),
+    "astro": ("🔭 Астрономія", 6),
+    "astrol": ("♈ Астрологія", 7),
+    "garden": ("🌱 Сад, город, господарство, тварини", 8),
+}
+LIST_CATS = ["lore", "names", "born", "died", "history"]  # те, що зберігається в базі й редагується
+
+SECTION_RE = {
+    "history": re.compile(r"^поді", re.I),
+    "born": re.compile(r"^народил", re.I),
+    "died": re.compile(r"^помер", re.I),
+    "names": re.compile(r"^іменин", re.I),
+    "lore": re.compile(r"народн|прикмет", re.I),
+}
+
+IMP_NAMES = {0: "звичайна", 1: "❗ важлива", 2: "‼️ дуже важлива"}
+IMP_MARK = {0: "", 1: "❗", 2: "‼️"}
+
+VERY_RE = re.compile(
+    r"День Незалежності України|День Конституції України|День Соборності|День захисник|День Державного Прапора|"
+    r"День Української Державності|Різдв|Великдень|Трійц|голодомор|День Гідності та Свободи|День Збройних Сил України|"
+    r"День Землі\b|Всесвітній день (?:охорони )?(?:навколишнього середовища|довкілля)|День довкілля|водних ресурсів|Година Землі|"
+    r"біологічного різноманіття|біорізноманіття|Всесвітній день океанів|Міжнародний день лісів|Чорнобил", re.I)
+IMPORTANT_RE = re.compile(
+    r"\b(?:агр|сільськ|фермер|земл|ґрунт|продовол|харч|вод[иноау]|здоров|хвороб|медич|медсест|лікар|діабет|рак[уа]?\b|ВІЛ|СНІД|"
+    r"туберкульоз|вакцин|енерг|клімат|еколог|довкілл|природ|ліс|тварин|птах|бджіл|океан|мор[яіе]\b|річ|відход|переробк|"
+    r"сміт|повітр|пестицид|насінн|урожа)", re.I)
+
+WEEKDAY_RE = re.compile(r"(неділ|понеділ|вівтор|серед|четвер|п.ятниц|субот|перш|друг|трет|четверт|останн)\w*", re.I)
+SINCE_RE = re.compile(r"(?:з|від|започатков\w*|запроваджен\w*|встановлен\w*|відзначається з|проголошен\w*)\s+(\d{4})", re.I)
+
+MONTHS_GEN = ["січня", "лютого", "березня", "квітня", "травня", "червня", "липня", "серпня", "вересня", "жовтня", "листопада", "грудня"]
+
+
+def auto_imp(title):
+    return 2 if VERY_RE.search(title or "") else 1 if IMPORTANT_RE.search(title or "") else 0
+
+
+def importance(r):
+    v = r.get("imp")
+    return int(v) if v is not None else auto_imp(r.get("title", ""))
+
+
+def why_since(r):
+    """Чому саме сьогодні й відколи відзначають — із записаного людиною або з тексту назви (Вікіпедія часто це пише)."""
+    title = r.get("title", "")
+    why, since = (r.get("why") or "").strip(), (r.get("since") or "").strip()
+    if not why:
+        for p in re.findall(r"\(([^)]{4,80})\)", title):
+            if WEEKDAY_RE.search(p):
+                why = p
+                break
+    if not why:
+        a = r.get("start", "")
+        if r.get("yearly") and len(a) == 5:
+            m, d = int(a[:2]), int(a[3:])
+            why = f"щороку {d} {MONTHS_GEN[m - 1]}" if r.get("start") == r.get("finish") else (
+                f"щороку {d} {MONTHS_GEN[m - 1]} – {int(r['finish'][3:])} {MONTHS_GEN[int(r['finish'][:2]) - 1]}")
+        elif a:
+            why = "цього року, разово"
+    if not since:
+        m = SINCE_RE.search(title)
+        since = m.group(1) if m else ""
+    return why, since
+
+
+# ------------------------------------------------------------------ Вікіпедія: розділи сторінки дати
+def _strip(s):
+    from .observances import strip_wiki
+    return strip_wiki(s)
+
+
+def parse_sections(wt):
+    """→ {cat: [текст]} з розділів «Події», «Народились», «Померли», «Іменини» та підрозділів народного календаря."""
+    out = {k: [] for k in LIST_CATS}
+    heads = list(re.finditer(r"^(==+)\s*(.+?)\s*\1\s*$", wt, re.M))
+    for i, h in enumerate(heads):
+        level, name = len(h.group(1)), h.group(2)
+        end = len(wt)
+        for nxt in heads[i + 1:]:
+            if len(nxt.group(1)) <= level:
+                end = nxt.start()
+                break
+        body = wt[h.end():end]
+        cat = None
+        for k, rx in SECTION_RE.items():
+            if rx.search(name):
+                cat = k
+                break
+        if not cat or (cat == "lore" and level == 2 and re.search(r"свят", name, re.I) and not re.search(r"народн", name, re.I)):
+            continue
+        if cat != "lore" and level > 2:
+            continue  # підрозділи «Подій» (століття) збере сам розділ рівня 2
+        items = []
+        for line in body.splitlines():
+            if re.match(r"^==", line):
+                continue
+            if line.startswith("*"):
+                if line.startswith("**") and cat in ("history", "born", "died"):
+                    continue
+                txt = _strip(line.lstrip("*").strip())
+            elif cat in ("names", "lore") and line.strip() and not line.startswith(("{", "|", "[[Файл", "[[File")):
+                txt = _strip(line.strip())
+            else:
+                continue
+            txt = re.sub(r"^(\d{3,4})\s*[—–-]\s*", r"\1 — ", txt)
+            if len(txt) >= 4:
+                items.append(txt[:220])
+        out[cat] += items
+    out["names"] = [n for n in out["names"] if not re.match(r"(?i)див\.|також", n)]
+    return out
+
+
+# ------------------------------------------------------------------ астрономія
+SYNODIC = 29.530588853
+NEW_MOON_JD = 2451550.1  # 6 січня 2000, 18:14 UTC
+
+
+def julian(d: dt.datetime):
+    return d.timestamp() / 86400 + 2440587.5
+
+
+def moon(d: dt.date):
+    age = (julian(dt.datetime(d.year, d.month, d.day, 9, tzinfo=dt.timezone.utc)) - NEW_MOON_JD) % SYNODIC
+    lit = round((1 - math.cos(2 * math.pi * age / SYNODIC)) / 2 * 100)
+    names = [(1.0, "🌑", "новий Місяць"), (6.4, "🌒", "молодий Місяць"), (8.4, "🌓", "перша чверть"), (13.8, "🌔", "Місяць прибуває"),
+             (15.8, "🌕", "повня"), (21.1, "🌖", "Місяць спадає"), (23.1, "🌗", "остання чверть"), (28.5, "🌘", "старий Місяць"),
+             (30, "🌑", "новий Місяць")]
+    for lim, e, n in names:
+        if age < lim:
+            return e, n, lit, int(age) + 1
+    return "🌑", "новий Місяць", lit, int(age) + 1
+
+
+def sun_times(d: dt.date, lat=50.45, lon=30.52, tz=None):
+    """Схід і захід Сонця (NOAA, точність ~1–2 хв)."""
+    n = d.timetuple().tm_yday
+    g = 2 * math.pi / 365 * (n - 1)
+    eq = 229.18 * (0.000075 + 0.001868 * math.cos(g) - 0.032077 * math.sin(g) - 0.014615 * math.cos(2 * g) - 0.040849 * math.sin(2 * g))
+    decl = (0.006918 - 0.399912 * math.cos(g) + 0.070257 * math.sin(g) - 0.006758 * math.cos(2 * g) + 0.000907 * math.sin(2 * g)
+            - 0.002697 * math.cos(3 * g) + 0.00148 * math.sin(3 * g))
+    la = math.radians(lat)
+    cos_h = (math.cos(math.radians(90.833)) / (math.cos(la) * math.cos(decl))) - math.tan(la) * math.tan(decl)
+    if not -1 <= cos_h <= 1:
+        return None
+    ha = math.degrees(math.acos(cos_h))
+    base = dt.datetime(d.year, d.month, d.day, tzinfo=dt.timezone.utc)
+    rise = base + dt.timedelta(minutes=720 - 4 * (lon + ha) - eq)
+    sset = base + dt.timedelta(minutes=720 - 4 * (lon - ha) - eq)
+    if tz:
+        rise, sset = rise.astimezone(tz), sset.astimezone(tz)
+    return rise, sset
+
+
+EVENTS = {"01-03": "Квадрантиди — пік зорепаду", "01-04": "Квадрантиди — пік зорепаду", "03-20": "весняне рівнодення",
+          "04-22": "Ліриди — пік зорепаду", "05-06": "Ета-Акваріди — пік зорепаду", "06-21": "літнє сонцестояння — найдовший день",
+          "08-12": "Персеїди — пік зорепаду", "08-13": "Персеїди — пік зорепаду", "09-22": "осіннє рівнодення",
+          "09-23": "осіннє рівнодення", "10-21": "Оріоніди — пік зорепаду", "11-17": "Леоніди — пік зорепаду",
+          "12-13": "Гемініди — пік зорепаду", "12-14": "Гемініди — пік зорепаду", "12-21": "зимове сонцестояння — найкоротший день",
+          "12-22": "зимове сонцестояння — найкоротший день"}
+
+
+def astro_lines(d: dt.date, tz=None):
+    e, name, lit, lday = moon(d)
+    lines = [f"{e} {name}, освітлено {lit}%"]
+    st = sun_times(d, tz=tz)
+    if st:
+        rise, sset = st
+        mins = int((sset - rise).total_seconds() // 60)
+        lines.append(f"🌅 Київ: схід {rise:%H:%M}, захід {sset:%H:%M}, світловий день {mins // 60} год {mins % 60} хв")
+    ev = EVENTS.get(d.strftime("%m-%d"))
+    if ev:
+        lines.append(f"✨ {ev[:1].upper() + ev[1:]}")
+    return lines
+
+
+# ------------------------------------------------------------------ астрологія
+ZODIAC = [((1, 20), "♑ Козоріг"), ((2, 19), "♒ Водолій"), ((3, 21), "♓ Риби"), ((4, 20), "♈ Овен"), ((5, 21), "♉ Телець"),
+          ((6, 21), "♊ Близнюки"), ((7, 23), "♋ Рак"), ((8, 23), "♌ Лев"), ((9, 23), "♍ Діва"), ((10, 23), "♎ Терези"),
+          ((11, 22), "♏ Скорпіон"), ((12, 22), "♐ Стрілець"), ((12, 32), "♑ Козоріг")]
+
+
+def sun_sign(d: dt.date):
+    for (m, day), name in ZODIAC:
+        if (d.month, d.day) < (m, day):
+            return name
+    return "♑ Козоріг"
+
+
+def astrol_lines(d: dt.date):
+    _e, _n, _lit, lday = moon(d)
+    return [f"Сонце в знаку {sun_sign(d)}", f"{lday}-а місячна доба", "<i>для розваги, не прогноз</i>"]

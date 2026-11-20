@@ -12,10 +12,12 @@ import json
 import logging
 import re
 import time
+from contextlib import closing
 
 import httpx
 
 from plugins import esc
+from . import daybook as DB
 from .store import normalize
 
 log = logging.getLogger("orion.plugins.newsroom.obs")
@@ -31,7 +33,15 @@ CREATE TABLE IF NOT EXISTS observances (
     yearly INTEGER NOT NULL DEFAULT 1, source TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '',
     hidden INTEGER NOT NULL DEFAULT 0, added REAL NOT NULL, key TEXT UNIQUE
 );
+CREATE TABLE IF NOT EXISTS daybook (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, md TEXT NOT NULL, cat TEXT NOT NULL, text TEXT NOT NULL, url TEXT NOT NULL DEFAULT '',
+    hidden INTEGER NOT NULL DEFAULT 0, owner INTEGER NOT NULL DEFAULT 0, added REAL NOT NULL, key TEXT UNIQUE
+);
+CREATE INDEX IF NOT EXISTS daybook_md ON daybook(md, cat);
+CREATE TABLE IF NOT EXISTS obs_fav (user INTEGER NOT NULL, oid INTEGER NOT NULL, PRIMARY KEY(user, oid));
 """
+FETCH_V = 2  # 2 — разом зі святами беремо й події, народились/померли, іменини, народний календар
+WARN_DEFAULT = {"1": [1], "2": [4]}  # за скільки днів попереджати: важливі — за 1, дуже важливі — за 4
 
 # Вбудоване: лише те, що стабільне з року в рік (дні беруться з Вікіпедії). Позначено «перевірте» там, де варто звірити.
 SEED = [
@@ -107,8 +117,13 @@ class ObservancesUI:
     def _oinit(self):
         if getattr(self, "_obs_ready", False):
             return
-        with self.store.db() as con:
+        with closing(self.store.db()) as con, con:
             con.executescript(SCHEMA)
+            cols = {r[1] for r in con.execute("PRAGMA table_info(observances)")}
+            for col, ddl in (("imp", "INTEGER"), ("owner", "INTEGER NOT NULL DEFAULT 0"), ("why", "TEXT NOT NULL DEFAULT ''"),
+                             ("since", "TEXT NOT NULL DEFAULT ''")):
+                if col not in cols:
+                    con.execute(f"ALTER TABLE observances ADD COLUMN {col} {ddl}")
             for t, k, a, b, y, src in SEED:
                 con.execute("INSERT OR IGNORE INTO observances(title,kind,start,finish,yearly,source,added,key) VALUES(?,?,?,?,?,?,?,?)",
                             (t, k, a, b, y, src, time.time(), normalize(t)[:80] + "|" + a))
@@ -119,24 +134,75 @@ class ObservancesUI:
         return dt.datetime.now(tz).date() if tz else dt.date.today()
 
     # ----- база
-    def obs_add(self, title, kind, start, finish, yearly, source, url=""):
+    def obs_add(self, title, kind, start, finish, yearly, source, url="", owner=0):
+        """Нова тема. Затінена (прихована) раніше не повертається: ключ той самий, INSERT OR IGNORE."""
         self._oinit()
         title = re.sub(r"\s+", " ", title).strip(" .,;:—-")[:160]
         if len(title) < 5:
             return None
-        key = normalize(title)[:80] + "|" + start
-        with self.store.db() as con:
-            cur = con.execute("INSERT OR IGNORE INTO observances(title,kind,start,finish,yearly,source,url,added,key) VALUES(?,?,?,?,?,?,?,?,?)",
-                              (title, kind, start, finish, int(yearly), source[:120], url[:500], time.time(), key))
+        key = normalize(title)[:80] + "|" + start + (f"|u{owner}" if owner else "")
+        with closing(self.store.db()) as con, con:
+            cur = con.execute("INSERT OR IGNORE INTO observances(title,kind,start,finish,yearly,source,url,added,key,owner) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                              (title, kind, start, finish, int(yearly), source[:120], url[:500], time.time(), key, int(owner or 0)))
             return cur.lastrowid if cur.rowcount else None
 
-    def obs_on(self, d: dt.date):
-        """Теми, що припадають на дату d (дні цієї дати + тижні/місяці/роки, що тривають)."""
+    def obs_set(self, oid, **kw):
+        with closing(self.store.db()) as con, con:
+            con.execute(f"UPDATE observances SET {', '.join(k + '=?' for k in kw)} WHERE id=?", (*kw.values(), int(oid)))
+
+    def favs(self, chat):
+        if not chat:
+            return set()
+        self._oinit()
+        with closing(self.store.db()) as con:
+            return {r[0] for r in con.execute("SELECT oid FROM obs_fav WHERE user=?", (int(chat),))}
+
+    def fav_toggle(self, chat, oid):
+        with closing(self.store.db()) as con, con:
+            if con.execute("DELETE FROM obs_fav WHERE user=? AND oid=?", (int(chat), int(oid))).rowcount:
+                return False
+            con.execute("INSERT INTO obs_fav(user, oid) VALUES(?,?)", (int(chat), int(oid)))
+            return True
+
+    # ----- довідник дня (події, народились, іменини…)
+    def db_add(self, md, cat, text, url="", owner=0):
+        text = re.sub(r"\s+", " ", text or "").strip()[:220]
+        if len(text) < 3:
+            return None
+        key = f"{cat}|{md}|{normalize(text)[:90]}" + (f"|u{owner}" if owner else "")
+        with closing(self.store.db()) as con, con:
+            cur = con.execute("INSERT OR IGNORE INTO daybook(md,cat,text,url,owner,added,key) VALUES(?,?,?,?,?,?,?)",
+                              (md, cat, text, url[:300], int(owner or 0), time.time(), key))
+            return cur.lastrowid if cur.rowcount else None
+
+    def db_items(self, md, cat, chat=None, hidden=False):
+        self._oinit()
+        with closing(self.store.db()) as con:
+            rs = [dict(r) for r in con.execute("SELECT * FROM daybook WHERE md=? AND cat=? AND hidden=? AND owner IN (0, ?) ORDER BY owner DESC, id",
+                                               (md, cat, 1 if hidden else 0, int(chat or 0)))]
+        return rs
+
+    def db_get(self, iid):
+        with closing(self.store.db()) as con:
+            r = con.execute("SELECT * FROM daybook WHERE id=?", (int(iid),)).fetchone()
+        return dict(r) if r else None
+
+    def db_set(self, iid, **kw):
+        with closing(self.store.db()) as con, con:
+            con.execute(f"UPDATE daybook SET {', '.join(k + '=?' for k in kw)} WHERE id=?", (*kw.values(), int(iid)))
+
+    def can_edit(self, chat, owner):
+        """Спільне редагують усі; особисте — лише той, хто його створив."""
+        return not owner or int(owner) == int(chat or 0)
+
+    def obs_on(self, d: dt.date, chat=None, hidden=False):
+        """Теми, що припадають на дату d (дні цієї дати + тижні/місяці/роки, що тривають): спільні й особисті цієї людини.
+        Порядок: ‼️ дуже важливі, ❗ важливі, ⭐ обрані, далі решта."""
         self._oinit()
         md, ymd = d.strftime("%m-%d"), d.isoformat()
-        with self.store.db() as con:
-            con.row_factory = __import__("sqlite3").Row
-            rows = [dict(r) for r in con.execute("SELECT * FROM observances WHERE hidden=0")]
+        with closing(self.store.db()) as con:
+            rows = [dict(r) for r in con.execute("SELECT * FROM observances WHERE hidden=? AND owner IN (0, ?)", (1 if hidden else 0, int(chat or 0)))]
+        fav = self.favs(chat)
         out = []
         for r in rows:
             if r["yearly"]:
@@ -147,13 +213,20 @@ class ObservancesUI:
             if hit:
                 out.append(r)
         order = {"day": 0, "week": 1, "month": 2, "year": 3}
-        return sorted(out, key=lambda r: (order.get(r["kind"], 9), r["title"]))
+        for r in out:
+            r["imp_"] = DB.importance(r)
+            r["fav"] = r["id"] in fav
+        return sorted(out, key=lambda r: (order.get(r["kind"], 9), -r["imp_"], not r["fav"], r["title"]))
 
     def obs(self, oid):
-        with self.store.db() as con:
-            con.row_factory = __import__("sqlite3").Row
+        self._oinit()
+        with closing(self.store.db()) as con:
             r = con.execute("SELECT * FROM observances WHERE id=?", (int(oid),)).fetchone()
-        return dict(r) if r else None
+        if not r:
+            return None
+        r = dict(r)
+        r["imp_"] = DB.importance(r)
+        return r
 
     # ----- збирання
     async def fetch_wiki_day(self, d: dt.date, client=None):
@@ -172,10 +245,14 @@ class ObservancesUI:
             if own:
                 await c.aclose()
         n = 0
+        url = f"https://uk.wikipedia.org/wiki/{page.replace(' ', '_')}"
         for title, flag in parse_wikitext(wt, bool(self.store.get("obs_countries"))):
-            if self.obs_add(title, kind_of(title), d.strftime("%m-%d"), d.strftime("%m-%d"), 1, f"Вікіпедія {flag}",
-                            f"https://uk.wikipedia.org/wiki/{page.replace(' ', '_')}"):
+            if self.obs_add(title, kind_of(title), d.strftime("%m-%d"), d.strftime("%m-%d"), 1, f"Вікіпедія {flag}", url):
                 n += 1
+        anchors = {"history": "#Події", "born": "#Народились", "died": "#Померли", "names": "#Іменини", "lore": ""}
+        for cat, items in DB.parse_sections(wt).items():
+            for txt in items[:80]:
+                self.db_add(d.strftime("%m-%d"), cat, txt, url + anchors.get(cat, ""))
         return n
 
     async def prefetch(self, days=366, refresh_days=180):
@@ -184,6 +261,10 @@ class ObservancesUI:
         done = self.store.get("obs_fetched_at") or {}
         if isinstance(done, list):
             done = {k: time.time() for k in done}
+        if (self.store.get("obs_fetch_v") or 1) < FETCH_V:  # нові розділи — перечитуємо рік (старе не дублюється)
+            done = {}
+            self.store.set("obs_fetched_at", done)
+            self.store.set("obs_fetch_v", FETCH_V)
         now, n = time.time(), 0
         t0 = self.today()
         order = [t0 + dt.timedelta(days=i) for i in range(366)]          # спершу найближчі
@@ -246,100 +327,332 @@ class ObservancesUI:
         return n
 
     # ----- екрани
-    def obs_line(self, r, with_dates=False):
+    def obs_line(self, r, with_dates=False, link=False):
         span = ""
         if with_dates or r["kind"] != "day":
-            a, b = r["start"], r["finish"]
-            fmt = lambda x: ".".join(reversed(x.split("-")[-2:])) if len(x) <= 5 or True else x
-            span = f" · {fmt(a)}" + (f"–{fmt(b)}" if b != a else "")
-        return f"{KINDS.get(r['kind'], '•').split()[0]} {esc(r['title'])}{span}"
+            fmt = lambda x: ".".join(reversed(x.split("-")[-2:]))
+            span = f" · {fmt(r['start'])}" + (f"–{fmt(r['finish'])}" if r["finish"] != r["start"] else "")
+        imp = r.get("imp_", DB.importance(r))
+        marks = DB.IMP_MARK.get(imp, "") + ("⭐" if r.get("fav") else "") + ("👤" if r.get("owner") else "")
+        title = esc(r["title"])
+        if link and str(r.get("url", "")).startswith("http"):
+            title = f'<a href="{esc(r["url"])}">{title}</a>'
+        return f"{KINDS.get(r['kind'], '•').split()[0]}{marks} {title}{span}"
 
-    def obs_home(self, chat=None, open_=""):
-        """Дві «гармоніки»: ✍️ теми (кнопки «написати») і ⚙️ меню. open_ — що розгорнуто: «t», «m» або «tm»."""
-        d = self.today()
-        rs = self.obs_on(d)
+    def wiki_day_url(self, d):
+        return f"https://uk.wikipedia.org/wiki/{d.day}_{MONTHS_GEN[d.month - 1]}"
+
+    def sections(self, d, chat=None, with_links=True):
+        """[(ключ, заголовок, [рядки])] — порожні списки пропускаємо."""
+        md = d.strftime("%m-%d")
+        out = []
+        rs = self.obs_on(d, chat)
         days = [r for r in rs if r["kind"] == "day"]
         ongoing = [r for r in rs if r["kind"] != "day"]
-        lines = [f"📅 <b>Теми дня · {d.day} {MONTHS_GEN[d.month - 1]}, {WD[d.weekday()]}</b>"]
-        if days:
-            lines += [f"📌 Сьогодні: {len(days)}" + (f" · триває: {len(ongoing)}" if ongoing else ""),
-                      "<blockquote expandable>" + "\n".join(self.obs_line(r) for r in days[:20])
-                      + ("\n\n<b>Триває:</b>\n" + "\n".join(self.obs_line(r) for r in ongoing[:12]) if ongoing else "")
-                      + "</blockquote>"]
-        else:
-            lines += ["Сьогоднішніх днів у базі немає — «🔄 Оновити з інтернету»."]
-            if ongoing:
-                lines += ["<blockquote expandable><b>Триває:</b>\n" + "\n".join(self.obs_line(r) for r in ongoing[:12]) + "</blockquote>"]
+        lines = [self.obs_line(r, link=with_links) for r in days[:25]]
+        if ongoing:
+            lines += ["", "<b>Триває:</b>"] + [self.obs_line(r, link=with_links) for r in ongoing[:12]]
+        if lines:
+            out.append(("days", f"📌 Дні · {len(days)}" + (f" · триває {len(ongoing)}" if ongoing else ""), lines))
+        for cat in DB.LIST_CATS:
+            items = self.db_items(md, cat, chat)
+            if cat == "lore" and not items:
+                cached = (self.store.get("lore_cache") or {}).get(md)
+                if cached:
+                    items = [{"text": x, "owner": 0} for x in cached.splitlines() if x.strip()]
+            if items:
+                cap = {"history": 12, "born": 10, "died": 8}.get(cat, 15)
+                body = [("👤 " if it.get("owner") else "") + esc(it["text"]) for it in items[:cap]]
+                if len(items) > cap:
+                    body.append(f"… ще {len(items) - cap} — у «📝 Списки»")
+                out.append((cat, DB.CATS[cat][0], body))
+        out.append(("astro", DB.CATS["astro"][0], DB.astro_lines(d, self.host.tz)))
+        out.append(("astrol", DB.CATS["astrol"][0], DB.astrol_lines(d)))
+        g = (self.store.get("garden_cache") or {}).get(self.garden_key(d))
+        if g:
+            out.append(("garden", DB.CATS["garden"][0], [esc(x) for x in g.splitlines() if x.strip()]))
+        return out
+
+    @staticmethod
+    def garden_key(d):
+        return f"{d.month:02d}-{min(3, (d.day - 1) // 10 + 1)}"
+
+    def upcoming(self, chat=None, days=30, min_imp=1):
+        """Найближчі важливі дні (без сьогодні): [(дата, тема)]."""
+        t0, out, seen = self.today(), [], set()
+        for i in range(1, days + 1):
+            x = t0 + dt.timedelta(days=i)
+            for r in self.obs_on(x, chat):
+                if r["kind"] == "day" and r["imp_"] >= min_imp and r["id"] not in seen:
+                    seen.add(r["id"])
+                    out.append((x, r))
+        return out
+
+    def fit(self, head, parts, tail, limit=3900):
+        """Склеює частини, поки вміщається в одне повідомлення Telegram (HTML не ріжемо посередині)."""
+        text = head
+        for p in parts:
+            if len(text) + len(p) + len(tail) + 2 > limit:
+                break
+            text += "\n" + p
+        return text + tail
+
+    def obs_home(self, chat=None, open_="", weather=""):
+        """Зведення дня: дні й погода першими, далі згорнуті списки; ✍️ теми, 📝 списки й ⚙️ меню — «гармоніками»."""
+        d = self.today()
+        head = (f'📅 <b>Теми дня · <a href="{self.wiki_day_url(d)}">{d.day} {MONTHS_GEN[d.month - 1]}</a>, {WD[d.weekday()]}</b>\n')
+        secs = self.sections(d, chat)
+        parts = []
+        for key, title, lines in secs:
+            if key == "days":
+                parts.append(f"<b>{title}</b>\n<blockquote expandable>" + "\n".join(lines) + "</blockquote>")
+                if weather:
+                    parts.append(weather)
+            else:
+                parts.append(f"<b>{title}</b>\n<blockquote expandable>" + "\n".join(lines) + "</blockquote>")
+        if not any(k == "days" for k, _t, _l in secs):
+            parts.insert(0, "Сьогоднішніх днів у базі немає — «🔄 Оновити з інтернету».")
+            if weather:
+                parts.insert(1, weather)
+        up = self.upcoming(chat, 30)
+        tail = ""
+        if up:
+            tail += "\n<b>⚠️ Найближчі важливі дні</b>\n<blockquote expandable>" + "\n".join(
+                f"{x.day:02d}.{x.month:02d} · {(x - d).days} дн. · {self.obs_line(r)}" for x, r in up[:10]) + "</blockquote>"
         on = self.store.get("obs_morning") is not False
         cov = self.obs_coverage()
         hm = self.store.get("obs_time") or "07:30"
-        lines += [f"⏰ {hm}" + ("" if on else " (вимкнено)") + f" · 📚 Вікіпедія: {cov}/366" + (" — вантажиться" if cov < 366 else " ✅")]
+        try:
+            who = "@" + self.host.bot().username
+        except Exception:  # noqa: BLE001 — бот ще не ініціалізований або тести
+            who = "OrionAI"
+        tail += (f"\n<i>Підготував {esc(who)} · {dt.datetime.now(self.host.tz) if self.host.tz else dt.datetime.now():%d.%m %H:%M}"
+                 f" · джерела: Вікіпедія, канали, ваші записи · 📚 {cov}/366{'' if cov >= 366 else ' вантажиться'}"
+                 f" · ⏰ {hm if on else 'вимк.'}</i>")
+        text = self.fit(head, parts, tail)
         open_ = open_ or ""
-        t_open, m_open = "t" in open_, "m" in open_
+        t_open, m_open, l_open = "t" in open_, "m" in open_, "l" in open_
         flip = lambda flag: "".join(sorted(set(open_) ^ {flag})) or "-"
-        topics = (days + ongoing)[:8]
+        rs = self.obs_on(d, chat)
+        topics = rs[:8]
         rows = []
         if topics:
             rows.append([(f"✍️ Написати на тему · {len(topics)} {'▾' if t_open else '▸'}", self.cb("obh", flip("t")))])
             if t_open:
                 rows += [[(f"✍️ {r['title'][:34]}", self.cb("ob", r["id"]))] for r in topics]
+        rows.append([(f"📝 Списки дня {'▾' if l_open else '▸'}", self.cb("obh", flip("l")))])
+        if l_open:
+            ymd = d.strftime("%Y%m%d")
+            cats = [("days", "📌 Дні")] + [(c, DB.CATS[c][0].split(" ", 1)[0] + " " + DB.CATS[c][0].split(" ", 1)[1].split(" ")[0]) for c in DB.LIST_CATS]
+            btns = [(label, self.cb("obl", f"{c}.{ymd}")) for c, label in cats]
+            rows += [btns[i:i + 3] for i in range(0, len(btns), 3)]
+            rows.append([("⚠️ Важливі попереду", self.cb("obup")), ("🔔 Попередження", self.cb("obws"))])
         rows.append([(f"⚙️ Меню {'▾' if m_open else '▸'}", self.cb("obh", flip("m")))])
         if m_open:
             rows += [[("📅 Сьогодні", self.cb("obt", "day")), ("🗓 Тиждень", self.cb("obt", "week"))],
                      [("📆 Місяць", self.cb("obt", "month")), ("🎆 Рік", self.cb("obt", "year"))],
                      [("🗓 Календар", self.cb("obc", d.strftime("%Y%m"))), ("➕ Своя тема", self.cb("oba"))],
+                     [("🌱 Поради саду", self.cb("obg")), ("📜 Прикмети", self.cb("obj"))],
                      [("🔄 Оновити з інтернету", self.cb("obu")), (("⏰ " + hm) if on else "⏰ вимк.", self.cb("obm"))]]
-        rows.append([("« Знайти й написати", self.cb("D"))])
+        rows.append([("🔗 Вікіпедія", "url:" + self.wiki_day_url(d)), ("« Знайти й написати", self.cb("D"))])
+        return text, rows
+
+    async def obs_digest(self, chat):
+        """Ранкове зведення: як головний екран, але з погодою одразу після днів і з довантаженими прикметами/порадами."""
+        d = self.today()
+        wx_text = ""
+        wx = self.host.extra.get("plugin", lambda pid: None)("wx")
+        if wx and wx.on():
+            try:
+                data = await wx.fetch([(la, lo) for _n, la, lo, _r in __import__("plugins.weather", fromlist=["UA_POINTS"]).UA_POINTS])
+                body = wx.ua_day(data, 0)
+                if body:
+                    first, *rest = body.split("\n")
+                    wx_text = f"<b>🌤 Погода · {first.replace('🌡 ', '')}</b>\n<blockquote expandable>" + "\n".join(rest) + "</blockquote>"
+            except Exception:  # noqa: BLE001
+                log.info("obs digest: weather failed", exc_info=True)
+        await self.ensure_lore(d)
+        await self.ensure_garden(d)
+        return self.obs_home(chat, weather=wx_text)
+
+    async def ensure_lore(self, d):
+        """Народні прикмети: з Вікіпедії, а якщо там порожньо — із плагіна погоди (ШІ, раз на дату)."""
+        md = d.strftime("%m-%d")
+        if self.db_items(md, "lore") or (self.store.get("lore_cache") or {}).get(md):
+            return
+        wx = self.host.extra.get("plugin", lambda pid: None)("wx")
+        if not wx:
+            return
+        try:
+            text = await wx.lore(d)
+        except Exception:  # noqa: BLE001
+            return
+        if text:
+            c = self.store.get("lore_cache") or {}
+            c[md] = text[:1500]
+            self.store.set("lore_cache", c)
+
+    async def ensure_garden(self, d, force=False):
+        """🌱 Поради саду, городу, господарству й тваринам на цю декаду місяця (ШІ, раз на декаду)."""
+        key = self.garden_key(d)
+        cache = self.store.get("garden_cache") or {}
+        if (cache.get(key) and not force) or not self.host.ask_ai:
+            return cache.get(key, "")
+        part = ("на початку", "в середині", "наприкінці")[int(key[-1]) - 1]
+        prompt = (f"Україна, {part} місяця «{MONTHS[d.month - 1]}». "
+                  "Коротко українською, рядками з емодзі на початку, без вступів і markdown:\n"
+                  "🌳 2–3 справи в саду; 🥕 2–3 на городі; 🏡 1–2 по господарству; 🐔🐄 1–2 для свійських тварин і птиці; 🐶🐱 1 для домашніх улюбленців. "
+                  "Лише перевірені агрономічні поради для клімату України, без вигаданих дат.")
+        try:
+            text, _m = await self.host.ask_ai(prompt, label="📅 Теми дня: поради саду")
+        except Exception:  # noqa: BLE001
+            return ""
+        text = re.sub(r"[*_#`]+", "", (text or "").strip())[:1500]
+        if text:
+            cache[key] = text
+            self.store.set("garden_cache", cache)
+        return text
+
+    def obs_list(self, chat, cat, ymd, page=0):
+        """📝 Редагований список дня: торкніться пункту — змінити, затінити, зробити особистим."""
+        d = dt.date(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8]))
+        md = d.strftime("%m-%d")
+        title = "📌 Дні" if cat == "days" else DB.CATS[cat][0]
+        if cat == "days":
+            items = [(r["id"], self.obs_line(r)) for r in self.obs_on(d, chat)]
+            hidden = len(self.obs_on(d, chat, hidden=True))
+        else:
+            items = [(it["id"], ("👤 " if it["owner"] else "") + esc(it["text"])) for it in self.db_items(md, cat, chat)]
+            hidden = len(self.db_items(md, cat, chat, hidden=True))
+        per = 8
+        page = max(0, min(int(page or 0), max(0, (len(items) - 1) // per)))
+        chunk = items[page * per:(page + 1) * per]
+        lines = [f"<b>{title} · {d.day} {MONTHS_GEN[d.month - 1]}</b>", ""]
+        lines += [f"{page * per + i + 1}. {t}" for i, (_id, t) in enumerate(chunk)] or ["Порожньо."]
+        lines += ["", "Торкніться номера, щоб змінити. Затінене не повертається при оновленні; додане — повторюється щороку. "
+                  "Спільне редагують усі, 👤 особисте — лише ви."]
+        open_ = "ob" if cat == "days" else "obi"
+        nums = [(str(page * per + i + 1), self.cb(open_, _id)) for i, (_id, _t) in enumerate(chunk)]
+        rows = [nums[i:i + 4] for i in range(0, len(nums), 4)]
+        nav = []
+        if page > 0:
+            nav.append(("◀️", self.cb("obl", f"{cat}.{ymd}", page - 1)))
+        if (page + 1) * per < len(items):
+            nav.append(("▶️", self.cb("obl", f"{cat}.{ymd}", page + 1)))
+        if nav:
+            rows.append(nav)
+        rows.append([("➕ Спільне", self.cb("obn", f"{cat}.{ymd}", "0")), ("➕ Особисте", self.cb("obn", f"{cat}.{ymd}", "1"))])
+        if hidden:
+            rows.append([(f"🌑 Затінені · {hidden}", self.cb("obs", f"{cat}.{ymd}"))])
+        rows.append([("« Теми дня", self.cb("obh", "l"))])
         return "\n".join(lines)[:4000], rows
 
-    def obs_period(self, what):
+    def obs_shadow(self, chat, cat, ymd):
+        d = dt.date(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8]))
+        if cat == "days":
+            items = [(r["id"], r["title"]) for r in self.obs_on(d, chat, hidden=True)]
+        else:
+            items = [(it["id"], it["text"]) for it in self.db_items(d.strftime("%m-%d"), cat, chat, hidden=True)]
+        lines = ["🌑 <b>Затінені</b> — не показуються й не повертаються при оновленні з інтернету.", ""]
+        lines += [f"{i + 1}. {esc(t)}" for i, (_id, t) in enumerate(items[:20])] or ["Порожньо."]
+        rows = [[(f"↩️ {i + 1}. {t[:30]}", self.cb("obr", f"{'o' if cat == 'days' else 'd'}{_id}", ymd))] for i, (_id, t) in enumerate(items[:20])]
+        rows.append([("« Список", self.cb("obl", f"{cat}.{ymd}"))])
+        return "\n".join(lines)[:4000], rows
+
+    def db_card(self, chat, iid):
+        it = self.db_get(iid)
+        if not it:
+            return "Не знайдено.", [[("« Теми дня", self.cb("obh"))]]
+        m, dd = int(it["md"][:2]), int(it["md"][3:])
+        ymd = f"{self.today().year}{m:02d}{dd:02d}"
+        text = (f"{DB.CATS.get(it['cat'], ('•',))[0]} · {dd} {MONTHS_GEN[m - 1]}\n\n{esc(it['text'])}\n\n"
+                + ("👤 Особисте — бачите лише ви." if it["owner"] else "👥 Спільне — бачать і редагують усі."))
+        rows = []
+        if self.can_edit(chat, it["owner"]):
+            rows.append([("✏️ Змінити", self.cb("obe", f"d{iid}")), ("🌑 Затінити", self.cb("obx", f"d{iid}"))])
+        if not it["owner"]:
+            rows.append([("👤 Копію в особисті", self.cb("obp", f"d{iid}"))])
+        if it["url"].startswith("http"):
+            rows.append([("🔗 Джерело", "url:" + it["url"])])
+        rows.append([("« Список", self.cb("obl", f"{it['cat']}.{ymd}"))])
+        return text, rows
+
+    def obs_upcoming(self, chat):
+        d = self.today()
+        up = self.upcoming(chat, 60)
+        lines = ["⚠️ <b>Важливі дні попереду · 60 днів</b>", "‼️ дуже важливі · ❗ важливі", ""]
+        lines += [f"{x.day:02d}.{x.month:02d} {WD[x.weekday()]} · через {(x - d).days} дн. · {self.obs_line(r, link=True)}" for x, r in up[:40]] or ["Немає."]
+        rows = [[("🔔 Коли попереджати", self.cb("obws"))], [("« Теми дня", self.cb("obh", "l"))]]
+        return "\n".join(lines)[:4000], rows
+
+    def warn_cfg(self, chat):
+        c = self.store.get(f"obs_warn:{chat}") or {}
+        return {k: list(c.get(k, v)) for k, v in WARN_DEFAULT.items()}
+
+    def obs_warn_screen(self, chat):
+        c = self.warn_cfg(chat)
+        opts = {"1": [0, 1, 2, 3, 7], "2": [1, 2, 3, 4, 7, 14]}
+        lines = ["🔔 <b>Попередження про важливі дні</b>", "",
+                 "Позначте, за скільки днів нагадувати (можна кілька). 0 — у сам день (окремо від ранкового зведення).",
+                 f"❗ Важливі: {', '.join(map(str, sorted(c['1']))) or 'ні'} · ‼️ Дуже важливі: {', '.join(map(str, sorted(c['2']))) or 'ні'}",
+                 "Гучно чи тихо — 🎛 Поведінка → 🔔 Сповіщення → «Попередження»."]
+        rows = []
+        for lvl, mark in (("1", "❗"), ("2", "‼️")):
+            rows.append([((("✅" if n in c[lvl] else "▫️") + f"{mark}{n}"), self.cb("obwt", lvl, n)) for n in opts[lvl]])
+        rows.append([("« Важливі попереду", self.cb("obup"))])
+        return "\n".join(lines), rows
+
+    def obs_period(self, what, chat=None):
         d = self.today()
         if what == "day":
-            return self.obs_home()
+            return self.obs_home(chat)
         lines, rows = [], []
         if what == "week":
             lines.append("🗓 <b>Найближчі 7 днів</b>")
             for i in range(7):
                 x = d + dt.timedelta(days=i)
-                items = [r for r in self.obs_on(x) if r["kind"] == "day"]
+                items = [r for r in self.obs_on(x, chat) if r["kind"] == "day"]
                 lines.append(f"\n<b>{x.day} {MONTHS_GEN[x.month - 1]}, {WD[x.weekday()]}</b>")
                 lines += [self.obs_line(r) for r in items[:8]] or ["—"]
-            weeks = {r["id"]: r for i in range(7) for r in self.obs_on(d + dt.timedelta(days=i)) if r["kind"] == "week"}
+            weeks = {r["id"]: r for i in range(7) for r in self.obs_on(d + dt.timedelta(days=i), chat) if r["kind"] == "week"}
             if weeks:
                 lines += ["", "<b>Тижні:</b>"] + [self.obs_line(r, True) for r in weeks.values()]
         elif what == "month":
             last = calendar.monthrange(d.year, d.month)[1]
             lines.append(f"📆 <b>{MONTHS[d.month - 1]} {d.year}</b>")
-            months = {r["id"]: r for r in self.obs_on(d) if r["kind"] in ("month", "week")}
+            months = {r["id"]: r for r in self.obs_on(d, chat) if r["kind"] in ("month", "week")}
             if months:
                 lines += ["<b>Місячники й тижні:</b>"] + [self.obs_line(r, True) for r in months.values()]
             for day in range(1, last + 1):
                 x = dt.date(d.year, d.month, day)
-                items = [r for r in self.obs_on(x) if r["kind"] == "day"]
+                items = [r for r in self.obs_on(x, chat) if r["kind"] == "day"]
                 if items:
                     mark = "▶️ " if x == d else ("· " if x < d else "")
-                    lines.append(f"\n{mark}<b>{day}</b>: " + "; ".join(esc(r["title"][:60]) for r in items[:4]) + (f" (+{len(items) - 4})" if len(items) > 4 else ""))
+                    lines.append(f"\n{mark}<b>{day}</b>: " + "; ".join(DB.IMP_MARK[r["imp_"]] + esc(r["title"][:60]) for r in items[:4])
+                                 + (f" (+{len(items) - 4})" if len(items) > 4 else ""))
         else:
             lines.append(f"🎆 <b>{d.year}</b>")
-            years = {r["id"]: r for r in self.obs_on(d) if r["kind"] == "year"}
+            years = {r["id"]: r for r in self.obs_on(d, chat) if r["kind"] == "year"}
             lines += ["<b>Роки тем:</b>"] + ([self.obs_line(r) for r in years.values()] or ["—"])
             lines.append("\n<b>Місячники за рік:</b>")
             for m in range(1, 13):
-                ms = {r["id"]: r for r in self.obs_on(dt.date(d.year, m, 15)) if r["kind"] == "month"}
+                ms = {r["id"]: r for r in self.obs_on(dt.date(d.year, m, 15), chat) if r["kind"] == "month"}
                 if ms:
                     lines.append(f"{MONTHS[m - 1]}: " + "; ".join(esc(r["title"][:60]) for r in ms.values()))
         rows.append([("🗓 Календар", self.cb("obc", d.strftime("%Y%m"))), ("« Теми дня", self.cb("obh"))])
         return "\n".join(lines)[:4000], rows
 
-    def obs_calendar(self, ym):
+    def obs_calendar(self, ym, chat=None):
         y, m = int(ym[:4]), int(ym[4:6])
         today = self.today()
         rows = [[(w, "m:noop") for w in WD]]
         week = [(" ", "m:noop")] * dt.date(y, m, 1).weekday()
         for day in range(1, calendar.monthrange(y, m)[1] + 1):
             x = dt.date(y, m, day)
-            n = len(self.obs_on(x))
-            label = (f"[{day}]" if x == today else str(day)) + ("•" if n else "")
+            rs = self.obs_on(x, chat)
+            top = max((r["imp_"] for r in rs if r["kind"] == "day"), default=-1)
+            mark = "‼️" if top == 2 else "❗" if top == 1 else ("⭐" if any(r["fav"] for r in rs) else "•" if rs else "")
+            label = (f"[{day}]" if x == today else str(day)) + mark
             week.append((label, self.cb("obd", x.strftime("%Y%m%d"))))
             if len(week) == 7:
                 rows.append(week)
@@ -349,25 +662,40 @@ class ObservancesUI:
         prev = (dt.date(y, m, 1) - dt.timedelta(days=1)).strftime("%Y%m")
         nxt = (dt.date(y, m, 28) + dt.timedelta(days=5)).strftime("%Y%m")
         rows.append([("◀️ " + MONTHS[int(prev[4:]) - 1], self.cb("obc", prev)), (MONTHS[int(nxt[4:]) - 1] + " ▶️", self.cb("obc", nxt))])
-        rows.append([("« Теми дня", self.cb("obh"))])
-        return (f"🗓 <b>{MONTHS[m - 1]} {y}</b>\n• — є теми; [число] — сьогодні. Торкніться дня, щоб побачити теми (минулі теж)."), rows
+        rows.append([("➕ Свій день", self.cb("oba")), ("« Теми дня", self.cb("obh"))])
+        return (f"🗓 <b>{MONTHS[m - 1]} {y}</b>\n‼️ дуже важливий · ❗ важливий · ⭐ обраний · • є теми · [число] — сьогодні.\n"
+                "Торкніться дня — теми, списки, додавання й редагування."), rows
 
-    def obs_day(self, ymd):
+    def obs_day(self, ymd, chat=None):
         x = dt.date(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8]))
-        rs = self.obs_on(x)
+        rs = self.obs_on(x, chat)
         when = "минуло" if x < self.today() else ("сьогодні" if x == self.today() else f"через {(x - self.today()).days} дн.")
-        lines = [f"📅 <b>{x.day} {MONTHS_GEN[x.month - 1]} {x.year}</b> · {when}", ""] + ([self.obs_line(r) for r in rs] or ["Тем немає."])
-        rows = [[(f"✍️ {r['title'][:30]}", self.cb("ob", r["id"]))] for r in rs[:8]]
+        lines = [f'📅 <b><a href="{self.wiki_day_url(x)}">{x.day} {MONTHS_GEN[x.month - 1]}</a> {x.year}</b> · {when}', ""]
+        lines += [self.obs_line(r, link=True) for r in rs] or ["Тем немає."]
+        rows = [[(f"✍️ {r['title'][:30]}", self.cb("ob", r["id"]))] for r in rs[:6]]
+        rows.append([("📝 Список дня", self.cb("obl", f"days.{ymd}")), ("➕ До цього дня", self.cb("obn", f"days.{ymd}", "0"))])
         rows.append([("🗓 Календар", self.cb("obc", ymd[:6])), ("« Теми дня", self.cb("obh"))])
         return "\n".join(lines)[:4000], rows
 
-    def obs_card(self, oid):
+    def obs_card(self, oid, chat=None):
         r = self.obs(oid)
         if not r:
             return "Тему не знайдено.", [[("« Теми дня", self.cb("obh"))]]
-        text = (f"{self.obs_line(r, True)}\n\n{KINDS.get(r['kind'])} · {'щороку' if r['yearly'] else 'разово'}\nДжерело: {esc(r['source'])}")
+        r["fav"] = int(oid) in self.favs(chat)
+        why, since = DB.why_since(r)
+        text = (f"{self.obs_line(r, True, link=True)}\n\n{KINDS.get(r['kind'])} · {'щороку' if r['yearly'] else 'разово'}"
+                f" · {DB.IMP_NAMES[r['imp_']]}" + (" (авто)" if r.get("imp") is None and r["imp_"] else "")
+                + f"\n📍 Чому сьогодні: {esc(why) or '—'}" + (f"\n🕰 Відзначають з {esc(since)} р." if since else "")
+                + f"\n{'👤 Особиста — бачите лише ви' if r.get('owner') else '👥 Спільна — редагують усі'}"
+                + f"\nДжерело: {esc(r['source'])}")
+        edit = self.can_edit(chat, r.get("owner"))
         rows = [[("📱 Коротко", self.cb("obw", oid, "short")), ("📰 Новина", self.cb("obw", oid, "news")), ("📚 Велика", self.cb("obw", oid, "big"))],
-                [("➕ До зведення", self.cb("obz", oid)), ("🙈 Сховати тему", self.cb("obx", oid))]]
+                [(("⭐ В обраному" if r["fav"] else "☆ В обране"), self.cb("obf", oid)), ("❗ Важливість", self.cb("obv", oid))]]
+        if edit:
+            rows.append([("✏️ Назва теми", self.cb("obe", f"o{oid}")), ("📍 Чому/відколи", self.cb("oby", oid))])
+        rows.append([("➕ До зведення", self.cb("obz", oid))] + ([("🌑 Затінити", self.cb("obx", f"o{oid}"))] if edit else []))
+        if not r.get("owner"):
+            rows.append([("👤 Копію в особисті", self.cb("obp", f"o{oid}"))])
         if r["url"].startswith("http"):
             rows.append([("🔗 Джерело", "url:" + r["url"])])
         rows.append([("« Теми дня", self.cb("obh"))])
@@ -423,37 +751,137 @@ class ObservancesUI:
                             and self.store.get("obs_sent") != today):  # один раз на день, навіть після перезапуску
                         sent_day = now.date()
                         self.store.set("obs_sent", today)
-                        text, rows = self.obs_home()
-                        await self.host.notify_admins("🌅 " + text, rows)
+                        await self.send_digest()
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001
                 log.exception("observances loop")
             await asyncio.sleep(30)
 
+    async def send_digest(self):
+        """Кожному — своє зведення (зі своїми особистими темами й обраним) і, окремо, попередження про важливі дні."""
+        import notify
+        d = self.today()
+        for uid in dict.fromkeys(self.host.admins()):
+            try:
+                with notify.kind("morning"):
+                    if notify.wanted(uid, "morning"):
+                        text, rows = await self.obs_digest(uid)
+                        await self.host.notify(uid, "🌅 " + text, rows)
+                with notify.kind("warn"):
+                    if not notify.wanted(uid, "warn"):
+                        continue
+                    cfg = self.warn_cfg(uid)
+                    soon = []
+                    for i in sorted({n for v in cfg.values() for n in v}):
+                        x = d + dt.timedelta(days=i)
+                        for r in self.obs_on(x, uid):
+                            if r["kind"] == "day" and r["imp_"] >= 1 and i in cfg[str(r["imp_"])]:
+                                soon.append((i, x, r))
+                    if soon:
+                        lines = ["⚠️ <b>Попередження про важливі дні</b>", ""]
+                        lines += [f"{'Сьогодні' if i == 0 else f'Через {i} дн.'} · {x.day:02d}.{x.month:02d} · {self.obs_line(r, link=True)}" for i, x, r in soon]
+                        await self.host.notify(uid, "\n".join(lines)[:4000],
+                                               [[("⚠️ Важливі попереду", self.cb("obup")), ("🔔 Коли попереджати", self.cb("obws"))]])
+            except Exception:  # noqa: BLE001
+                log.exception("obs digest for %s", uid)
+
     # ----- маршрути
+    @staticmethod
+    def _cy(x):
+        cat, _, ymd = (x or "").partition(".")
+        return cat or "days", ymd or dt.date.today().strftime("%Y%m%d")
+
     async def obs_route(self, chat, a, x, y):
         if a == "obh":
             return None, self.obs_home(chat, "" if x in ("", "-") else x)
         if a == "obt":
-            return None, self.obs_period(x)
+            return None, self.obs_period(x, chat)
         if a == "obc":
-            return None, self.obs_calendar(x)
+            return None, self.obs_calendar(x, chat)
         if a == "obd":
-            return None, self.obs_day(x)
+            return None, self.obs_day(x, chat)
         if a == "ob":
-            return None, self.obs_card(x)
+            return None, self.obs_card(x, chat)
+        if a == "obi":
+            return None, self.db_card(chat, x)
+        if a == "obl":
+            return None, self.obs_list(chat, *self._cy(x), y or 0)
+        if a == "obs":
+            return None, self.obs_shadow(chat, *self._cy(x))
+        if a == "obup":
+            return None, self.obs_upcoming(chat)
+        if a == "obws":
+            return None, self.obs_warn_screen(chat)
+        if a == "obwt":
+            c = self.warn_cfg(chat)
+            n = int(y or 0)
+            c[x] = sorted(set(c.get(x, [])) ^ {n})
+            self.store.set(f"obs_warn:{chat}", c)
+            return None, self.obs_warn_screen(chat)
         if a == "obw":
             self._bg(self.write_observance(chat, int(x), y))
             return "✍️ Пишу…", ("✍️ <b>Пишу на тему дня</b>\nУ чаті з ботом видно хід роботи (крок і секунди), потім прийде чернетка. Якщо ШІ відмовиться — «📋 Промт для іншого ШІ» або «🔁 Іншою моделлю».", [[("« Теми дня", self.cb("obh"))]])
         if a == "obz":
             r = self.obs(x)
             n = self.add_collected(chat, "text", f"📅 Тема дня: {r['title']}", r["source"], r["url"])
-            return f"➕ У зведенні: {n}", self.obs_card(x)
-        if a == "obx":
-            with self.store.db() as con:
-                con.execute("UPDATE observances SET hidden=1 WHERE id=?", (int(x),))
-            return "🙈 Сховано", self.obs_home(chat)
+            return f"➕ У зведенні: {n}", self.obs_card(x, chat)
+        if a == "obf":
+            on = self.fav_toggle(chat, x)
+            return ("⭐ В обраному" if on else "Прибрано з обраного"), self.obs_card(x, chat)
+        if a == "obv":  # важливість: авто → звичайна → важлива → дуже важлива → авто
+            r = self.obs(x)
+            cur = r.get("imp")
+            nxt = {None: 0, 0: 1, 1: 2, 2: None}[cur if cur in (0, 1, 2) else None]
+            self.obs_set(x, imp=nxt)
+            r = self.obs(x)
+            return f"Важливість: {DB.IMP_NAMES[r['imp_']]}" + (" (авто)" if nxt is None else ""), self.obs_card(x, chat)
+        if a in ("obx", "obr", "obp", "obe"):
+            kind, iid = (x[:1], x[1:]) if x[:1] in ("o", "d") else ("o", x)
+            item = self.obs(iid) if kind == "o" else self.db_get(iid)
+            if not item:
+                return "Не знайдено", self.obs_home(chat)
+            if a == "obp":  # копія в особисті
+                if kind == "o":
+                    new = self.obs_add(item["title"], item["kind"], item["start"], item["finish"], item["yearly"], "особиста копія", item["url"], owner=chat)
+                    return "👤 Додано в особисті", self.obs_card(new, chat) if new else self.obs_card(iid, chat)
+                new = self.db_add(item["md"], item["cat"], item["text"], item["url"], owner=chat)
+                return "👤 Додано в особисті", self.db_card(chat, new or iid)
+            if not self.can_edit(chat, item.get("owner")):
+                return "Це особисте — змінює лише автор", self.obs_home(chat)
+            if a == "obe":
+                self.ask(chat, "obe", [kind, int(iid)])
+                return None, ("✏️ Напишіть новий текст.", [[("✖️ Скасувати", "m:cancel")]])
+            hide = 1 if a == "obx" else 0
+            (self.obs_set if kind == "o" else self.db_set)(iid, hidden=hide)
+            if a == "obr":
+                cat = "days" if kind == "o" else item["cat"]
+                return "↩️ Повернуто", self.obs_shadow(chat, cat, y or self.today().strftime("%Y%m%d"))
+            return "🌑 Затінено — не повернеться при оновленні", self.obs_home(chat, "l")
+        if a == "oby":
+            self.ask(chat, "oby", int(x))
+            return None, ("📍 Чому саме цього дня й відколи? Формат: <code>пояснення | рік</code>\nНапр.: "
+                          "<code>щороку в другий вівторок червня | 2004</code>", [[("✖️ Скасувати", "m:cancel")]])
+        if a == "obn":
+            cat, ymd = self._cy(x)
+            self.ask(chat, "obn", [cat, ymd, y == "1"])
+            who = "👤 особисте (бачите лише ви)" if y == "1" else "👥 спільне (бачать і редагують усі)"
+            return None, (f"➕ Новий пункт, {who}. Повторюватиметься щороку цього дня.\nНапишіть текст"
+                          + (" (для днів можна додати «| !» — важливий, «| !!» — дуже важливий)." if cat == "days" else "."),
+                          [[("✖️ Скасувати", "m:cancel")]])
+        if a == "obg":
+            text = await self.ensure_garden(self.today(), force=True)
+            body = esc(text) if text else "Не вдалося — моделі зараз недоступні. Спробуйте згодом."
+            return None, ("🌱 <b>Сад, город, господарство, тварини</b>\n\n" + body + "\n\n<i>Зібрано ШІ; звіряйте з місцевими умовами.</i>",
+                          [[("🔄 Інші поради", self.cb("obg")), ("« Теми дня", self.cb("obh"))]])
+        if a == "obj":
+            d = self.today()
+            await self.ensure_lore(d)
+            items = [it["text"] for it in self.db_items(d.strftime("%m-%d"), "lore", chat)] or \
+                (self.store.get("lore_cache") or {}).get(d.strftime("%m-%d"), "").splitlines()
+            body = "\n".join(esc(x) for x in items if x.strip()) or "Поки нічого — спробуйте згодом."
+            return None, (f"📜 <b>Народний календар · {d.day} {MONTHS_GEN[d.month - 1]}</b>\n\n{body}"[:4000],
+                          [[("📝 Редагувати", self.cb("obl", f"lore.{d.strftime('%Y%m%d')}")), ("« Теми дня", self.cb("obh"))]])
         if a == "obu":
             n = await self.prefetch()
             self._bg(self.prefetch(refresh_days=0 if self.obs_coverage() >= 366 else 180))
@@ -463,8 +891,10 @@ class ObservancesUI:
             return None, ("⏰ О котрій надсилати теми дня? Напишіть час, напр. <code>07:30</code>, або «-», щоб вимкнути.", [[("✖️ Скасувати", "m:cancel")]])
         if a == "oba":
             self.ask(chat, "oba")
-            return None, ("➕ Своя тема: <code>Назва | дата або період | щороку/разово</code>\nНапр.:\n<code>День супу | 15.11</code>\n"
-                          "<code>Тиждень інформування про грип | 01.11–07.11</code>\n<code>Місячник прибирання | 01.04–30.04 | щороку</code>",
+            return None, ("➕ Своя тема: <code>Назва | дата або період | щороку/разово | !/!!</code>\nНапр.:\n<code>День супу | 15.11</code>\n"
+                          "<code>Тиждень інформування про грип | 01.11–07.11</code>\n<code>Місячник прибирання | 01.04–30.04 | щороку</code>\n"
+                          "<code>День родини | 12.06 | щороку | !!</code> — ‼️ дуже важливий\n"
+                          "Додайте «особисто», щоб бачили лише ви.",
                           [[("✖️ Скасувати", "m:cancel")]])
         return None, None
 
@@ -478,18 +908,46 @@ class ObservancesUI:
                 self.store.set("obs_time", f"{int(h):02d}:{m}")
                 self.store.set("obs_morning", True)
             return "Збережено", self.obs_home(chat)
+        if key == "obe":
+            kind, iid = data
+            if kind == "o":
+                self.obs_set(iid, title=t[:160])
+                return "✏️ Змінено", self.obs_card(iid, chat)
+            self.db_set(iid, text=t[:220])
+            return "✏️ Змінено", self.db_card(chat, iid)
+        if key == "oby":
+            why, _, since = t.partition("|")
+            self.obs_set(data, why=why.strip()[:120], since=re.sub(r"\D", "", since)[:4])
+            return "📍 Збережено", self.obs_card(data, chat)
+        if key == "obn":
+            cat, ymd, personal = data
+            md = f"{ymd[4:6]}-{ymd[6:8]}"
+            owner = chat if personal else 0
+            if cat == "days":
+                title, _, flag = t.partition("|")
+                oid = self.obs_add(title, kind_of(title) if kind_of(title) == "day" else "day", md, md, 1, "ваш запис", owner=owner)
+                if oid and flag.strip() in ("!", "!!"):
+                    self.obs_set(oid, imp=len(flag.strip()))
+            else:
+                self.db_add(md, cat, t, owner=owner)
+            return "➕ Додано — повторюватиметься щороку", self.obs_list(chat, cat, ymd)
         if key == "oba":
             parts = [p.strip() for p in t.split("|")]
             dates = re.findall(r"(\d{1,2})[./](\d{1,2})(?:[./](\d{4}))?", parts[1] if len(parts) > 1 else "")
             if not parts[0] or not dates:
                 return "Формат: Назва | 15.11 або 01.11–07.11", self.obs_home(chat)
             (d1, m1, y1), (d2, m2, y2) = dates[0], dates[-1]
-            once = (len(parts) > 2 and "раз" in parts[2].lower()) or bool(y1)
+            rest = " ".join(parts[2:]).lower()
+            once = "раз" in rest or bool(y1)
             if once:
                 yy = int(y1 or self.today().year)
                 a, b = f"{yy}-{int(m1):02d}-{int(d1):02d}", f"{int(y2 or yy)}-{int(m2):02d}-{int(d2):02d}"
             else:
                 a, b = f"{int(m1):02d}-{int(d1):02d}", f"{int(m2):02d}-{int(d2):02d}"
-            self.obs_add(parts[0], kind_of(parts[0]) if a == b or kind_of(parts[0]) != "day" else "week", a, b, 0 if once else 1, "ваш запис")
+            oid = self.obs_add(parts[0], kind_of(parts[0]) if a == b or kind_of(parts[0]) != "day" else "week", a, b, 0 if once else 1,
+                               "ваш запис", owner=chat if "особист" in rest else 0)
+            imp = re.search(r"(!!|!)", rest)
+            if oid and imp:
+                self.obs_set(oid, imp=len(imp.group(1)))
             return "➕ Додано", self.obs_home(chat)
         return None, None

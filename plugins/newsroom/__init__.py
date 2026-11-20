@@ -103,7 +103,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
     VIEWS = {"ls", "d", "src", "dg", "so", "set", "q", "help", "ver", "len", "rules",
              "L", "Lo", "Ls", "Lsort", "Lbulk", "Le", "Lacc", "Lhelp", "Elst", "Lmerge",
              "H1", "H2", "H3", "H4", "H5", "D", "Dm", "Fl", "Fo", "Ff", "Fi", "Fmv", "Fbl", "Tg", "Tgi", "Tp", "Bk", "Bkl",
-             "Sp", "Ou", "Ours", "Sl", "St", "Wt", "more", "acs", "ace", "sch", "fld", "flds", "echo", "eci", "cls", "ctp", "cte", "cmk", "csl", "obh", "obt", "obc", "obd", "ob"}
+             "Sp", "Ou", "Ours", "Sl", "St", "Wt", "more", "acs", "ace", "sch", "fld", "flds", "echo", "eci", "cls", "ctp", "cte", "cmk", "csl", "obh", "obt", "obc", "obd", "ob", "obi", "obl", "obs", "obup", "obws"}
 
     def __init__(self, host):
         super().__init__(host)
@@ -1261,7 +1261,8 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
             self._bg(self._check(chat, int(x)))
             return "🔎 Звіряю…", ("🔎 <b>Звіряю з вебпошуком</b> — звіт додасться до чернетки й прийде окремим повідомленням.",
                                  [[("« Чернетка", self.cb("d", x))]])
-        if a in ("obh", "obt", "obc", "obd", "ob", "obw", "obz", "obx", "obu", "obm", "oba"):
+        if a in ("obh", "obt", "obc", "obd", "ob", "obw", "obz", "obx", "obu", "obm", "oba", "obi", "obl", "obs", "obup", "obws", "obwt",
+                 "obf", "obv", "obr", "obp", "obe", "oby", "obn", "obg", "obj"):
             return await self.obs_route(chat, a, x, y)
         if a in ("dg", "cgo", "cls", "cpop", "cclr", "cday", "cmk", "ctp", "cte", "ctd", "ctn", "ctx", "ctc", "ctl", "cti", "ctz",
                  "csg", "csp", "csl", "csd", "csn", "cse", "cdt"):
@@ -1347,7 +1348,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
         if key == "ecb":
             st.set("brands", text.strip()[:500])
             return "Збережено", self.echo_screen()
-        if key in ("obm", "oba"):
+        if key in ("obm", "oba", "obe", "oby", "obn"):
             return await self.obs_text(chat, key, data, text)
         if key in ("ctl", "cti", "ctz", "csp", "csn", "cse"):
             return await self.digest_text(chat, key, data, text)

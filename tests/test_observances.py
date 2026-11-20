@@ -47,3 +47,53 @@ def test_calendar_logic_scan_and_screens(tmp_path):
     assert p.collected(1)
     toast, scr = asyncio.run(p.obs_text(1, "oba", None, "Місячник прибирання | 01.04–30.04 | щороку"))
     assert any(r["title"] == "Місячник прибирання" for r in p.obs_on(dt.date(2027, 4, 20)))
+
+
+WIKI2 = """== Свята і пам'ятні дні ==
+* [[Всесвітній день довкілля]]
+== Іменини ==
+Анатолій, Григорій, [[Едмунд]]
+== Події ==
+=== XX століття ===
+* [[1945]] — почався [[Нюрнберзький процес]]
+* 1990 — щось інше
+== Народились ==
+* 1858 — [[Сельма Лагерлеф]], шведська письменниця
+== Померли ==
+* 1910 — [[Лев Толстой]]
+"""
+
+
+def test_daybook_sections_importance_astro():
+    from plugins.newsroom import daybook as DB
+    s = DB.parse_sections(WIKI2)
+    assert s["history"][0].startswith("1945 — почався Нюрнберзький процес")
+    assert s["born"] and s["died"] and "Едмунд" in s["names"][0]
+    assert DB.auto_imp("День Незалежності України") == 2 and DB.auto_imp("Всесвітній день боротьби з діабетом") == 1
+    assert DB.auto_imp("День супу") == 0
+    why, since = DB.why_since({"title": "День батька (третя неділя червня), з 2019 року", "start": "06-15", "finish": "06-15", "yearly": 1})
+    assert "неділя" in why and since == "2019"
+    assert DB.astro_lines(dt.date(2026, 11, 20)) and "Скорпіон" in DB.sun_sign(dt.date(2026, 11, 20))
+
+
+def test_lists_edit_shadow_personal(tmp_path):
+    p, sent = news(tmp_path)
+    p.today = lambda: dt.date(2026, 11, 20)
+    p.obs_add("Всесвітній день довкілля", "day", "11-20", "11-20", 1, "Вікіпедія")
+    p.db_add("11-20", "history", "1945 — почався процес", "https://x")
+    t, rows = p.obs_home(1, "l")
+    assert "Історія" in t and "‼️" in t and "Підготував" in t
+    it = p.db_items("11-20", "history", 1)[0]
+    asyncio.run(p.route(None, None, 1, ["obx", f"d{it['id']}"]))
+    assert not p.db_items("11-20", "history", 1)
+    p.db_add("11-20", "history", "1945 — почався процес", "https://x")  # оновлення з інтернету не повертає затінене
+    assert not p.db_items("11-20", "history", 1)
+    asyncio.run(p.route(None, None, 1, ["obr", f"d{it['id']}", "20261120"]))
+    assert p.db_items("11-20", "history", 1)
+    asyncio.run(p.obs_text(1, "obn", ["names", "20261120", True], "Мирослава"))
+    assert p.db_items("11-20", "names", 1) and not p.db_items("11-20", "names", 2)  # особисте бачить лише автор
+    oid = p.obs_on(dt.date(2026, 11, 20), 1)[0]["id"]
+    asyncio.run(p.route(None, None, 1, ["obf", str(oid)]))
+    assert p.obs_on(dt.date(2026, 11, 20), 1)[0]["fav"]
+    up = p.upcoming(1, 3)
+    assert isinstance(up, list)
