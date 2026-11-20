@@ -7317,6 +7317,14 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
             rows.append([(("● " if cur == "app" else "") + "🔵 Синя кнопка: 🧩 застосунок", "m:appbtn:app")])
         rows.append([(("● " if cur != "app" else "") + "🔵 Синя кнопка: ☰ команди", "m:appbtn:commands")])
         screen = (text, rows)
+    elif a == "impimg":  # 🖼 скриншот позначки
+        import improve
+        data = improve.image_bytes(arg) if (arg or "").isdigit() else None
+        if data:
+            await ctx.bot.send_photo(chat_id, InputFile(io.BytesIO(data), filename=f"bug-{arg}.jpg"), caption=f"🐞 Скриншот до позначки #{arg}")
+        else:
+            toast = "Скриншот не знайдено"
+        return
     elif a in ("imp", "impst", "impx", "impf", "imptog"):
         import improve
         if a == "impst":
@@ -7337,11 +7345,14 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         c = improve.counts()
         lines = ["💡 <b>Покращити</b> — помилки, недоробки й ідеї, позначені 💡", "",
                  f"🆕 нових: {c.get('new', 0)} · ✅ зроблено: {c.get('done', 0)} · ❌ відхилено: {c.get('no', 0)}", "",
-                 "Позначити: 💡 у куті будь-якого екрана · відповідь на повідомлення бота текстом із 💡 · /improve текст", ""]
+                 "Позначити: 💡 у куті будь-якого екрана · відповідь на повідомлення бота текстом із 💡 · /improve текст\n"
+                 "🐞 Помилка — «баг …» або «🐞 …»; 💡 побажання — «ідея …» чи «побажання …»; можна й разом: «баг … і побажання …». Пишіть з того місця, де це бачите, "
+                 "або надішліть скриншот із таким підписом; у застосунку — плаваюча кнопка 🐞.", ""]
         rows = [[(("● " if flt == k else "") + t, f"m:imp:{k}") for k, t in (("new", "🆕 Нові"), ("done", "✅ Зроблені"), ("no", "❌ Відхилені"))]]
         for m in improve.items(flt, limit=6):
             lines.append(esc(improve.describe(m)) + "\n")
-            rows.append([(f"✅ #{m['id']}", f"m:impst:done:{m['id']}"), (f"❌ #{m['id']}", f"m:impst:no:{m['id']}"), (f"🗑 #{m['id']}", f"m:impst:del:{m['id']}")])
+            rows.append([(f"✅ #{m['id']}", f"m:impst:done:{m['id']}"), (f"❌ #{m['id']}", f"m:impst:no:{m['id']}"), (f"🗑 #{m['id']}", f"m:impst:del:{m['id']}")]
+                        + ([(f"🖼 #{m['id']}", f"m:impimg:{m['id']}")] if m.get("image") else []))
         rows.append([("📄 Файл «Покращити»", "m:impf"), ("🧹 Прибрати вирішене", "m:impx")])
         rows.append([(("💡 на екранах: так" if prefs(chat_id).get("improve_btn", True) else "💡 на екранах: ні"), "m:imptog")])
         screen = ("\n".join(lines)[:4000], rows)
@@ -9669,6 +9680,12 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         mid = improve.add(update.effective_user.id, "reply", L.current(chat_id) or "", "повідомлення бота", "",
                           (r.text or r.caption or "")[:300], msg.text.lstrip()[1:].strip())
         return await msg.reply_text(f"💡 Додано в «Покращити» #{mid}")
+    bug = BUG_RE.match(msg.text or msg.caption or "")
+    if bug or (msg.photo and not msg.caption and chat_id in BUG_WAIT and time.time() - BUG_WAIT[chat_id][1] < 600):
+        note = (msg.text or msg.caption or "")[bug.end():].strip() if bug else ""
+        is_wish = bool(bug and bug.group("wish")) or bool(re.search(r"(?i)\b(ідея|побажання|пропоную|хочу|додати б)\b|💡", note))
+        is_bug = bool(bug and bug.group("bug")) or bool(re.search(r"(?i)\b(баг|помилк\w*|не працює|зламал\w*)\b|🐞", note)) or not bug
+        return await bug_mark(update, ctx, note, wish=is_wish, bug=is_bug)
     if getattr(msg, "forward_origin", None) is not None and chat_id not in AWAIT:  # 📥 переслане — завжди лише «ок» і в зведення
         body = msg.text or msg.caption or ("[фото без підпису]" if msg.photo else "[переслане без тексту]")
         return await take_forward(update, ctx, body)
@@ -9739,6 +9756,34 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             text = f"↩️ «{short_q(quote.replace(chr(10), ' '), 120)}»\n{text}"
         content = screen_note(chat_id) + content  # 🧭 пише з якогось розділу — відповідь по темі розділу
         await answer(update, ctx, content, text, preferred)
+
+
+BUG_RE = re.compile(r"(?i)^\s*(?:(?P<bug>🐞|баг\b|bug\b|помилка\s*:)|(?P<wish>ідея\b|побажання\b|покращення\b|покращити\s*:))\s*[:—–-]?\s*")
+BUG_KINDS = {(True, False): "🐞 помилка", (False, True): "💡 побажання", (True, True): "🐞💡 помилка й побажання", (False, False): "🐞 помилка"}
+BUG_WAIT = {}  # чат -> (id позначки, час): наступний скриншот без підпису прикріпиться до неї
+
+
+async def bug_mark(update, ctx, note, wish=False, bug=True):
+    """🐞 «баг …» / 💡 «ідея …», або скриншот із таким підписом — позначка помилки чи побажання саме на тому екрані, де людина зараз."""
+    import improve
+    chat_id = update.effective_chat.id
+    msg = update.effective_message
+    wait = BUG_WAIT.get(chat_id)
+    if msg.photo and not note and wait and time.time() - wait[1] < 600:
+        mid = wait[0]
+    else:
+        sc = LAST_SCREEN.get(chat_id) or (L.current(chat_id) or "", "", [], 0)
+        mid = improve.add(update.effective_user.id, "chat", sc[0] or (L.current(chat_id) or ""), BUG_KINDS[(bug, wish)], "",
+                          (sc[1] or "")[:600], note or ("(скриншот)" if msg.photo else ""))
+    if msg.photo:
+        data = bytes(await (await msg.photo[-1].get_file()).download_as_bytearray())
+        improve.set_image(mid, data)
+        BUG_WAIT.pop(chat_id, None)
+        return await msg.reply_text(f"🐞 Скриншот додано до позначки #{mid}. Дякую — виправлю під час наступного аналізу бота.")
+    BUG_WAIT[chat_id] = (mid, time.time())
+    what = {(True, True): "🐞💡 помилку й побажання", (False, True): "💡 побажання"}.get((bug, wish), "🐞 помилку")
+    return await msg.reply_text(f"Записав {what} #{mid} з прив'язкою до екрана, де ви зараз. Можете одразу надіслати "
+                                "скриншот — прикріплю (протягом 10 хв). Список: 💡 Покращити.")
 
 
 async def notify_chat(chat_id, text):
@@ -10515,8 +10560,15 @@ async def main():
             return _Resp(status_code=403)
         n = 0
         for m in (body.get("marks") or [])[:50]:
-            improve.add(uid, str(m.get("where") or "app")[:20], str(m.get("screen") or "")[:200], str(m.get("target") or "")[:200],
-                        str(m.get("action") or "")[:120], str(m.get("excerpt") or "")[:600], str(m.get("note") or "")[:2000])
+            mid = improve.add(uid, str(m.get("where") or "app")[:20], str(m.get("screen") or "")[:200], str(m.get("target") or "")[:200],
+                              str(m.get("action") or "")[:120], str(m.get("excerpt") or "")[:600], str(m.get("note") or "")[:2000])
+            img = str(m.get("image") or "")
+            if img.startswith("data:image/") and "," in img:  # 🐞 скриншот із застосунку
+                try:
+                    ext = "png" if img.startswith("data:image/png") else "webp" if img.startswith("data:image/webp") else "jpg"
+                    improve.set_image(mid, base64.b64decode(img.split(",", 1)[1][:12_000_000]), ext)
+                except (ValueError, OSError):
+                    pass
             n += 1
         return _Resp(json.dumps({"ok": True, "saved": n}), media_type="application/json")
 
