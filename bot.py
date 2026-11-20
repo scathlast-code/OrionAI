@@ -60,6 +60,7 @@ from hubclient import hub, plan_state, plan_text, schedule_text
 from backups import CLOUDS, TARGET_TITLES, Backups, BackupError, human_size
 import backups as bkui
 from uilayout import Layout, handle_editor, handle_editor_text
+from uilayout import SCOPE as L_SCOPE
 import help_texts as H
 import media
 import websearch
@@ -6804,6 +6805,9 @@ async def open_data(update, ctx, data, edit=True, record=True):
     """Відкриває екран за даними кнопки (m:… або help:…)."""
     chat = update.effective_chat.id
     SCREEN.set(data)
+    q0 = getattr(update, "callback_query", None)
+    if q0 is not None and getattr(q0, "message", None) is not None and not L_SCOPE.get():
+        L_SCOPE.set(f"m{q0.message.message_id}")  # «Назад» — в межах саме цього повідомлення
     if data.startswith("help:"):
         if record:
             L.visit(chat, data.replace("help:pick:", "help:m:"))

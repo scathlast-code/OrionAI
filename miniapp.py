@@ -323,6 +323,11 @@ async def run(bot_module, uid, op, data=None, text=None, user=None, file=None):
     if op == "menu":
         return menu(B, uid)
     getattr(B, "COPY_CARDS", {}).pop(uid, None)  # картки лише від цієї дії
+    try:
+        import uilayout
+        uilayout.SCOPE.set("app")  # у застосунку своя історія «Назад», окремо від чату
+    except Exception:  # noqa: BLE001
+        pass
     sink = _Sink()
     token = CAPTURE.set(sink)
     tbot = B.tg_app.bot if B.tg_app else None
