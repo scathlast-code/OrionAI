@@ -36,6 +36,7 @@ display:flex;justify-content:space-around;padding:6px 4px calc(6px + env(safe-ar
 nav button{max-width:20%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:0;background:none;color:var(--hint);font:inherit;font-size:11px;display:flex;flex-direction:column;align-items:center;gap:2px;padding:4px 8px;cursor:pointer;min-width:58px}
 nav button span{font-size:21px;filter:grayscale(.6);opacity:.8}nav button.on{color:var(--acc)}nav button.on span{filter:none;opacity:1}
 .sheet{position:fixed;left:0;right:0;bottom:0;background:var(--card);border-radius:18px 18px 0 0;padding:14px 16px calc(16px + env(safe-area-inset-bottom));box-shadow:0 -10px 30px #0007;transform:translateY(110%);transition:.25s;z-index:5}
+#bugfab{position:fixed;right:12px;bottom:calc(84px + env(safe-area-inset-bottom));width:40px;height:40px;border-radius:20px;border:0;background:var(--card);box-shadow:0 4px 14px #0005;font-size:20px;z-index:4;opacity:.85}
 .sheet.on{transform:none}.sheet textarea{width:100%;min-height:96px;border-radius:12px;border:1px solid var(--sep);background:var(--bg);color:var(--txt);padding:10px;font:inherit}
 .sheet .row{display:flex;gap:8px;margin-top:10px}.sheet .row button{flex:1;border:0;border-radius:12px;padding:12px;font:inherit;cursor:pointer;background:var(--bg);color:var(--txt)}
 .sheet .row .pri{background:var(--acc);color:var(--acct);font-weight:650}
@@ -94,6 +95,12 @@ details{margin:2px 0}details summary{cursor:pointer;color:var(--hint);font-size:
 <input type="file" id="filein" style="display:none">
 <div class="sheet" id="sheet"><div id="sheetq" class="sub" style="margin:0 0 8px"></div><input type="hidden" id="sheetmode"><textarea id="sheett"></textarea>
 <div class="row"><button onclick="cancelInput()">Скасувати</button><button id="sheetfile" onclick="pickFile(document.getElementById('sheett').value)">📎 Файл</button><button class="pri" onclick="sendInput()">Готово</button></div></div>
+<button id="bugfab" title="Повідомити про помилку" onclick="bugOpen()">🐞</button>
+<div class="sheet" id="bugsheet"><div class="seg" id="bugkind"><button class="sel" data-k="bug" onclick="bugKind('bug')">🐞 Помилка</button><button data-k="wish" onclick="bugKind('wish')">💡 Побажання</button></div>
+<div class="sub" id="bughint" style="margin:8px 0">Опишіть, що не так і що мало бути. Можна додати скриншот — позначка запам'ятає цей екран, і її врахують під час наступного вдосконалення.</div>
+<textarea id="bugtext" placeholder="Напр.: кнопка «Оновити» нічого не робить"></textarea>
+<div id="bugprev" class="sub" style="margin:6px 0"></div><input type="file" id="bugfile" accept="image/*" style="display:none">
+<div class="row"><button onclick="bugClose()">Скасувати</button><button onclick="document.getElementById('bugfile').click()">📷 Скриншот</button><button class="pri" onclick="bugSend()">Надіслати</button></div></div>
 <div class="toast" id="toast"></div>
 <script>
 const TG = window.Telegram && Telegram.WebApp;
@@ -465,6 +472,21 @@ async function saveMark(note){
   try{const r=await fetch(new URL('improve',API.replace(/app\/api$/,'')).href,{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({initData:init,marks:[m]})});toast(r.ok?'💡 Додано в «Покращити»':'Не вдалося зберегти')}catch(_){toast('Не вдалося зберегти')}
 }
+// 🐞 Плаваюча кнопка: опис помилки + скриншот → «Покращити» з прив'язкою до поточного екрана
+let bugImg='',bugK={bug:true,wish:false};
+function bugKind(k,reset){if(reset){bugK={bug:k==='bug',wish:k==='wish'}}else{bugK[k]=!bugK[k];if(!bugK.bug&&!bugK.wish)bugK[k]=true}
+  document.querySelectorAll('#bugkind button').forEach(b=>b.classList.toggle('sel',!!bugK[b.dataset.k]));
+  document.getElementById('bughint').textContent=bugK.bug&&bugK.wish?'Опишіть, що не так, і що варто покращити чи додати. Можна обидва кнопки одночасно; скриншот — за бажанням.':bugK.bug?'Опишіть, що не так і що мало бути. Можна додати скриншот — позначка запам\'ятає цей екран, і її врахують під час наступного вдосконалення.':'Що покращити чи додати тут? Можна додати скриншот чи приклад — позначка запам\'ятає цей екран.'}
+function bugOpen(){haptic();bugImg='';bugKind('bug',true);document.getElementById('bugtext').value='';document.getElementById('bugprev').textContent='';document.getElementById('bugsheet').classList.add('on')}
+function bugClose(){document.getElementById('bugsheet').classList.remove('on')}
+document.getElementById('bugfile').addEventListener('change',e=>{const f=e.target.files[0];if(!f)return;
+  if(f.size>8*1048576){toast('Скриншот завеликий (до 8 МБ)');return}
+  const r=new FileReader();r.onload=()=>{bugImg=r.result;document.getElementById('bugprev').textContent='📎 '+f.name+' · '+(f.size/1024|0)+' КБ'};r.readAsDataURL(f);e.target.value=''});
+async function bugSend(){const note=document.getElementById('bugtext').value.trim();if(!note&&!bugImg){toast('Опишіть помилку або додайте скриншот');return}
+  const ex=(document.getElementById('main').innerText||'').slice(0,600);
+  const m={where:'app',screen:cur||'',target:bugK.bug&&bugK.wish?'🐞💡 помилка й побажання':bugK.bug?'🐞 помилка':'💡 побажання',action:'',excerpt:ex,note:note||'(скриншот)',image:bugImg};
+  bugClose();try{const r=await fetch(new URL('improve',API.replace(/app\/api$/,'')).href,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({initData:init,marks:[m]})});toast(r.ok?'Записано — дякую! Врахую під час вдосконалення':'Не вдалося зберегти')}catch(_){toast('Не вдалося зберегти')}}
 if(TG){TG.ready();TG.expand();try{TG.BackButton.onClick(back)}catch(_){}}
 (function start(){
   if(TG && TG.isVersionAtLeast && !TG.isVersionAtLeast('6.1')){

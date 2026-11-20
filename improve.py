@@ -32,7 +32,36 @@ def db():
     con.execute("""CREATE TABLE IF NOT EXISTS marks (id INTEGER PRIMARY KEY AUTOINCREMENT, at REAL NOT NULL, user INTEGER NOT NULL DEFAULT 0,
         bot TEXT NOT NULL DEFAULT 'orion', where_ TEXT NOT NULL DEFAULT '', screen TEXT NOT NULL DEFAULT '', target TEXT NOT NULL DEFAULT '',
         action TEXT NOT NULL DEFAULT '', excerpt TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'new')""")
+    cols = {r[1] for r in con.execute("PRAGMA table_info(marks)")}
+    if "image" not in cols:  # 🐞 скриншот помилки (шлях до файлу поруч із базою)
+        con.execute("ALTER TABLE marks ADD COLUMN image TEXT NOT NULL DEFAULT ''")
     return con
+
+
+def img_dir():
+    d = path().parent / "improve_img"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def set_image(mid, data: bytes, ext="jpg"):
+    """Зберегти скриншот до позначки (до 8 МБ)."""
+    if not data or len(data) > 8 * 1024 * 1024:
+        return ""
+    f = img_dir() / f"{int(mid)}.{ext if ext in ('jpg', 'png', 'webp') else 'jpg'}"
+    f.write_bytes(data)
+    with closing(db()) as con, con:
+        con.execute("UPDATE marks SET image=? WHERE id=?", (f.name, int(mid)))
+    return f.name
+
+
+def image_bytes(mid):
+    with closing(db()) as con:
+        r = con.execute("SELECT image FROM marks WHERE id=?", (int(mid),)).fetchone()
+    if not r or not r["image"]:
+        return None
+    f = img_dir() / r["image"]
+    return f.read_bytes() if f.exists() else None
 
 
 def add(user, where_, screen="", target="", action="", excerpt="", note="", bot="orion"):
@@ -82,6 +111,8 @@ def describe(m):
         parts.append(f"текст: «{m['excerpt'][:160]}»")
     if m["note"]:
         parts.append(f"💬 {m['note']}")
+    if dict(m).get("image"):
+        parts.append("🖼 є скриншот")
     return "\n".join(parts)
 
 
@@ -101,6 +132,8 @@ def export_md():
                 out.append(f"  - текст: {m['excerpt'][:300]}")
             if m["note"]:
                 out.append(f"  - пояснення: {m['note']}")
+            if m.get("image"):
+                out.append(f"  - скриншот: improve_img/{m['image']}")
         out.append("")
     return "\n".join(out).encode("utf-8")
 
