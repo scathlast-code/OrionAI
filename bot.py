@@ -5007,7 +5007,7 @@ import appfeed  # noqa: E402
 
 FEED = appfeed.Feed(__import__("datadir").path("app_feed.sqlite3", "ORION_FEED_DB"))
 
-JOURNAL = lifeboat.Journal(__import__("datadir").base())
+ACTLOG = lifeboat.Journal(__import__("datadir").base())
 RSTATE = lifeboat.RuntimeState(__import__("datadir").base())
 LIFEBOAT_HOURS = float(env("LIFEBOAT_HOURS", "24"))
 
@@ -5064,7 +5064,7 @@ async def lifeboat_restore(bot):
         await bot.send_message(owner_id(), f"🛟 Після оновлення дані були порожні — я відновив усе з рятувальної копії від {when}.\n"
                                "Розмови, налаштування, доступи, мітки, статистика повернулися. Підключення до сервісів, "
                                "які зберігались лише в базі (входи в Canva, хмари), можливо, треба буде повторити.")
-        JOURNAL.add(0, "система", "відновлення з рятувальної копії", when)
+        ACTLOG.add(0, "система", "відновлення з рятувальної копії", when)
         return when
     except Exception as exc:  # noqa: BLE001
         log.warning("рятувальна копія: не вдалося відновитися: %s", exc)
@@ -5079,7 +5079,7 @@ async def lifeboat_loop():
         try:
             if tg_app and lb_on() and time.time() - float(kv_get("lifeboat_t") or 0) > LIFEBOAT_HOURS * 3600:
                 await lifeboat_make(tg_app.bot)
-                JOURNAL.prune()
+                ACTLOG.prune()
         except Exception as exc:  # noqa: BLE001
             log.info("рятувальна копія: %s", exc)
 
@@ -5099,7 +5099,7 @@ def scr_lb(chat_id):
              f"🛟 Остання рятувальна копія: {datetime.fromtimestamp(t, TZ).strftime('%d.%m %H:%M') if t else 'ще не було'}"
              + (f" · {int(kv_get('lifeboat_size') or 0) // 1024} КБ" if t else ""),
              f"🔁 Автоматично: {'щодня ✅' if lb_on() else 'вимкнено ⏹'}",
-             f"🧾 Журнал дій: {JOURNAL.size() // 1024} КБ (зберігаються останні {lifeboat.KEEP_MONTHS} міс.)"]
+             f"🧾 Журнал дій: {ACTLOG.size() // 1024} КБ (зберігаються останні {lifeboat.KEEP_MONTHS} міс.)"]
     rows = [[("🛟 Зробити копію зараз", "m:lbnow"), ("⏹ Вимкнути авто" if lb_on() else "🔁 Увімкнути авто", "m:lbauto")],
             [("🧾 Журнал дій", "m:lbj"), ("💾 Копії", "m:backup")]]
     return "\n".join(lines), rows
@@ -5109,7 +5109,7 @@ def scr_lbj(chat_id, part="me"):
     """Кожен бачить лише свою історію; власник (ALLOWED_USERS) — спершу свою, а кнопкою — усіх."""
     owner = chat_id in ALLOWED_USERS
     every = owner and part == "all"
-    recs = JOURNAL.tail(60, None) if every else JOURNAL.tail(40, chat_id)
+    recs = ACTLOG.tail(60, None) if every else ACTLOG.tail(40, chat_id)
     names = {m["user_id"]: m["name"] for m in members_list("approved")}
 
     def who(u):
@@ -5170,7 +5170,7 @@ def bot_punish(uid, kind, secs=0):
         if inb:
             with closing(inb.db()) as con, con:
                 con.execute("UPDATE people SET blocked=0 WHERE user=?", (uid,))
-    JOURNAL.add(CHAT.get() or 0, "модерація", kind, str(uid))
+    ACTLOG.add(CHAT.get() or 0, "модерація", kind, str(uid))
 
 
 def punish_rows(uid):
@@ -5188,7 +5188,7 @@ def forget_strangers():
     inb = PLUGINS.get("inb")
     if inb:
         inb.forget_strangers(is_allowed_id)
-    JOURNAL.keep_only(is_allowed_id)
+    ACTLOG.keep_only(is_allowed_id)
 
 
 async def log_activity(update: Update, ctx):
@@ -5204,17 +5204,17 @@ async def log_activity(update: Update, ctx):
             con.execute("UPDATE members SET name=?, username=? WHERE user_id=?", (u.full_name, u.username or "", u.id))
     q = update.callback_query
     if q:
-        return JOURNAL.add(u.id, "кнопка", q.data or "")
+        return ACTLOG.add(u.id, "кнопка", q.data or "")
     m = update.message
     if not m or (m.chat and m.chat.type != "private"):
         return
     waiting = (AWAIT.get(m.chat_id) or ("",))[0] or ""
     if m.text:
         kind = "команда" if m.text.startswith("/") else ("введення " + waiting if waiting else "повідомлення")
-        JOURNAL.add(u.id, kind, m.text.split()[0] if kind == "команда" else waiting or "текст", m.text,
+        ACTLOG.add(u.id, kind, m.text.split()[0] if kind == "команда" else waiting or "текст", m.text,
                     secret=bool(waiting and lifeboat.SECRET_HINT.search(waiting)))
     else:
-        JOURNAL.add(u.id, "файл", next((k for k in ("photo", "document", "voice", "video", "sticker", "audio") if getattr(m, k, None)), "інше"),
+        ACTLOG.add(u.id, "файл", next((k for k in ("photo", "document", "voice", "video", "sticker", "audio") if getattr(m, k, None)), "інше"),
                     m.caption or "")
 
 
@@ -9942,7 +9942,7 @@ async def main():
                 NODE.set("public_url", "https://" + host.split(",")[0].strip())
         op, data = str(body.get("op") or "screen"), str(body.get("data") or "m:home")[:64]
         if op not in ("progress", "history", "menu", "chats"):  # 🧾 дії застосунку — у журнал (без частих службових запитів)
-            JOURNAL.add(uid, "застосунок", f"{op} {data}", str(body.get("text") or "")[:200],
+            ACTLOG.add(uid, "застосунок", f"{op} {data}", str(body.get("text") or "")[:200],
                         secret=op == "text" and bool(lifeboat.SECRET_HINT.search(str((AWAIT.get(uid) or ("",))[0] or ""))))
         if op in ("screen", "tochat") and not data.startswith(("m:", "help:")):
             data = "m:home"
@@ -10089,7 +10089,7 @@ async def main():
         if not DB_EXISTED or empty:
             await lifeboat_restore(tg_app.bot)
         BACKGROUND.add(asyncio.create_task(lifeboat_loop()))
-        JOURNAL.add(0, "система", "запуск бота", "нова база" if not DB_EXISTED else "")
+        ACTLOG.add(0, "система", "запуск бота", "нова база" if not DB_EXISTED else "")
         await PLUGINS.start()
         log.info("Telegram-бот запущено; плагіни: %s", ", ".join(p.title for p in PLUGINS.active()) or "немає")
         sw = storage_warning()
@@ -10109,7 +10109,7 @@ async def main():
         await server.serve()
     finally:
         RSTATE.save()  # 🛟 зупинка (оновлення) — зберегти стан у пам'яті
-        JOURNAL.add(0, "система", "зупинка бота")
+        ACTLOG.add(0, "система", "зупинка бота")
         if tg_app:
             if tg_app.updater and tg_app.updater.running:
                 await tg_app.updater.stop()
