@@ -915,30 +915,74 @@ def set_msg(msg_id, **fields):
         con.execute(f"UPDATE messages SET {sets} WHERE id=?", (*fields.values(), msg_id))
 
 
+MODEL_TAG_RE = re.compile(r"^\s*⟨[^⟩\n]{1,40}⟩\s*")
+OLDER_BUDGET = 7000  # символів стислої історії поза «пам'яттю розмови»
+
+
+def _model_title(pid):
+    return (PROVIDERS.get(pid) or {}).get("title") or pid or ""
+
+
 def load_history(chat_id, before_id=None, dialog_id=None, limit=None):
-    """Історія розмови для моделі. Однакова для всіх моделей: кожна бачить, що відповідали інші.
-    Питання, що чекають у відкладених завданнях, сюди не потрапляють."""
+    """Історія розмови для моделі. Однакова для всіх моделей: кожна бачить, що відповідали інші, і хто саме (⟨назва моделі⟩).
+    Останні N повідомлень (🧠 Пам'ять розмови) — повністю; усе давніше — стисло окремою довідкою, щоб будь-яка модель,
+    яку покличуть, знала весь діалог і могла його продовжити. Питання, що чекають у відкладених завданнях, сюди не потрапляють."""
     did = dialog_id or current_dialog(chat_id)
+    lim = limit or prefs(chat_id)["memory"]
     with closing(db()) as con:
         rows = con.execute(
-            "SELECT role, text FROM messages WHERE dialog_id=? AND in_context=1 AND pending=0 AND id<? "
+            "SELECT id, role, text, provider FROM messages WHERE dialog_id=? AND in_context=1 AND pending=0 AND id<? "
             "ORDER BY id DESC LIMIT ?",
-            (did, before_id or 2**62, limit or prefs(chat_id)["memory"]),
+            (did, before_id or 2**62, lim),
         ).fetchall()
+        older = []
+        if len(rows) == lim and rows:
+            older = con.execute(
+                "SELECT role, text, provider FROM messages WHERE dialog_id=? AND in_context=1 AND pending=0 AND id<? ORDER BY id DESC LIMIT 400",
+                (did, rows[-1]["id"])).fetchall()
+    models = set()
     msgs = []
     for r in reversed(rows):
+        text = r["text"]
+        if r["role"] == "assistant" and r["provider"]:
+            models.add(_model_title(r["provider"]))
+            text = f"⟨{_model_title(r['provider'])}⟩ " + MODEL_TAG_RE.sub("", text, count=1)
         if msgs and msgs[-1]["role"] == r["role"]:
-            msgs[-1]["content"] += "\n\n" + r["text"]
+            msgs[-1]["content"] += "\n\n" + text
         else:
-            msgs.append({"role": r["role"], "content": r["text"]})
+            msgs.append({"role": r["role"], "content": text})
     while msgs and msgs[0]["role"] != "user":
         msgs.pop(0)
+    head = []
+    if older:
+        lines, used = [], 0
+        for r in older:  # від новіших до давніших, доки вміщається
+            who = "Користувач" if r["role"] == "user" else (_model_title(r["provider"]) or "Асистент")
+            if r["role"] == "assistant" and r["provider"]:
+                models.add(_model_title(r["provider"]))
+            t = re.sub(r"\s+", " ", r["text"])[:300]
+            if used + len(t) > OLDER_BUDGET:
+                lines.append("… (ще давніші повідомлення пропущено)")
+                break
+            lines.append(f"{who}: {t}")
+            used += len(t)
+        head.append("Давніша частина цієї розмови (стисло, від старішого до новішого):\n" + "\n".join(reversed(lines)))
+    if len(models) > 1 or older:
+        head.insert(0, "Це одна спільна розмова: відповіді асистента в ній могли давати різні моделі ШІ — їхні назви позначено "
+                       "на початку як ⟨назва⟩" + (f" (тут відповідали: {', '.join(sorted(models))})" if models else "") +
+                       ". Ти бачиш увесь діалог і продовжуєш його як рівноправний учасник: враховуй, що казали інші моделі, "
+                       "можеш доповнити чи виправити їх. Свою відповідь позначкою ⟨…⟩ не починай.")
+    if head:
+        msgs.insert(0, {"role": "system", "content": "\n\n".join(head)})
     with closing(db()) as con:
         first = con.execute("SELECT MIN(id) FROM (SELECT id FROM messages WHERE dialog_id=? AND in_context=1 AND pending=0 AND id<? ORDER BY id DESC LIMIT ?)",
-                            (did, before_id or 2**62, limit or prefs(chat_id)["memory"])).fetchone()[0]
+                            (did, before_id or 2**62, lim)).fetchone()[0]
     note = project_context(did, first) if did else ""
     if note:
-        msgs.insert(0, {"role": "system", "content": note})
+        if msgs and msgs[0]["role"] == "system":  # одна системна довідка: деякі моделі не приймають кілька
+            msgs[0]["content"] = note + "\n\n" + msgs[0]["content"]
+        else:
+            msgs.insert(0, {"role": "system", "content": note})
     return msgs
 
 
@@ -1848,6 +1892,7 @@ async def _ask_llm(history, user_content, preferred=None, fallback=True, exclude
         journal_update(jid, status="partial" if partial else "done", provider=pid, result=text[:8000],
                        attempts="\n".join(attempt_line(p, i) for p, i in attempts) or None)
         LAST_JOURNAL.set(jid)
+        text = MODEL_TAG_RE.sub("", text or "", count=1)  # модель повторила позначку «⟨Інша модель⟩» з історії — прибираємо
         return text, pid, attempts, warnings + low_limit_warnings(pid)
     LIVE.pop(CHAT.get(), None)
     journal_update(jid, status="failed", attempts="\n".join(attempt_line(p, i) for p, i in attempts))
