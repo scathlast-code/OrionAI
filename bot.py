@@ -9905,8 +9905,8 @@ if TELEGRAM_TOKEN:
     from telegram.ext import ExtBot
     from telegram.request import HTTPXRequest
     _FeedBot = appfeed.feed_bot_class(ExtBot, lambda: FEED, is_allowed_id)  # 🔔 «самостійні» повідомлення — ще й у застосунок
-    tg_app = (Application.builder().bot(_FeedBot(token=TELEGRAM_TOKEN, request=HTTPXRequest(connection_pool_size=256),
-                                                  get_updates_request=HTTPXRequest(connection_pool_size=1)))
+    tg_app = (Application.builder().bot(_FeedBot(token=TELEGRAM_TOKEN, request=HTTPXRequest(connection_pool_size=256, connect_timeout=15, read_timeout=30, write_timeout=30, pool_timeout=10),
+                                                  get_updates_request=HTTPXRequest(connection_pool_size=1, connect_timeout=15, read_timeout=40)))
               .concurrent_updates(16).build())  # меню й «Зупинити» працюють, поки ШІ думає
     from telegram.ext import TypeHandler
     from security_policy import telegram_guard
