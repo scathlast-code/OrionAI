@@ -17,6 +17,7 @@ import secrets
 import hashlib
 import html
 import io
+import zipfile
 import json
 import math
 import logging
@@ -3147,7 +3148,7 @@ def scr_settings(chat_id):
         [(label, f"m:set:length:{v}") for label, v in seg(LENGTH_OPTS, p["length"])],
         [(label, f"m:set:shape:{v}") for label, v in seg(SHAPE_OPTS, p["shape"])],
         [
-            (("🔔 " if p["alerts"] else "🔕 ") + "Сповіщення", "m:set:alerts:toggle"),
+            ("🔔 Сповіщення", "m:ntf"),
             (("🧾 " if p["footer"] else "▫️ ") + "Підпис моделі", "m:set:footer:toggle"),
         ],
         [("🏭 Скинути", "m:fr"), ("ℹ️", "help:g:settings")],
@@ -3957,6 +3958,8 @@ async def run_task(bot, task, preferred, fallback, deferred=False):
     if not _runtime_allowed("ai", "normal"):
         return [("runtime", {"kind": "sleep", "detail": "AI module is sleeping"})]
     CHAT.set(task["chat_id"])
+    if deferred:
+        notify.KIND.set("tasks")  # 🔔 відповідь, що готувалась у фоні — режим людини для цього типу
     use_prefs(task["chat_id"])
     did = task.get("dialog_id") or current_dialog(task["chat_id"])
     set_prio(RK.score("t", task["id"]) or dialog_score(did), f"Завдання #{task['id']}", chat=task["chat_id"])
@@ -5004,6 +5007,9 @@ def scr_backups(chat_id):
 # ---------------------------------------------------------------- 🛟 нічого не губиться під час оновлень (lifeboat.py)
 import lifeboat  # noqa: E402
 import appfeed  # noqa: E402
+import notify  # noqa: E402
+
+notify.setup(lambda cid: prefs(cid).get("notify") or {}, lambda cid, v: set_pref(cid, "notify", v))
 
 FEED = appfeed.Feed(__import__("datadir").path("app_feed.sqlite3", "ORION_FEED_DB"))
 
@@ -5016,31 +5022,89 @@ def lb_on():
     return (kv_get("lifeboat_auto") or "1") == "1"
 
 
-async def lifeboat_make(bot, reason="щоденна"):
-    """Свіжа копія всіх даних → власнику в чат (без звуку), закріпити; попередню — прибрати."""
-    if not owner_id():
-        return "немає власника (ALLOWED_USERS)"
-    name, data = await asyncio.to_thread(BK.make_format, "zip", "data")
-    name = "lifeboat-" + name
-    if len(data) > 49 * 1024 * 1024:
-        return f"копія завелика для Telegram ({len(data) // 1048576} МБ)"
-    cap = (f"🛟 Рятувальна копія ({reason}) · {datetime.now(TZ):%d.%m %H:%M} · {len(data) // 1024} КБ\n"
-           "Не відкріплюйте: якщо після оновлення бот прокинеться з порожніми даними, він сам відновиться з неї.")
-    m = await bot.send_document(owner_id(), InputFile(io.BytesIO(data), filename=name), caption=cap, disable_notification=True)
+def personal_backup(uid):
+    """Особиста копія учасника: лише його розмови, теки, завдання, медіа й налаштування — без чужих даних."""
+    out = {"user_id": uid, "created": datetime.now(TZ).isoformat(timespec="seconds"), "tables": {}}
+    with closing(db()) as con:
+        for t in ("dialogs", "folders", "messages", "tasks", "media", "settings"):
+            try:
+                out["tables"][t] = [dict(r) for r in con.execute(f"SELECT * FROM {t} WHERE chat_id=? ORDER BY rowid", (uid,))]
+            except sqlite3.Error:
+                continue
+    p = dict(prefs(uid))
+    out["prefs"] = p
+    body = json.dumps(out, ensure_ascii=False, indent=1, default=str)
+    digest = hashlib.sha256(json.dumps(out["tables"], sort_keys=True, default=str).encode()
+                            + json.dumps({k: v for k, v in p.items() if k not in ("dialog",)}, sort_keys=True, default=str).encode()).hexdigest()
+    bio = io.BytesIO()
+    with zipfile.ZipFile(bio, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("my-data.json", body)
+    return bio.getvalue(), digest
+
+
+async def _lifeboat_put(bot, uid, data, name, cap):
+    """Надіслати копію людині тихо, закріпити без сповіщення, попередню — відкріпити й прибрати."""
+    m = await bot.send_document(uid, InputFile(io.BytesIO(data), filename=name), caption=cap, disable_notification=True)
     try:
-        await bot.pin_chat_message(owner_id(), m.message_id, disable_notification=True)
+        await bot.pin_chat_message(uid, m.message_id, disable_notification=True)
     except Exception:  # noqa: BLE001
         pass
-    old = kv_get("lifeboat_msg")
+    key = "lifeboat_msg" if uid == owner_id() else f"lifeboat_msg:{uid}"
+    old = kv_get(key)
     if old and str(old) != str(m.message_id):
         for fn in (bot.unpin_chat_message, bot.delete_message):
             try:
-                await fn(owner_id(), int(old))
+                await fn(uid, int(old))
             except Exception:  # noqa: BLE001
                 pass
-    kv_set("lifeboat_msg", str(m.message_id))
-    kv_set("lifeboat_t", str(time.time()))
-    kv_set("lifeboat_size", str(len(data)))
+    kv_set(key, str(m.message_id))
+    return m
+
+
+async def lifeboat_make(bot, reason="щоденна", force=False):
+    """🛟 Рятувальна копія — лише якщо дані змінились (або вручну), завжди тихо, кожному один раз.
+    Власникам — повна копія (з неї бот сам відновлюється), іншим учасникам — особиста, лише з їхніми даними."""
+    if not owner_id():
+        return "немає власника (ALLOWED_USERS)"
+    fp = await asyncio.to_thread(BK.fingerprint)
+    stamp = f"{datetime.now(TZ):%d.%m %H:%M}"
+    sent = set()
+    if force or fp != kv_get("lifeboat_hash"):
+        name, data = await asyncio.to_thread(BK.make_format, "zip", "data")
+        name = "lifeboat-" + name
+        if len(data) > 49 * 1024 * 1024:
+            return f"копія завелика для Telegram ({len(data) // 1048576} МБ)"
+        cap = (f"🛟 Рятувальна копія ({reason}) · {stamp} · {len(data) // 1024} КБ\n"
+               "Приходить тихо й лише коли щось змінилось. Не відкріплюйте: якщо після оновлення бот прокинеться "
+               "з порожніми даними, він сам відновиться з неї.")
+        for uid in dict.fromkeys(admin_ids()):
+            if uid in sent or (uid != owner_id() and not notify.wanted(uid, "backup")):
+                continue
+            try:
+                await _lifeboat_put(bot, uid, data, name, cap)
+                sent.add(uid)
+            except Exception as exc:  # noqa: BLE001
+                log.info("рятувальна копія для %s: %s", uid, exc)
+        kv_set("lifeboat_hash", fp)
+        kv_set("lifeboat_t", str(time.time()))
+        kv_set("lifeboat_size", str(len(data)))
+    for m in members_list("approved"):
+        uid = m["user_id"]
+        if uid in sent or uid in ALLOWED_USERS or not notify.wanted(uid, "backup"):
+            continue
+        try:
+            data, digest = await asyncio.to_thread(personal_backup, uid)
+            if digest == kv_get(f"lifeboat_hash:{uid}"):
+                continue
+            cap = (f"🛟 Ваша особиста копія · {stamp} · {max(1, len(data) // 1024)} КБ\n"
+                   "Лише ваші розмови, теки й налаштування. Приходить тихо й лише коли щось змінилось. "
+                   "Вимкнути: 🎛 Поведінка → 🔔 Сповіщення.")
+            await _lifeboat_put(bot, uid, data, f"orion-my-data-{datetime.now(TZ):%Y-%m-%d}.zip", cap)
+            kv_set(f"lifeboat_hash:{uid}", digest)
+            sent.add(uid)
+        except Exception as exc:  # noqa: BLE001
+            log.info("особиста копія для %s: %s", uid, exc)
+    kv_set("lifeboat_check", str(time.time()))
     return ""
 
 
@@ -5077,7 +5141,7 @@ async def lifeboat_loop():
         await asyncio.sleep(60)
         RSTATE.save()
         try:
-            if tg_app and lb_on() and time.time() - float(kv_get("lifeboat_t") or 0) > LIFEBOAT_HOURS * 3600:
+            if tg_app and lb_on() and time.time() - float(kv_get("lifeboat_check") or kv_get("lifeboat_t") or 0) > LIFEBOAT_HOURS * 3600:
                 await lifeboat_make(tg_app.bot)
                 ACTLOG.prune()
         except Exception as exc:  # noqa: BLE001
@@ -5092,13 +5156,16 @@ def scr_lb(chat_id):
              "1. Усі дані бота й застосунку лежать на диску Railway (Volume) — оновлення коду з GitHub їх не чіпає.\n"
              "2. 🧾 Журнал дій записує все, що роблять у боті й застосунку (без паролів і ключів).\n"
              "3. Стан у пам'яті (на що бот чекає відповіді, ліміти моделей…) зберігається щохвилини й повертається після запуску.\n"
-             "4. 🛟 Рятувальна копія раз на добу тихо приходить вам у чат і закріплюється. Якщо бот колись прокинеться з порожніми "
-             "даними — він сам відновиться з неї й напише вам.</blockquote>",
+             "4. 🛟 Рятувальна копія приходить лише тоді, коли дані змінились, — завжди тихо (без звуку й вібрації), кожному один раз, "
+             "і закріплюється замість попередньої. Власникам — повна копія, іншим учасникам — особиста, лише з їхніми даними. "
+             "Якщо бот колись прокинеться з порожніми даними — він сам відновиться з неї й напише вам.\n"
+             "5. Telegram не дає боту позначати повідомлення прочитаними, тож тиха копія все одно додає «непрочитане». "
+             "Вимкнути копії для себе: 🎛 Поведінка → 🔔 Сповіщення.</blockquote>",
              "",
              ("✅ Диск Railway підключено — дані переживають оновлення." if not sw else "⚠️ " + re.sub(r"<[^>]+>", "", sw)),
              f"🛟 Остання рятувальна копія: {datetime.fromtimestamp(t, TZ).strftime('%d.%m %H:%M') if t else 'ще не було'}"
              + (f" · {int(kv_get('lifeboat_size') or 0) // 1024} КБ" if t else ""),
-             f"🔁 Автоматично: {'щодня ✅' if lb_on() else 'вимкнено ⏹'}",
+             f"🔁 Автоматично: {'перевірка щодня, копія — якщо є зміни ✅' if lb_on() else 'вимкнено ⏹'}",
              f"🧾 Журнал дій: {ACTLOG.size() // 1024} КБ (зберігаються останні {lifeboat.KEEP_MONTHS} міс.)"]
     rows = [[("🛟 Зробити копію зараз", "m:lbnow"), ("⏹ Вимкнути авто" if lb_on() else "🔁 Увімкнути авто", "m:lbauto")],
             [("🧾 Журнал дій", "m:lbj"), ("💾 Копії", "m:backup")]]
@@ -7157,6 +7224,18 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         screen = scr_limits(arg)
     elif a == "st":
         screen = scr_settings(chat_id)
+    elif a == "ntf":  # 🔔 режими сповіщень за типами
+        if arg == "c" and len(parts) > 3:
+            notify.cycle(chat_id, parts[3])
+        elif arg == "a" and len(parts) > 3:
+            notify.set_all(chat_id, parts[3])
+        elif arg == "al":
+            set_pref(chat_id, "alerts", not prefs(chat_id)["alerts"])
+        t, r = notify.screen(chat_id)
+        if is_admin_id(chat_id):
+            r.insert(-1, [(("⚠️ " if prefs(chat_id)["alerts"] else "▫️ ") + "Окремо про збої моделей", "m:ntf:al")])
+        r.append([("⬅️", "m:st"), HOME])
+        screen = (t, r)
     elif a == "set":
         apply_setting(chat_id, parts[2], parts[3] if len(parts) > 3 else None)
         screen = scr_create(chat_id) if len(parts) > 4 and parts[4] == "cr" else scr_settings(chat_id)
@@ -7287,7 +7366,7 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         if a == "lbnow":
             if q:
                 await q.answer("Роблю копію…")
-            err = await lifeboat_make(ctx.bot, "вручну")
+            err = await lifeboat_make(ctx.bot, "вручну", force=True)
             toast = ("🛟 " + err) if err else "🛟 Готово — закріплено у вашому чаті з ботом"
         elif a == "lbauto":
             kv_set("lifeboat_auto", "0" if lb_on() else "1")

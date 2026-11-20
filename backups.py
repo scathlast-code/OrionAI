@@ -277,6 +277,41 @@ class Backups:
             entries.extend(self._safe_project_files())
         return entries
 
+    VOLATILE_TABLES = {"journal", "usage", "pstate", "sqlite_sequence", "feed"}
+    VOLATILE_KV = ("lifeboat_", "ptimes", "seen_users", "other_hook_warned", "menu_cmds_v", "bot_mute_told:", "mdtest",
+                   "reset_sel:", "rstate", "obs_sent", "obs_last_fetch", "hist:", "nav:", "last_", "backup_cfg", "wx_", "lore:")
+
+    @staticmethod
+    def _db_digest(path, h, skip_tables=(), kv_skip=()):
+        with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10)) as con:
+            tables = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
+            for t in tables:
+                low = t.lower()
+                if low in skip_tables or any(w in low for w in ("cache", "log", "seen", "feed", "tmp")):
+                    continue
+                h.update(t.encode())
+                try:
+                    rows = con.execute(f'SELECT * FROM "{t}" ORDER BY rowid')
+                except sqlite3.OperationalError:
+                    rows = con.execute(f'SELECT * FROM "{t}"')
+                for row in rows:
+                    if t in ("kv", "settings") and kv_skip and str(row[0]).startswith(kv_skip):
+                        continue
+                    h.update(repr(row).encode())
+
+    def fingerprint(self):
+        """Відбиток змістовних даних (без лічильників, журналів і службових міток часу): однаковий — копія не потрібна."""
+        import hashlib
+        h = hashlib.sha256()
+        self._db_digest(self.db_path, h, self.VOLATILE_TABLES, self.VOLATILE_KV)
+        for rel, path in (self.extra_dbs() if self.extra_dbs else []):
+            h.update(rel.encode())
+            try:
+                self._db_digest(path, h, self.VOLATILE_TABLES, self.VOLATILE_KV)
+            except (OSError, sqlite3.Error):
+                continue
+        return h.hexdigest()
+
     def make_format(self, fmt="zip", scope=None):
         """Створює одну копію у вибраному форматі: zip / tar.gz / db.gz."""
         scope = scope or self.scope()

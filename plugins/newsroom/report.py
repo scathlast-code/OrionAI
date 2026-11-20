@@ -393,6 +393,7 @@ class ReportUI:
                                     caption=f"📄 Звіт за {month_name(r['ym'])} — повна версія")
 
     async def _report_loop(self):
+        __import__("notify").KIND.set("news")  # 🔔 тип сповіщень для режимів людини
         await asyncio.sleep(120)
         while True:
             try:

@@ -72,8 +72,12 @@ class Host:
             return None
 
     async def notify_admins(self, text, rows=None):
-        for uid in dict.fromkeys(self.admins()):  # той самий ID двічі — одне повідомлення
-            await self.notify(uid, text, rows)
+        import notify
+        k = notify.KIND.get()
+        with notify.kind("system" if k == "other" else k):
+            for uid in dict.fromkeys(self.admins()):  # той самий ID двічі — одне повідомлення
+                if notify.wanted(uid, notify.KIND.get()):  # ✖️ людина вимкнула цей тип
+                    await self.notify(uid, text, rows)
 
 
 class Plugin:

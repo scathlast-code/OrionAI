@@ -68,7 +68,17 @@ def markup_rows(markup):
 
 def feed_bot_class(base, feed_getter, is_private_id):
     """Підклас бота, який дублює «самостійні» повідомлення в стрічку застосунку."""
+    import notify
+
     class FeedBot(base):
+        def _quiet(self, chat_id, k):
+            """🔔 Режим сповіщень людини: самостійні повідомлення можуть приходити тихо."""
+            try:
+                notify.apply(chat_id, k, UPDATE_CHAT.get() != int(chat_id))
+            except Exception:  # noqa: BLE001
+                pass
+            return k
+
         def _feed(self, chat_id, html, markup, file=""):
             try:
                 cid = int(chat_id)
@@ -82,25 +92,41 @@ def feed_bot_class(base, feed_getter, is_private_id):
                 pass
 
         async def send_message(self, chat_id, text, *a, **k):
+            self._quiet(chat_id, k)
             m = await super().send_message(chat_id, text, *a, **k)
             self._feed(chat_id, text if k.get("parse_mode") else _esc(text), k.get("reply_markup"))
             return m
 
         async def send_document(self, chat_id, document, *a, **k):
+            self._quiet(chat_id, k)
             m = await super().send_document(chat_id, document, *a, **k)
             name = getattr(getattr(m, "document", None), "file_name", "") or "файл"
             self._feed(chat_id, k.get("caption") or "", k.get("reply_markup"), "📎 " + name)
             return m
 
         async def send_photo(self, chat_id, photo, *a, **k):
+            self._quiet(chat_id, k)
             m = await super().send_photo(chat_id, photo, *a, **k)
             self._feed(chat_id, k.get("caption") or "", k.get("reply_markup"), "🖼 фото")
             return m
 
         async def copy_message(self, chat_id, from_chat_id, message_id, *a, **k):
+            self._quiet(chat_id, k)
             m = await super().copy_message(chat_id, from_chat_id, message_id, *a, **k)
             self._feed(chat_id, "", k.get("reply_markup"), "📨 повідомлення — повністю в чаті з ботом")
             return m
+
+        async def send_video(self, chat_id, video, *a, **k):
+            return await super().send_video(chat_id, video, *a, **self._quiet(chat_id, k))
+
+        async def send_audio(self, chat_id, audio, *a, **k):
+            return await super().send_audio(chat_id, audio, *a, **self._quiet(chat_id, k))
+
+        async def send_animation(self, chat_id, animation, *a, **k):
+            return await super().send_animation(chat_id, animation, *a, **self._quiet(chat_id, k))
+
+        async def send_media_group(self, chat_id, media, *a, **k):
+            return await super().send_media_group(chat_id, media, *a, **self._quiet(chat_id, k))
 
     return FeedBot
 

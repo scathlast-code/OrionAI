@@ -406,6 +406,7 @@ class ObservancesUI:
 
     # ----- фон
     async def _obs_loop(self):
+        __import__("notify").KIND.set("morning")  # 🔔 тип сповіщень для режимів людини
         await asyncio.sleep(50)
         sent_day = None
         while True:

@@ -316,6 +316,7 @@ class DeskUI:
         return len(ids)
 
     async def _tags_loop(self):
+        __import__("notify").KIND.set("news")  # 🔔 тип сповіщень для режимів людини
         await asyncio.sleep(90)
         while True:
             try:
