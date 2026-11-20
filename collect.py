@@ -18,6 +18,11 @@ class Collect:
             con.execute("CREATE TABLE IF NOT EXISTS collected (id INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER NOT NULL, "
                         "ts REAL NOT NULL, text TEXT NOT NULL, fwd INTEGER NOT NULL DEFAULT 0)")
             con.execute("CREATE INDEX IF NOT EXISTS collected_chat ON collected(chat, id)")
+            con.execute("CREATE TABLE IF NOT EXISTS summaries (id INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER NOT NULL, ts REAL NOT NULL, "
+                        "text TEXT NOT NULL, auto INTEGER NOT NULL DEFAULT 0, first_id INTEGER, last_id INTEGER, "
+                        "delivered INTEGER NOT NULL DEFAULT 0)")
+            con.execute("CREATE TABLE IF NOT EXISTS col_state (chat INTEGER PRIMARY KEY, done_id INTEGER NOT NULL DEFAULT 0, "
+                        "warned INTEGER NOT NULL DEFAULT 0)")
 
     def db(self):
         con = sqlite3.connect(self.path, timeout=10)
@@ -62,6 +67,89 @@ class Collect:
         bio = io.BytesIO()
         doc.save(bio)
         return bio.getvalue()
+
+
+LIMIT = 20000      # знаків у «пам'яті» зведення: від першого непідсумованого репосту
+WARN_AT = 16000    # попередити заздалегідь
+
+
+class Batches:
+    """Межі зведень: що вже увійшло в зведення (done_id), що ще ні; самостійні (авто) зведення."""
+
+    def __init__(self, c: Collect):
+        self.c = c
+
+    def _state(self, chat):
+        with closing(self.c.db()) as con, con:
+            con.execute("INSERT OR IGNORE INTO col_state(chat) VALUES (?)", (int(chat),))
+            return dict(con.execute("SELECT * FROM col_state WHERE chat=?", (int(chat),)).fetchone())
+
+    def pending(self, chat):
+        done = self._state(chat)["done_id"]
+        with closing(self.c.db()) as con:
+            return [dict(r) for r in con.execute("SELECT * FROM collected WHERE chat=? AND id>? ORDER BY id", (int(chat), done))]
+
+    def pending_chars(self, chat):
+        return sum(len(i["text"]) for i in self.pending(chat))
+
+    def take(self, chat, limit=LIMIT):
+        """Непідсумовані повідомлення від найдавнішого, доки вміщається в limit (хоча б одне)."""
+        out, used = [], 0
+        for i in self.pending(chat):
+            if out and used + len(i["text"]) > limit:
+                break
+            out.append(i)
+            used += len(i["text"])
+        return out
+
+    def warned(self, chat):
+        return bool(self._state(chat)["warned"])
+
+    def set_warned(self, chat, v=True):
+        self._state(chat)
+        with closing(self.c.db()) as con, con:
+            con.execute("UPDATE col_state SET warned=? WHERE chat=?", (int(v), int(chat)))
+
+    def mark(self, chat, items, text, auto):
+        """Зведення готове: зберегти його й зсунути межу на останнє повідомлення, що в нього увійшло."""
+        self._state(chat)
+        with closing(self.c.db()) as con, con:
+            con.execute("UPDATE col_state SET done_id=MAX(done_id, ?), warned=0 WHERE chat=?", (items[-1]["id"], int(chat)))
+            return con.execute("INSERT INTO summaries(chat, ts, text, auto, first_id, last_id) VALUES (?,?,?,?,?,?)",
+                               (int(chat), time.time(), text, int(bool(auto)), items[0]["id"], items[-1]["id"])).lastrowid
+
+    def autos_since_manual(self, chat):
+        """Самостійні зведення після останнього зведення на вимогу людини (їх треба додати до нового)."""
+        with closing(self.c.db()) as con:
+            last = con.execute("SELECT MAX(id) FROM summaries WHERE chat=? AND auto=0", (int(chat),)).fetchone()[0] or 0
+            return [dict(r) for r in con.execute("SELECT * FROM summaries WHERE chat=? AND auto=1 AND id>? ORDER BY id", (int(chat), last))]
+
+    def reset(self, chat):
+        with closing(self.c.db()) as con, con:
+            con.execute("DELETE FROM col_state WHERE chat=?", (int(chat),))
+            con.execute("DELETE FROM summaries WHERE chat=?", (int(chat),))
+
+
+def docx_of(title, sections):
+    """sections: [(заголовок, текст)] → Word-файл."""
+    from docx import Document
+    doc = Document()
+    doc.add_heading(title, level=1)
+    for head, body in sections:
+        doc.add_heading(head, level=2)
+        for para in body.split("\n"):
+            doc.add_paragraph(para)
+    bio = io.BytesIO()
+    doc.save(bio)
+    return bio.getvalue()
+
+
+SUMMARY_PROMPT = ("Ось матеріали, які користувач переслав у бот (репости з каналів і чатів), від давніших до новіших. "
+                  "Зроби з них одне зведення українською: короткий загальний підсумок, далі головні події й факти групами за темами, "
+                  "з датами, місцями й цифрами, якщо вони є. Лише факти з матеріалів, нічого не вигадуй; суперечності між джерелами познач. "
+                  "Посилання з матеріалів збережи. Без markdown-зірочок.\n\nМАТЕРІАЛИ:\n")
+
+CMD_RE = __import__("re").compile(r"(?i)^\s*(?:будь ласка,?\s*)?(готуй|підготуй|зроби|напиши|склади|давай)\s+(зведення|звіт|підсумок|новину)\b")
 
 
 def chunks(text, size=3900):
