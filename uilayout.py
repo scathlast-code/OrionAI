@@ -11,12 +11,17 @@
 Модуль не залежить від Telegram: екрани — це (текст, рядки кнопок), де кнопка — (підпис, дані).
 """
 
+import contextvars
 import json
 import secrets
 
 PLACE_KB, PLACE_HOME, PLACE_OFF = "kb", "home", "off"
 NAV_BACK, NAV_HOME, NAV_FWD = "◀️ Назад", "🏠 Додому", "Вперед ▶️"
 HISTORY_MAX = 30
+# Окрема історія «Назад/Вперед» для кожного повідомлення-меню (і окремо для застосунку): інакше «Назад»
+# на одному повідомленні вів на екран, відкритий в іншому повідомленні чи в Mini App.
+SCOPE = contextvars.ContextVar("nav_scope", default="")
+SCOPED_MAX = 40
 
 
 def pairs(items, cols=2):
@@ -400,6 +405,17 @@ class Layout:
         return [[(self.relabel(chat, t), d) for t, d in row] for row in out]
 
     def _h(self, chat):
+        scope = SCOPE.get()
+        if scope:
+            key = (chat, scope)
+            if key not in self.hist:
+                base = self.hist.get(chat) or [[], -1]
+                cur = base[0][base[1]] if 0 <= base[1] < len(base[0]) else None
+                self.hist[key] = [[cur] if cur else [], 0 if cur else -1]  # нове повідомлення: починаємо з його екрана
+                scoped = [k for k in self.hist if isinstance(k, tuple)]
+                for old in scoped[:-SCOPED_MAX]:
+                    self.hist.pop(old, None)
+            return self.hist[key]
         if chat not in self.hist:
             saved = (self.get_prefs(chat) or {}).get("nav_hist")
             ok = isinstance(saved, list) and len(saved) == 2 and isinstance(saved[0], list)
@@ -407,8 +423,10 @@ class Layout:
         return self.hist[chat]
 
     def _save_hist(self, chat):
+        if SCOPE.get():  # історії окремих повідомлень — лише в пам'яті
+            return
         try:
-            stack, pos = self.hist[chat]
+            stack, pos = self._h(chat)
             self.set_pref(chat, "nav_hist", [stack[-HISTORY_MAX:], min(pos, len(stack[-HISTORY_MAX:]) - 1)])
         except Exception:  # noqa: BLE001
             pass
@@ -422,7 +440,8 @@ class Layout:
         stack.append(data)
         if len(stack) > HISTORY_MAX:
             del stack[0]
-        self.hist[chat] = [stack, len(stack) - 1]
+        h = self._h(chat)
+        h[0], h[1] = stack, len(stack) - 1
         self._save_hist(chat)
 
     def current(self, chat):
@@ -439,7 +458,7 @@ class Layout:
     def back(self, chat):
         stack, pos = self._h(chat)
         if pos > 0:
-            self.hist[chat][1] = pos - 1
+            self._h(chat)[1] = pos - 1
             self._save_hist(chat)
             return stack[pos - 1]
         return self.home_data
@@ -447,7 +466,7 @@ class Layout:
     def fwd(self, chat):
         stack, pos = self._h(chat)
         if pos < len(stack) - 1:
-            self.hist[chat][1] = pos + 1
+            self._h(chat)[1] = pos + 1
             self._save_hist(chat)
             return stack[pos + 1]
         return self.current(chat) or self.home_data
