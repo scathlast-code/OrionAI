@@ -34,9 +34,22 @@ DEFAULTS = {"who": "all", "greeting": "👋 Вітаю! Напишіть пов�
 WHO = {"all": "пишуть усі", "members": "лише учасники бота", "closed": "ніхто (закрито)"}
 
 
+BOT_NAME = lambda: ""  # noqa: E731 — @ім'я бота; бот підставляє його після запуску
+
+
+def thread_link(uid):
+    """Посилання, що відкриває ПЕРЕПИСКУ з людиною в боті (і в застосунку) — працює завжди, на відміну від tg://user."""
+    b = BOT_NAME()
+    return f"https://t.me/{b}?start=inb_{int(uid)}" if b and uid and int(uid) > 0 else ""
+
+
 def mention(uid, name, username=""):
-    """Ім'я, яке відкриває профіль людини (tg://user — працює й без @username) + @username, якщо є."""
-    if uid and int(uid) > 0:
+    """Ім'я людини — дотик відкриває переписку з нею в боті + @username (відкриває її профіль), якщо є.
+    tg://user?id не годиться: Telegram мовчки ігнорує його, якщо ваш застосунок цієї людини «не знає»."""
+    link = thread_link(uid)
+    if link:
+        out = f'<a href="{link}">{esc(name or uid)}</a>'
+    elif uid and int(uid) > 0:
         out = f'<a href="tg://user?id={int(uid)}">{esc(name or uid)}</a>'
     elif username:
         out = f'<a href="https://t.me/{esc(username)}">{esc(name)}</a>'
@@ -319,7 +332,7 @@ class Plugin(Base):
         return "\n".join(lines), rows
 
     def forget_strangers(self, allowed):
-        """Про людей без доступу лишаємо тільки ID і зв'язок «яке повідомлення кому» — без імен і текстів."""
+        """Стерти імена й тексти людей без доступу. Автоматично більше НЕ викликається (власник вирішив зберігати все)."""
         with closing(self.db()) as con, con:
             for (uid,) in con.execute("SELECT user FROM people").fetchall():
                 if uid > 0 and not allowed(uid):
@@ -351,8 +364,7 @@ class Plugin(Base):
         now = time.time()
         k = kind_of(msg)
         text = msg.text or msg.caption or ""
-        known = self.host.is_allowed(user.id)  # про незнайомих зберігаємо лише ID — ім'я й текст бачите тільки в сповіщенні
-        sname, suser, stext = (user.full_name, user.username or "", text) if known else ("", "", "")
+        sname, suser, stext = user.full_name, user.username or "", text  # зберігаємо все: бот приватний (рішення власника)
         with closing(self.db()) as con, con:
             con.execute("INSERT INTO people(user,name,username,first,last,count,unread) VALUES(?,?,?,?,?,1,1) "
                         "ON CONFLICT(user) DO UPDATE SET name=excluded.name, username=excluded.username, last=excluded.last, "
@@ -427,32 +439,58 @@ class Plugin(Base):
             ps = [dict(r) for r in con.execute("SELECT * FROM people WHERE blocked=0 ORDER BY unread>0 DESC, last DESC LIMIT 12")]
             tot = con.execute("SELECT COALESCE(SUM(unread),0) FROM people").fetchone()[0]
         lines = ["📮 <b>Скринька</b>", f"Непрочитаних: {tot} · пишуть: {WHO.get(self.get('who'))}", "",
-                 "Повідомлення людей приходять вам одразу. Відповідайте reply на них — людина отримає відповідь від бота."]
+                 "Повідомлення людей приходять вам одразу. Відповідайте reply на них — людина отримає відповідь від бота.",
+                 "Дотик до людини нижче (або до її імені в сповіщенні) відкриває всю переписку з нею."]
         rows = []
         for p in ps:
             mark = f"🔵{p['unread']} " if p["unread"] else ""
-            rows.append([(f"{mark}{(p['name'] or 'ID ' + str(p['user']))[:26]} · {p['count']}", self.cb("t", p["user"]))])
+            nm = p['name'] or ('@' + p['username'] if p['username'] else 'ID ' + str(p['user']))
+            rows.append([(f"{mark}{nm[:26]} · {p['count']}", self.cb("t", p["user"]))])
         if not ps:
             lines.append("\nПоки ніхто не писав. Поділіться посиланням на бота — t.me/ваш_бот.")
+        rows.append([("👥 Учасники та їхні розмови з ШІ", "m:acc")])
         rows.append([("⚙️ Налаштування скриньки", self.cb("set")), ("🚫 Заблоковані", self.cb("bl"))])
         return "\n".join(lines), rows
 
-    def thread(self, uid):
+    PAGE = 15
+
+    def thread(self, uid, page=0):
         p = self.person(uid)
         if not p:
             return "Розмову не знайдено.", [[("« Скринька", self.cb())]]
+        owners = (self.host.admins() or [0])[:1]  # «вхідне» записане по копії на кожного власника — беремо копії першого
+        q = ("FROM msgs WHERE user=? AND (dir='out' OR owner_chat IN (%s) OR owner_chat IS NULL)" % ",".join("?" * len(owners)))
+        args = (int(uid), *owners)
         with closing(self.db()) as con:
-            ms = [dict(r) for r in con.execute("SELECT * FROM msgs WHERE user=? AND (dir='out' OR owner_chat=?) ORDER BY id DESC LIMIT 12",
-                                               (int(uid), self.host.admins()[0] if self.host.admins() else 0))][::-1]
+            total = con.execute("SELECT COUNT(*) " + q, args).fetchone()[0]
+            pages = max(1, (total + self.PAGE - 1) // self.PAGE)
+            page = max(0, min(int(page or 0), pages - 1))
+            ms = [dict(r) for r in con.execute("SELECT * " + q + " ORDER BY id DESC LIMIT ? OFFSET ?",
+                                               (*args, self.PAGE, page * self.PAGE))][::-1]
             con.execute("UPDATE people SET unread=0 WHERE user=?", (int(uid),))
-        lines = [f"📮 <b>{mention(p['user'], p['name'] or 'Відкрити акаунт', p['username'])}</b> · <code>{p['user']}</code>",
-                 f"Повідомлень: {p['count']} · перше: {time.strftime('%d.%m.%Y', time.localtime(p['first']))}" + (" · 🚫 заблоковано" if p["blocked"] else ""), ""]
+        name = p["name"] or ("@" + p["username"] if p["username"] else f"ID {p['user']}")
+        lines = [f"📮 <b>{esc(name)}</b>" + (f" @{esc(p['username'])}" if p["username"] else "") + f" · <code>{p['user']}</code>",
+                 f"Повідомлень: {p['count']} · перше: {time.strftime('%d.%m.%Y', time.localtime(p['first']))}" + (" · 🚫 заблоковано" if p["blocked"] else ""),
+                 (f"Сторінка {page + 1} з {pages} (новіші — на першій)" if pages > 1 else ""), ""]
         for m in ms:
             who = "👤" if m["dir"] == "in" else "↩️ ви"
-            lines.append(f"{time.strftime('%d.%m %H:%M', time.localtime(m['at']))} {who} {KIND_ICON.get(m['kind'], '')} {esc((m['text'] or '')[:160])}")
-        rows = [[("↩️ Відповісти", self.cb("r", uid)), (("✅ Розблокувати" if p["blocked"] else "🚫 Заблокувати"), self.cb("b", uid))],
-                [("« Скринька", self.cb())]]
-        return "\n".join(lines)[:4000], rows
+            lines.append(f"{time.strftime('%d.%m %H:%M', time.localtime(m['at']))} {who} {KIND_ICON.get(m['kind'], '')} {esc((m['text'] or '')[:300])}")
+        if not ms:
+            lines.append("<i>Повідомлень у скриньці ще немає.</i>")
+        rows = [[("↩️ Відповісти", self.cb("r", uid)), (("✅ Розблокувати" if p["blocked"] else "🚫 Заблокувати"), self.cb("b", uid))]]
+        nav = []
+        if page < pages - 1:
+            nav.append(("⬅️ Давніші", self.cb("t", uid, page + 1)))
+        if page > 0:
+            nav.append(("Новіші ➡️", self.cb("t", uid, page - 1)))
+        if nav:
+            rows.append(nav)
+        if self.host.is_allowed(int(uid)):  # учасник бота — його розмови з ШІ теж відкриваються звідси
+            rows.append([("🤖 Його розмови з ШІ", f"m:mdl:{int(uid)}")])
+        if p["username"]:
+            rows.append(profile_row(self.cb, uid, p["username"]))
+        rows.append([("« Скринька", self.cb())])
+        return "\n".join(x for x in lines if x is not None)[:4000], rows
 
     def settings(self):
         text = ("⚙️ <b>Налаштування скриньки</b>\n\n"
@@ -486,7 +524,7 @@ class Plugin(Base):
         if a == "":
             return None, self.home(chat)
         if a == "t":
-            return None, self.thread(int(x))
+            return None, self.thread(int(x), int(y or 0))
         if a == "r":
             self.reply_to[chat] = int(x)
             p = self.person(x) or {}

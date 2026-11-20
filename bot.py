@@ -2410,6 +2410,7 @@ ITEMS = {
     "med": ("📥 Медіа", "m:pl:med"),
     "wx": ("🌤 Погода", "m:pl:wx"),
     "col": ("📥 Збір текстів", "m:col"),
+    "today": ("🌅 Сьогодні", "m:today"),
     "sp": ("🤝 Простори", "m:sp"),
     "sbx": ("🧪 Пісочниця", "m:sbx"),
     "imp": ("💡 Покращити", "m:imp"),
@@ -2425,7 +2426,7 @@ DEFAULT_GROUPS = {
 }
 DEFAULT_LAYOUT = [
     ["g:work", "home"], ["g:plugins", "home"], ["g:ai", "home"], ["g:settings", "home"],
-    ["dl", "g:work"], ["tl", "g:work"], ["nt", "g:work"], ["col", "g:work"], ["sp", "g:work"], ["pins", "g:work"], ["inbox", "g:work"],
+    ["today", "g:work"], ["dl", "g:work"], ["tl", "g:work"], ["nt", "g:work"], ["col", "g:work"], ["sp", "g:work"], ["pins", "g:work"], ["inbox", "g:work"],
     ["news", "g:plugins"], ["utm", "g:plugins"], ["stk", "g:plugins"], ["med", "g:plugins"], ["wx", "g:plugins"],
     ["md", "g:ai"], ["cr", "g:ai"],
     ["st", "g:settings"], ["acc", "g:settings"], ["backup", "g:settings"], ["svc", "g:settings"],
@@ -2516,6 +2517,15 @@ def _migrate_compact_menu(chat_id):
             saved.insert(pos, ["sp", "g:work"])
             set_pref(chat_id, "layout", saved)
         set_pref(chat_id, "collect_menu_v1", True)
+        p = prefs(chat_id)
+    if not p.get("today_menu_v1"):
+        # 🌅 Сьогодні — зведення дня (погода, дати, свята, прикмети) будь-коли, не чекаючи ранку.
+        saved = [list(x) for x in (p.get("layout") or [])]
+        if saved and "today" not in {x[0] for x in saved}:
+            pos = next((i for i, x in enumerate(saved) if x[1] == "g:work"), len(saved))
+            saved.insert(pos, ["today", "g:work"])
+            set_pref(chat_id, "layout", saved)
+        set_pref(chat_id, "today_menu_v1", True)
         p = prefs(chat_id)
     if not p.get("media_menu_v6"):
         # «🔌 Плагіни» — технічне слово: категорія стає «📰 Медіа», а керування плагінами переходить у ⚙️ Налаштування.
@@ -2640,6 +2650,8 @@ PLUGINS = orion_plugins.Registry(orion_plugins.Host(
            "awaiting": lambda chat: chat in AWAIT or CM.wants_text(chat),
            "node_active": lambda: NODE.active,
            "users": lambda: [m["user_id"] for m in members_list("approved")],
+           "premium": lambda chat: premium.has(chat, TZ),
+           "premium_now": lambda: premium.has(CHAT.get(), TZ) if CHAT.get() else None,  # ⭐ True/False/None — людина сама позначає в налаштуваннях
            "translate_screen": lambda text, title=None: tr_screen(tr_token(text), *( [title] if title else [])),  # 🌐 кнопка перекладу  # усі схвалені учасники (без імен)
            "app_media": APP_MEDIA,  # 📥 файли, які застосунок покаже плеєром
            "in_app": lambda: __import__("miniapp").CAPTURE.get() is not None,  # запит прийшов із Mini App  # фонові цикли плагінів працюють лише на активному вузлі кластера
@@ -3398,6 +3410,7 @@ def scr_settings(chat_id):
             ("🔔 Сповіщення", "m:ntf"),
             (("🧾 " if p["footer"] else "▫️ ") + "Підпис моделі", "m:set:footer:toggle"),
         ],
+        [("⭐ Telegram Premium: " + premium.status_line(chat_id, TZ), "m:prem")],
         [("🏭 Скинути", "m:fr"), ("ℹ️", "help:g:settings")],
     ]
     return text, rows
@@ -3570,6 +3583,25 @@ def invite_link(code):
     return f"https://t.me/{BOT_USERNAME}?start=inv_{code}" if BOT_USERNAME else f"/start inv_{code}"
 
 
+async def scr_today(chat_id):
+    """🌅 Те саме зведення, що приходить зранку (дні, свята, погода, прикмети), — тут і зараз, скільки завгодно разів."""
+    news, wx = PLUGINS.get("news"), PLUGINS.get("wx")
+    extra = [[("🌤 Погода детально", "m:pl:wx"), ("🔄 Оновити", "m:today")]]
+    if news and is_admin_id(chat_id) and hasattr(news, "obs_digest"):
+        try:
+            text, rows = await news.obs_digest(chat_id)
+            return "🌅 " + text, rows + extra
+        except Exception:  # noqa: BLE001
+            log.exception("today: зведення днів")
+    if wx:
+        try:
+            return (await wx.morning_text(chat_id),
+                    [[("📜 Прикмети й звичаї дня", "m:pl:wx:lore")]] + extra)
+        except Exception as exc:  # noqa: BLE001
+            return f"🌅 <b>Сьогодні</b>\n\n⚠️ Не вдалося отримати дані: {esc(type(exc).__name__)}. Спробуйте за хвилину.", extra
+    return "🌅 <b>Сьогодні</b>\n\nПогода й календар днів вимкнені в 🔌 Плагінах.", [[HOME]]
+
+
 def scr_access():
     pending, approved = members_list("pending"), members_list("approved")
     invites = invites_active()
@@ -3585,7 +3617,7 @@ def scr_access():
     for m in pending:
         who = (m["name"] or f"ID {m['user_id']}") + (f" @{m['username']}" if m["username"] else "")
         rows.append([(f"✅ {who}", f"m:accok:{m['user_id']}"), ("❌", f"m:accno:{m['user_id']}")])
-    rows += [[(f"👤 {m['name']}", f"m:mem:{m['user_id']}")] for m in approved]
+    rows += [[(f"👤 {m['name'] or 'ID ' + str(m['user_id'])}", f"m:mem:{m['user_id']}")] for m in approved]
     rows += [[(f"🚫 Скасувати запрошення …{inv['code'][-4:]}", f"m:invx:{inv['code']}")] for inv in invites]
     full = members_full()
     lines.append("\n" + ("🔓 Учасники мають усі права, як власник: налаштування, ньюзрум, плагіни, схвалення інших."
@@ -3614,13 +3646,9 @@ def scr_member(user_id):
         + (f"Доступ з: {datetime.fromtimestamp(m['approved_at'], TZ).strftime('%d.%m.%Y')}" if m.get("approved_at") else "")
     )
     n = len(member_dialogs(user_id))
-    view = bool(m.get("can_view"))
-    text += f"\n👁 Перегляд розмов: {'дозволено' if view else 'вимкнено'}"
     rows = []
-    if CHAT.get() in ALLOWED_USERS:  # історію інших людей бачить лише власник
-        rows.append([("👁 Вимкнути перегляд розмов" if view else "👁 Увімкнути перегляд розмов", f"m:mview:{user_id}")])
-        if view:
-            rows.append([(f"💬 Розмови учасника · {n}", f"m:mdl:{user_id}")])
+    if CHAT.get() in ALLOWED_USERS:  # історію інших людей бачить лише власник — завжди: люди пишуть саме його боту
+        rows.append([(f"💬 Розмови з ШІ · {n}", f"m:mdl:{user_id}"), ("📮 Переписка з вами", f"m:pl:inb:t:{user_id}")])
     rows += punish_rows(user_id)
     rows += [
         [("🚫 Забрати доступ", f"m:accno:{user_id}"), ("🗑 Видалити зі списку", f"m:accrm:{user_id}")],
@@ -3630,8 +3658,8 @@ def scr_member(user_id):
 
 
 def can_view(user_id):
-    m = member_get(user_id)
-    return bool(m and m.get("can_view"))
+    """Власник бачить розмови всіх, хто пише його боту (окремого дозволу більше не треба)."""
+    return True
 
 
 def member_dialogs(user_id):
@@ -5535,6 +5563,8 @@ async def take_forward(update, ctx, text, fwd=True):
                              [("📄 Віддати як файл", "m:col:txt"), ("➡️ Продовжуй", "m:col:go")]]))
 
 notify.setup(lambda cid: prefs(cid).get("notify") or {}, lambda cid, v: set_pref(cid, "notify", v))
+import premium  # ⭐ хто має Telegram Premium — підказки під це
+premium.setup(lambda cid: prefs(cid).get("premium") or {}, lambda cid, v: set_pref(cid, "premium", v))
 
 FEED = appfeed.Feed(__import__("datadir").path("app_feed.sqlite3", "ORION_FEED_DB"))
 
@@ -5658,6 +5688,28 @@ async def lifeboat_restore(bot):
     except Exception as exc:  # noqa: BLE001
         log.warning("рятувальна копія: не вдалося відновитися: %s", exc)
         return None
+
+
+async def premium_loop():
+    """⭐ Кожному — у його день і час — питання «чи є зараз Telegram Premium?» (розклад кожен ставить сам)."""
+    await asyncio.sleep(90)
+    while True:
+        try:
+            if tg_app and NODE.active:
+                now = datetime.now(TZ)
+                for uid in dict.fromkeys(list(ALLOWED_USERS) + [m["user_id"] for m in members_list("approved")]):
+                    if premium.due(uid, now):
+                        premium.mark_asked(uid, now)
+                        t, rows = premium.question(uid, TZ)
+                        try:
+                            with notify.kind("system"):
+                                await tg_app.bot.send_message(uid, t, parse_mode=ParseMode.HTML, reply_markup=kb(rows),
+                                                              **notify.apply(uid, {}, True))
+                        except Exception:  # noqa: BLE001
+                            log.info("premium: не вдалося спитати %s", uid)
+        except Exception:  # noqa: BLE001
+            log.exception("premium loop")
+        await asyncio.sleep(60)
 
 
 async def lifeboat_loop():
@@ -7257,7 +7309,7 @@ async def finish_wizard(update, ctx, chat_id):
 
 EDITOR_ACTIONS = {"btn", "bi", "bmv", "bup", "bdn", "bset", "lren", "lunren", "bgnew", "bgdel", "brl", "brldel", "breset"}
 VIEW_ACTIONS = {"appm", "sbx", "imp", "home", "dl", "d", "f", "tl", "t", "md", "lim", "st", "nt", "cr", "canva", "pins", "box", "it", "acc",
-                "mem", "mdl", "mdv", "btn", "bi", "brl", "voice", "cpl", "cp", "bk", "fr", "svc", "sv", "svls", "diag", "jl", "j", "bks", "bkt", "bkls", "bkrs", "bkfmt", "bkscope", "lib", "mi", "note", "bl", "pr", "pri", "backup", "qask", "rm", "rw", "cl", "why", "mdtest", "hub"}
+                "mem", "mdl", "mdv", "btn", "bi", "brl", "voice", "cpl", "cp", "bk", "fr", "svc", "sv", "svls", "diag", "jl", "j", "bks", "bkt", "bkls", "bkrs", "bkfmt", "bkscope", "lib", "mi", "note", "bl", "pr", "pri", "backup", "qask", "rm", "rw", "cl", "why", "mdtest", "hub", "today", "prem"}
 
 
 def is_view(data):
@@ -7864,6 +7916,32 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
             screen = scr_space(chat_id, sid)
         else:
             screen = scr_spaces(chat_id)
+    elif a == "prem":  # ⭐ Telegram Premium: є / немає / до дати + коли перепитувати
+        sub = parts[2] if len(parts) > 2 else ""
+        val = parts[3] if len(parts) > 3 else ""
+        if sub in ("y", "n"):
+            premium.set_has(chat_id, sub == "y")
+            toast = "⭐ Позначено: Premium є" if sub == "y" else "Позначено: Premium немає"
+            screen = (f"✅ Дякую! Telegram Premium: <b>{premium.status_line(chat_id, TZ)}</b>.", [[("⭐ Налаштування Premium", "m:prem")]]) if val == "q" else premium.screen(chat_id, TZ)
+        elif sub == "u":
+            ask_input(chat_id, "premd")
+            screen = ("⏳ До якої дати діє Premium? Напишіть, наприклад: <code>31.12</code>, <code>15.03.2027</code> або <code>через 30 днів</code>.", [CANCEL_ROW])
+        elif sub == "e" and val in premium.EVERY:
+            premium.set_ask(chat_id, every=val)
+            screen = premium.screen(chat_id, TZ)
+        elif sub == "d" and val.isdigit():
+            premium.set_ask(chat_id, dow=int(val) % 7)
+            screen = premium.screen(chat_id, TZ)
+        elif sub == "md" and val.isdigit():
+            premium.set_ask(chat_id, dom=max(1, min(28, int(val))))
+            screen = premium.screen(chat_id, TZ)
+        elif sub == "t":
+            ask_input(chat_id, "premt")
+            screen = ("🕘 О котрій питати про Premium? Напишіть час, наприклад <code>09:30</code>.", [CANCEL_ROW])
+        else:
+            screen = premium.screen(chat_id, TZ)
+    elif a == "today":  # 🌅 зведення дня — будь-коли
+        screen = await scr_today(chat_id)
     elif a == "col":  # 📥 режим збору текстів
         sub = arg or ""
         if sub == "on":
@@ -8815,6 +8893,20 @@ async def handle_awaited(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text):
         if screen:
             return await show(update, *screen, edit=False)
         return
+    if act in ("premd", "premt"):
+        if act == "premd":
+            d = premium.parse_date(text, TZ)
+            if not d:
+                return await update.message.reply_text("Не зрозумів дату. Приклад: 31.12 або через 30 днів.", reply_markup=kb([CANCEL_ROW]))
+            AWAIT.pop(chat_id, None)
+            premium.set_has(chat_id, True, d.isoformat())
+        else:
+            m = re.match(r"^\s*(\d{1,2})[:.](\d{2})\s*$", text or "")
+            if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+                return await update.message.reply_text("Напишіть час у форматі 09:30.", reply_markup=kb([CANCEL_ROW]))
+            AWAIT.pop(chat_id, None)
+            premium.set_ask(chat_id, time=f"{int(m.group(1)):02d}:{m.group(2)}")
+        return await show(update, *premium.screen(chat_id, TZ), edit=False)
     if act == "trc":
         AWAIT.pop(chat_id, None)
         if data in TR_SRC:
@@ -9184,6 +9276,11 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text(
             "👋 Вітаю! Запит на доступ надіслано власнику бота. Щойно він підтвердить, я напишу вам."
         )
+    if ctx.args and ctx.args[0].startswith("inb_") and is_admin_id(user.id):  # 📮 дотик до імені людини → переписка з нею
+        inb = PLUGINS.get("inb")
+        uid = ctx.args[0][4:]
+        if inb and uid.isdigit():
+            return await show(update, *inb.thread(int(uid)), edit=False)
     if ctx.args and ctx.args[0].startswith("sp_"):  # 🤝 запрошення в спільний простір
         sp = SPACES.by_code(ctx.args[0][3:])
         if not sp:
@@ -10249,6 +10346,8 @@ if TELEGRAM_TOKEN:
         ("access", screen_cmd("acc")),
         ("backup", screen_cmd("backup")),
         ("collect", screen_cmd("col")),
+        ("today", screen_cmd("today")),
+        ("weather", screen_cmd("pl:wx")),
         ("spaces", screen_cmd("sp")),
     ]:
         tg_app.add_handler(CommandHandler(name, fn))
@@ -11061,6 +11160,11 @@ async def main():
                 log.info("не вдалося повернути список команд у кнопку «Меню»")
         global BOT_USERNAME
         BOT_USERNAME = tg_app.bot.username or ""
+        try:  # 📮 імена людей у скриньці відкривають переписку з ними в боті
+            import plugins.inbox as _inbox_mod
+            _inbox_mod.BOT_NAME = lambda: BOT_USERNAME
+        except Exception:  # noqa: BLE001
+            log.info("скринька: не вдалося передати ім'я бота")
         await tg_app.start()
         if NODE.enabled:  # кластер: спершу з'ясовуємо, чи цей сервер має працювати
             try:
@@ -11070,7 +11174,7 @@ async def main():
             log.info("кластер: «%s» %s", NODE.name, "активний" if NODE.active else "у резерві")
         await apply_receiving()
         BACKGROUND.add(asyncio.create_task(task_worker()))
-        forget_strangers()
+        # forget_strangers() більше не викликаємо: власник вирішив зберігати все (крім номерів карток)
         _register_state()
         n_state = RSTATE.load()
         if n_state:
@@ -11080,6 +11184,7 @@ async def main():
         if not DB_EXISTED or empty:
             await lifeboat_restore(tg_app.bot)
         BACKGROUND.add(asyncio.create_task(lifeboat_loop()))
+        BACKGROUND.add(asyncio.create_task(premium_loop()))
         ACTLOG.add(0, "система", "запуск бота", "нова база" if not DB_EXISTED else "")
         await PLUGINS.start()
         log.info("Telegram-бот запущено; плагіни: %s", ", ".join(p.title for p in PLUGINS.active()) or "немає")

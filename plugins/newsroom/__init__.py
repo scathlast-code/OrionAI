@@ -990,6 +990,11 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
         if meta:
             parts.append("🗺 " + esc(meta))
         parts.append(ln + (f" · 🤖 {esc(d['model'])}" if d["model"] else ""))
+        if n > 1024:  # ⭐ підпис під фото: 1024 без Premium, 4096 з Premium
+            prem = self.host.extra.get("premium_now", lambda: None)()
+            parts.append("⭐ Під фото з вашого акаунта з Premium вміститься (до 4096)." if prem and n <= 4096 else
+                         "ℹ️ Під фото без Telegram Premium вміщується лише 1024 символи (з Premium — 4096): "
+                         "довший текст публікуйте окремим повідомленням або з акаунта, де Premium є.")
         if d["unconfirmed"]:
             parts.append("⚠️ Не підтверджено: " + esc("; ".join(d["unconfirmed"]))[:400])
         if d["sources"]:
