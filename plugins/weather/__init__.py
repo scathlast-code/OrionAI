@@ -337,12 +337,12 @@ class WeatherPlugin(Plugin):
             mine = await self.my_text(chat)
         except Exception as exc:  # noqa: BLE001
             return (f"🌤 <b>Погода</b>\n\n⚠️ Не вдалося отримати прогноз: {esc(type(exc).__name__)}. Спробуйте за хвилину.",
-                    [[("🔄 Оновити", self.cb())]] + src_rows())
+                    [[("🔄 Оновити прогноз", self.cb())]] + src_rows())
         text = "🌤 <b>Погода · Україна · 3 дні</b>\n\n" + body
         text += ("\n\n📍 <b>Ваші міста</b>\n" + mine) if mine else "\n\n📍 Додайте свої міста — «➕ Місто»."
         rows = [[("📜 Прикмети дня", self.cb("lore")), ("📅 Тиждень", self.cb("d3"))],
                 [("📍 Мої міста", self.cb("my")), ("➕ Місто", self.cb("add"))],
-                [(self.morning_label(chat), self.cb("mt")), ("🔄 Оновити", self.cb())]] + src_rows()
+                [(self.morning_label(chat), self.cb("mt")), ("🔄 Оновити прогноз", self.cb())]] + src_rows()
         return text[:3900] + "\n\n<i>Дані: Open-Meteo · температура в °C</i>", rows
 
     async def lore(self, day=None):
