@@ -207,7 +207,7 @@ def history(B, uid, limit=40):
     ch = B.get_choice(uid)
     models = [{"id": "auto", "title": "🔁 Авто", "on": ch == "auto"}] + [
         {"id": k, "title": f"{B.BADGE.get(k, '🤖')} {v['title']}", "on": ch == k} for k, v in B.PROVIDERS.items()]
-    return {"dialog": title, "limits": B.limits_brief(short=True), "models": models, "did": did, "folder": f["name"] if f else "",
+    return {"dialog": title, "limits": B.limits_brief(short=True), "models": models, "avatars": B.avatars(uid), "did": did, "folder": f["name"] if f else "",
             "reply": (B.APP_REPLY.get(uid) or "")[:300],
             "messages": [{"id": r["id"], "role": r["role"], "text": r["text"][:6000], "provider": r["provider"] or "", "ts": r["ts"]} for r in rows[::-1]]}
 
