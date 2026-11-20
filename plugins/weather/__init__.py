@@ -1,6 +1,6 @@
-"""🌤 Погода: Україна загалом (сьогодні + 3 дні) і ваші міста. Дані — Open-Meteo (безкоштовно, без ключа).
+"""🌤 Погода: Україна загалом (3 дні докладно, 5 і 7 — згорнуто) і ваші міста. Дані — Open-Meteo (безкоштовно, без ключа).
 
-Щоранку разом із «Темами дня» (той самий час) приходить звіт по Україні й обраних містах.
+Щоранку кожному — у час, який він обрав сам (або ніколи), — приходить звіт по Україні й обраних містах.
 """
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import asyncio
 import datetime as dt
 import json
 import logging
+import re
 import time
 
 import httpx
@@ -39,6 +40,11 @@ WMO = {0: ("☀️", "ясно"), 1: ("🌤", "переважно ясно"), 2:
        82: ("⛈", "сильні зливи"), 85: ("🌨", "снігопад"), 86: ("❄️", "сильний снігопад"), 95: ("⛈", "гроза"),
        96: ("⛈", "гроза з градом"), 99: ("⛈", "сильна гроза з градом")}
 WD = ["пн", "вт", "ср", "чт", "пт", "сб", "нд"]
+# Джерела: дані — Open-Meteo; інші — щоб людина могла звірити прогноз.
+SOURCES = [("Open-Meteo", "https://open-meteo.com/"), ("Укргідрометцентр", "https://meteo.gov.ua/"),
+           ("Sinoptik", "https://sinoptik.ua/"), ("Meteoprog", "https://www.meteoprog.com/ua/"), ("Windy", "https://www.windy.com/")]
+DEFAULT_TIME = "07:30"
+TIMES = ["06:00", "06:30", "07:00", "07:30", "08:00", "08:30", "09:00", "10:00"]
 MONTHS = ["січня", "лютого", "березня", "квітня", "травня", "червня", "липня", "серпня", "вересня", "жовтня", "листопада", "грудня"]
 
 
@@ -48,7 +54,13 @@ def wmo(code):
 
 def t(v):
     v = round(v or 0)
-    return f"+{v}°" if v > 0 else f"{v}°"
+    return f"+{v}°C" if v > 0 else f"{v}°C"
+
+
+def src_rows():
+    """Мінікнопки джерел — спільні для всього екрана."""
+    b = [(f"🔗 {n}", "url:" + u) for n, u in SOURCES]
+    return [b[:3], b[3:]]
 
 
 def wet(code):
@@ -59,7 +71,7 @@ class WeatherPlugin(Plugin):
     id = "wx"
     icon = "🌤"
     title = "Погода"
-    version = "1.0"
+    version = "1.2"
     summary = "Погода в Україні загалом і у ваших містах; щоранку — разом із темами дня."
     VIEWS = {"", "ua", "d3", "my", "set"}
 
@@ -89,6 +101,28 @@ class WeatherPlugin(Plugin):
     def morning_on(self, chat) -> bool:
         return (self.cfg().get("morning") or {}).get(str(chat), True)
 
+    def morning_time(self, chat) -> str:
+        return (self.cfg().get("mtime") or {}).get(str(chat)) or DEFAULT_TIME
+
+    def set_morning(self, chat, hm):
+        """hm = "ГГ:ХХ" — надсилати о цій порі; None — не надсилати."""
+        c = self.cfg()
+        c.setdefault("morning", {})[str(chat)] = bool(hm)
+        if hm:
+            c.setdefault("mtime", {})[str(chat)] = hm
+        self.save(c)
+
+    def morning_label(self, chat):
+        return f"🌅 Вранці: {self.morning_time(chat)}" if self.morning_on(chat) else "🌅 Вранці: ні"
+
+    def users(self):
+        get = self.host.extra.get("users")
+        try:
+            ids = list(get()) if get else []
+        except Exception:  # noqa: BLE001
+            ids = []
+        return list(dict.fromkeys(list(self.host.admins()) + ids))
+
     # ------------------------------------------------------------ дані
     async def fetch(self, points):
         """points: [(lat, lon)] → список прогнозів Open-Meteo (поточна погода + 4 дні). Кеш 20 хв."""
@@ -100,7 +134,7 @@ class WeatherPlugin(Plugin):
             "latitude": ",".join(str(a) for a, _ in key), "longitude": ",".join(str(b) for _, b in key),
             "current": "temperature_2m,apparent_temperature,weather_code,wind_speed_10m,relative_humidity_2m",
             "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,wind_speed_10m_max",
-            "timezone": "Europe/Kyiv", "forecast_days": 4, "wind_speed_unit": "ms",
+            "timezone": "Europe/Kyiv", "forecast_days": 7, "wind_speed_unit": "ms",
         }
         async with httpx.AsyncClient(timeout=25, trust_env=False) as client:
             r = await client.get(API, params=params)
@@ -120,7 +154,7 @@ class WeatherPlugin(Plugin):
     @staticmethod
     def day_title(iso, i):
         d = dt.date.fromisoformat(iso)
-        head = ("Сьогодні", "Завтра")[i] if i < 2 else WD[d.weekday()].capitalize()
+        head = ("Сьогодні", "Завтра")[i] if i < 2 else WD[d.weekday()].capitalize()  # noqa: E501
         return f"{head}, {d.day} {MONTHS[d.month - 1]}"
 
     def ua_day(self, data, i):
@@ -163,6 +197,28 @@ class WeatherPlugin(Plugin):
             lines.append("💨 Сильний вітер (12+ м/с): " + ", ".join(windy))
         return "\n".join(lines)
 
+    def ua_compact(self, data, i):
+        """Один рядок на день (для 4–7 днів): діапазон по країні й головне явище."""
+        lo, hi, wet_n, snow_n, storm_n, n, title = 99, -99, 0, 0, 0, 0, ""
+        for f in data:
+            d = f.get("daily") or {}
+            try:
+                lo, hi = min(lo, d["temperature_2m_min"][i]), max(hi, d["temperature_2m_max"][i])
+                code, pp = int(d["weather_code"][i]), (d.get("precipitation_probability_max") or [0] * 7)[i] or 0
+                title = title or self.day_title(d["time"][i], i)
+            except (KeyError, IndexError, TypeError):
+                continue
+            n += 1
+            storm_n += code >= 95
+            snow_n += 71 <= code <= 86 and code not in (80, 81, 82)
+            wet_n += wet(code) and pp >= 50
+        if not n:
+            return ""
+        part = lambda k: "майже скрізь" if k >= n * 0.7 else "місцями"
+        what = (f"⛈ гроза {part(storm_n)}" if storm_n else f"🌨 сніг {part(snow_n)}" if snow_n else
+                f"☔ опади {part(wet_n)}" if wet_n else "🌂 без істотних опадів")
+        return f"<b>{title}</b>: {t(lo)}…{t(hi)} · {what}"
+
     def city_line(self, name, f, full=False):
         cur, d = f.get("current") or {}, f.get("daily") or {}
         e, what = wmo(cur.get("weather_code", (d.get("weather_code") or [0])[0]))
@@ -175,7 +231,7 @@ class WeatherPlugin(Plugin):
             pass
         if full:
             out += f"\n   відчувається як {t(cur.get('apparent_temperature'))} · 💨 {round(cur.get('wind_speed_10m') or 0)} м/с · 💧 {cur.get('relative_humidity_2m', '—')}%"
-            for i in range(1, 4):
+            for i in range(1, 7):
                 try:
                     de, _ = wmo(d["weather_code"][i])
                     out += f"\n   {self.day_title(d['time'][i], i)}: {de} {t(d['temperature_2m_min'][i])}…{t(d['temperature_2m_max'][i])}"
@@ -183,15 +239,21 @@ class WeatherPlugin(Plugin):
                     break
         return out
 
-    async def ua_text(self, days=1):
+    async def ua_text(self, days=1, start=0):
         data = await self.fetch([(la, lo) for _n, la, lo, _r in UA_POINTS])
         times = (data[0].get("daily") or {}).get("time") or []
         parts = []
-        for i in range(min(days, len(times))):
+        for i in range(start, min(days, len(times))):
             body = self.ua_day(data, i)
             if body:
                 parts.append(f"<b>{self.day_title(times[i], i)}</b>\n{body}")
         return "\n\n".join(parts)
+
+    async def ua_week_tail(self, start=3):
+        """Дні 4–7 — коротко, по рядку."""
+        data = await self.fetch([(la, lo) for _n, la, lo, _r in UA_POINTS])
+        n = len((data[0].get("daily") or {}).get("time") or [])
+        return "\n".join(x for x in (self.ua_compact(data, i) for i in range(start, n)) if x)
 
     async def my_text(self, chat, full=False):
         items = self.cities(chat)
@@ -200,44 +262,113 @@ class WeatherPlugin(Plugin):
         data = await self.fetch([(c["lat"], c["lon"]) for c in items])
         return "\n".join(self.city_line(c["name"], f, full) for c, f in zip(items, data))
 
-    async def morning_text(self, chat):
-        """Ранковий звіт: Україна сьогодні + наступні 3 дні (згорнуто) і ваші міста."""
-        today = await self.ua_text(1)
-        later = await self.ua_text(4)
-        later = later.split("\n\n", 1)[1] if "\n\n" in later else ""
-        text = "🌤 <b>Погода в Україні</b>\n\n" + today
-        mine = await self.my_text(chat)
-        if mine:
-            text += "\n\n📍 <b>Ваші міста</b>\n" + mine
-        if later:
-            text += "\n\n<b>Наступні 3 дні</b>\n<blockquote expandable>" + later + "</blockquote>"
-        return text[:4000]
+    async def forecast_text(self, chat=None, today_only=False):
+        """3 дні докладно; 5 і 7 днів — згорнуто (розгортаються торканням)."""
+        data = await self.fetch([(la, lo) for _n, la, lo, _r in UA_POINTS])
+        n = len((data[0].get("daily") or {}).get("time") or [])
+        text = await self.ua_text(1 if today_only else 3)
+        if today_only:
+            mine = await self.my_text(chat) if chat else ""
+            if mine:
+                text += "\n\n📍 <b>Ваші міста</b>\n" + mine
+            nxt = await self.ua_text(3, start=1)
+            if nxt:
+                text += "\n\n📅 <b>3 дні</b>\n<blockquote expandable>" + nxt + "</blockquote>"
+        d5 = "\n".join(x for x in (self.ua_compact(data, i) for i in range(3, min(5, n))) if x)
+        d7 = "\n".join(x for x in (self.ua_compact(data, i) for i in range(5, min(7, n))) if x)
+        if d5:
+            text += "\n🗓 <b>5 днів</b>\n<blockquote expandable>" + d5 + "</blockquote>"
+        if d7:
+            text += "\n🗓 <b>7 днів</b>\n<blockquote expandable>" + d7 + "</blockquote>"
+        return text
 
-    async def send_morning(self):
-        """Викликається з циклу «Тем дня» одразу після них — тим самим людям."""
-        for uid in dict.fromkeys(self.host.admins()):
-            if not self.morning_on(uid):
-                continue
+    async def morning_text(self, chat):
+        """Ранковий звіт: сьогодні докладно й ваші міста; 3, 5 і 7 днів — згорнуто."""
+        return ("🌤 <b>Погода в Україні</b>\n\n" + await self.forecast_text(chat, today_only=True))[:4000]
+
+    async def send_morning(self, only=None):
+        """Ранковий звіт кожному, хто його хоче, — у його час (only — список, кому саме зараз)."""
+        import notify
+        with notify.kind("morning"):
+            for uid in (only if only is not None else self.users()):
+                if not self.morning_on(uid) or not notify.wanted(uid, "morning"):
+                    continue
+                try:
+                    await self.host.notify(uid, await self.morning_text(uid),
+                                           [[("📜 Прикмети й звичаї дня", self.cb("lore")), ("🌤 Погода", self.cb())]] + src_rows())
+                except Exception:  # noqa: BLE001
+                    log.exception("weather morning")
+
+    async def start(self):
+        self._task = asyncio.get_running_loop().create_task(self._loop())
+
+    async def _loop(self):
+        """Щопівхвилини: кому зараз пора — тому ранковий звіт (раз на день, навіть після перезапуску; до 15 хв запізнення)."""
+        await asyncio.sleep(45)
+        while True:
             try:
-                await self.host.notify(uid, await self.morning_text(uid), [[("🌤 Погода", self.cb())]])
+                if self.on():
+                    now = dt.datetime.now(self.host.tz) if self.host.tz else dt.datetime.now()
+                    today, c = now.date().isoformat(), self.cfg()
+                    sent = c.get("sent") or {}
+                    due = []
+                    for uid in self.users():
+                        if not self.morning_on(uid) or sent.get(str(uid)) == today:
+                            continue
+                        hh, mm = (int(x) for x in self.morning_time(uid).split(":"))
+                        late = (now.hour * 60 + now.minute) - (hh * 60 + mm)
+                        if 0 <= late <= 15:
+                            due.append(uid)
+                    if due:
+                        c = self.cfg()
+                        c.setdefault("sent", {}).update({str(u): today for u in due})
+                        self.save(c)
+                        await self.send_morning(due)
+            except asyncio.CancelledError:
+                raise
             except Exception:  # noqa: BLE001
-                log.exception("weather morning")
+                log.exception("weather loop")
+            await asyncio.sleep(30)
 
     # ------------------------------------------------------------ екрани
     async def home(self, chat):
         try:
-            ua = await self.ua_text(1)
+            body = await self.forecast_text()
             mine = await self.my_text(chat)
         except Exception as exc:  # noqa: BLE001
             return (f"🌤 <b>Погода</b>\n\n⚠️ Не вдалося отримати прогноз: {esc(type(exc).__name__)}. Спробуйте за хвилину.",
-                    [[("🔄 Оновити прогноз", self.cb())]])
-        text = "🌤 <b>Погода · Україна</b>\n\n" + ua
+                    [[("🔄 Оновити", self.cb())]] + src_rows())
+        text = "🌤 <b>Погода · Україна · 3 дні</b>\n\n" + body
         text += ("\n\n📍 <b>Ваші міста</b>\n" + mine) if mine else "\n\n📍 Додайте свої міста — «➕ Місто»."
-        on = self.morning_on(chat)
-        rows = [[("📅 3 дні по Україні", self.cb("d3")), ("📍 Мої міста", self.cb("my"))],
-                [("➕ Місто", self.cb("add")), (("🌅 Вранці: так" if on else "🌅 Вранці: ні"), self.cb("mo"))],
-                [("🔄 Оновити прогноз", self.cb())]]
-        return text[:4000] + "\n\n<i>Дані: Open-Meteo</i>", rows
+        rows = [[("📜 Прикмети дня", self.cb("lore")), ("📅 Тиждень", self.cb("d3"))],
+                [("📍 Мої міста", self.cb("my")), ("➕ Місто", self.cb("add"))],
+                [(self.morning_label(chat), self.cb("mt")), ("🔄 Оновити", self.cb())]] + src_rows()
+        return text[:3900] + "\n\n<i>Дані: Open-Meteo · температура в °C</i>", rows
+
+    async def lore(self, day=None):
+        """📜 Народний календар дня: назва дня в народі, прикмети про погоду, звичаї й заборони. Кеш на дату (ММ-ДД)."""
+        now = dt.datetime.now(self.host.tz) if getattr(self.host, "tz", None) else dt.datetime.now()
+        day = day or now.date()
+        key = day.strftime("%m-%d")
+        c = self.cfg()
+        cached = (c.get("lore") or {}).get(key)
+        if cached:
+            return cached
+        if not getattr(self.host, "ask_ai", None):
+            return ""
+        prompt = (f"Народний календар України на {day.day} {MONTHS[day.month - 1]}. Напиши українською, коротко:\n"
+                  "1) як цей день називають у народі й чия пам'ять (одним рядком);\n"
+                  "2) 3–5 народних прикмет про погоду цього дня;\n"
+                  "3) 2–4 звичаї, обряди чи заборони цього дня;\n"
+                  "4) 1–2 приказки, якщо відомі.\n"
+                  "Лише справжні, відомі українські народні прикмети й звичаї; нічого не вигадуй — якщо для цього дня мало відомо, "
+                  "напиши менше. Без вступів і висновків, рядки з емодзі на початку, без markdown-зірочок.")
+        text, _model = await self.host.ask_ai(prompt, label="🌤 Погода: прикмети дня")
+        text = re.sub(r"[*_#`]+", "", (text or "").strip())[:2500]
+        if text:
+            c.setdefault("lore", {})[key] = text
+            self.save(c)
+        return text
 
     async def route(self, update, ctx, chat, args):
         a = args[0] if args else ""
@@ -246,10 +377,22 @@ class WeatherPlugin(Plugin):
             return None, await self.home(chat)
         if a == "d3":
             try:
-                text = await self.ua_text(4)
+                text = await self.ua_text(7)
             except Exception as exc:  # noqa: BLE001
                 return f"⚠️ {type(exc).__name__}", await self.home(chat)
-            return None, (("📅 <b>Погода в Україні на 4 дні</b>\n\n" + text)[:4000], [[("« Погода", self.cb())]])
+            return None, (("📅 <b>Погода в Україні на тиждень</b>\n\n" + text)[:4000], [[("« Погода", self.cb())]] + src_rows())
+        if a == "lore":
+            now = dt.datetime.now(self.host.tz) if getattr(self.host, "tz", None) else dt.datetime.now()
+            try:
+                body = await self.lore(now.date())
+            except Exception as exc:  # noqa: BLE001
+                body = ""
+                log.warning("lore: %s", exc)
+            if not body:
+                body = "Не вдалося зібрати прикмети — моделі зараз недоступні. Спробуйте трохи згодом."
+            head = f"📜 <b>Народний календар · {now.day} {MONTHS[now.month - 1]}</b>\n\n"
+            note = "\n\n<i>Зібрано ШІ з відомих народних прикмет; у різних регіонах вони можуть відрізнятися.</i>"
+            return None, ((head + esc(body) + note)[:4000], [[("🌤 Погода", self.cb())]])
         if a == "my":
             items = self.cities(chat)
             if not items:
@@ -281,14 +424,38 @@ class WeatherPlugin(Plugin):
                 gone = None
             self.set_cities(chat, items)
             return (f"🗑 {gone['name']}" if gone else None), (await self.route(update, ctx, chat, ["my"]))[1]
-        if a == "mo":
-            c = self.cfg()
-            c.setdefault("morning", {})[str(chat)] = not self.morning_on(chat)
-            self.save(c)
-            return ("🌅 Вранці надсилатиму" if self.morning_on(chat) else "Вранці не надсилатиму"), await self.home(chat)
+        if a in ("mo", "mt"):  # 🌅 свій час ранкового звіту або «не надсилати»
+            cur = self.morning_time(chat) if self.morning_on(chat) else ""
+            tm = [(("✅ " if h == cur else "") + h, self.cb("mts", h.replace(":", ""))) for h in TIMES]
+            rows = [tm[:4], tm[4:], [("⌨️ Свій час", self.cb("mti")), ("✖️ Не надсилати", self.cb("mts", "off"))], [("« Погода", self.cb())]]
+            return None, ("🌅 <b>Ранковий прогноз</b>\n\nО котрій щодня надсилати вам погоду? Зараз: "
+                          + (f"<b>{cur}</b>" if cur else "<b>не надсилати</b>")
+                          + "\n\nГучно чи тихо — у 🎛 Поведінка → 🔔 Сповіщення.", rows)
+        if a == "mts":
+            if x == "off":
+                self.set_morning(chat, None)
+                return "Вранці не надсилатиму", await self.home(chat)
+            hm = f"{x[:2]}:{x[2:4]}"
+            self.set_morning(chat, hm)
+            return f"🌅 Щодня о {hm}", await self.home(chat)
+        if a == "mti":
+            self.ask(chat, "mtime")
+            return None, ("⌨️ Напишіть час, напр. <code>06:45</code>, або «-», щоб не надсилати.", [[("✖️ Скасувати", "m:cancel")]])
         return None, await self.home(chat)
 
     async def on_text(self, update, ctx, chat, key, data, text):
+        if key == "mtime":
+            v = text.strip()
+            if v in ("-", "—", "ні", "0"):
+                self.set_morning(chat, None)
+                return "Вранці не надсилатиму", await self.home(chat)
+            m = re.fullmatch(r"(\d{1,2})[:.\s](\d{2})", v)
+            if not m or int(m[1]) > 23 or int(m[2]) > 59:
+                self.ask(chat, "mtime")
+                return None, ("Не зрозумів час. Напишіть як <code>07:15</code> або «-».", [[("✖️ Скасувати", "m:cancel")]])
+            hm = f"{int(m[1]):02d}:{m[2]}"
+            self.set_morning(chat, hm)
+            return f"🌅 Щодня о {hm}", await self.home(chat)
         if key != "city":
             return None, None
         try:
