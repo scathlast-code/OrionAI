@@ -3687,14 +3687,59 @@ def _button(t, d):
 PAIR_MAX = 18  # видимих символів для кнопки «пів ширини» на iPhone
 
 
+ROW_MAX = 34  # видимих символів на всю ширину рядка кнопок на iPhone
+_FILLER = [(r"\s*\([^)]*\)", ""), (r"\s+з інтернету\b", ""), (r"\s+докладно\b", ""), (r"\s+на тему\b", ""), (r"\bНалаштування\b", "Налашт."),
+           (r"\bПовідомлення\b", "Повідомл."), (r"\bзавантаження\b", "завантаж."), (r"\bЗавантаження\b", "Завантаж."),
+           (r"\bінформація\b", "інфо"), (r"\bІнформація\b", "Інфо"), (r"\s+усіх\b", "")]
+_ICON_RE = re.compile(r"^([^\w«»\s]+)\s*(.*)$", re.S)
+
+
+def short_label(t, budget):
+    """Скорочує підпис кнопки під ширину: прибирає дужки й зайві слова, далі — до першого слова з іконкою, далі — лише іконка."""
+    t = str(t)
+    if len(t) <= budget:
+        return t
+    for rx, rep in _FILLER:
+        t2 = re.sub(rx, rep, t).strip()
+        if t2:
+            t = t2
+        if len(t) <= budget:
+            return t
+    m = _ICON_RE.match(t)
+    icon, rest = (m.group(1).strip(), m.group(2)) if m else ("", t)
+    words = rest.split()
+    out = icon
+    for w in words:
+        cand = (out + " " + w).strip()
+        if len(cand) > budget:
+            break
+        out = cand
+    out = out.rstrip(",;:·—- ")
+    if out and out != icon:
+        return out
+    if icon and budget <= 6:
+        return icon
+    return (t[: max(1, budget - 1)].rstrip() + "…") if not icon else (icon + " " + rest[: max(1, budget - len(icon) - 2)].rstrip() + "…")
+
+
 def _fit_button_rows(rows):
     out = []
     for row in rows:
         row = [(str(t), d) for t, d in row]
-        if len(row) == 2 and any(len(t) > PAIR_MAX for t, _ in row) and not any(d.startswith(("m:nav:", "m:prm:", "m:pv")) for _, d in row):
-            out.extend([[x] for x in row])
-        else:
+        fixed = any(d.startswith(("m:nav:", "m:prm:", "m:pv", "m:noop")) for _, d in row)
+        if fixed:
             out.append(row)
+            continue
+        if len(row) == 1:
+            out.append([(short_label(row[0][0], ROW_MAX), row[0][1])])
+        elif len(row) == 2:  # пара: довгі — кожну на свій рядок (так назви лишаються повними й різними)
+            if any(len(t) > PAIR_MAX for t, _ in row):
+                out.extend([[x] for x in row])
+            else:
+                out.append(row)
+        else:
+            budget = max(4, ROW_MAX // len(row))
+            out.append([(short_label(t, budget), d) for t, d in row])
     return out
 
 

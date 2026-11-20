@@ -280,6 +280,8 @@ function drawRows(parent, rows, H){
         const h=Array.isArray(rh)?rh[bi]:'';const sm=makeCap(h);if(sm)b.appendChild(sm);
         longPress(b,t,typeof rh==='string'?rh:h);b.onclick=()=>press(t,d);g.appendChild(b)});
       parent.appendChild(g);
+      requestAnimationFrame(()=>g.querySelectorAll('button').forEach(b=>{  // не влазить — лишаємо іконку, повна назва — довгим натиском і в підказці
+        if(b.scrollWidth>b.clientWidth+1){const ic=split(b.textContent).icon;if(ic){b.title=b.textContent;b.firstChild.textContent=ic}}}));
       if(typeof rh==='string'&&rh){const c=document.createElement('div');c.className='rowhint';c.textContent=rh;c.dataset.fit='1';c.dataset.max='11';parent.appendChild(c)}
       return}
     row.forEach(([t,d],bi)=>{

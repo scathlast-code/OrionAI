@@ -90,6 +90,30 @@ SOCIAL_KEYS_HELP = (
 )
 
 
+URL_RE = re.compile(r"https?://[^\s<>\"')\]]+")
+
+
+def _dom(u):
+    m = re.match(r"https?://(?:www\.)?([^/:?#]+)", u)
+    return m.group(1) if m else u[:30]
+
+
+def linkify(text):
+    """Текст із «голими» адресами → HTML з гіперпосиланнями (назва сайту замість довгої адреси)."""
+    out, pos = [], 0
+    for m in URL_RE.finditer(text or ""):
+        url = m.group(0).rstrip(".,;:!?")
+        out.append(esc(text[pos:m.start()]))
+        out.append(f'<a href="{esc(url)}">{esc(_dom(url))}</a>')
+        pos = m.start() + len(url)
+    out.append(esc((text or "")[pos:]))
+    return "".join(out)
+
+
+def src_links(sources, sep=" · "):
+    return sep.join(f'<a href="{esc(s)}">{esc(_dom(s))}</a>' if str(s).startswith("http") else esc(s) for s in sources)
+
+
 class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Base):
     id = "news"
     icon = "📰"
@@ -962,14 +986,14 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
         head = f"{URGENCY.get(d['urgency'], '')}{'🧾 Зведення' if d['kind'] == 'digest' else '📰 Новина'} #{d['id']} · {STATUS.get(d['status'], d['status'])} · v{d['version']}"
         meta = " · ".join(x for x in [d["region"], d["category"]] if x)
         ln = f"📏 {n} символів" + (f" із {d['target']} {'✅' if n == d['target'] else '❌'}" if d["target"] else "")
-        parts = [head, "", f"<b>{esc(d['headline'])}</b>", "", esc(d["body"])[:2600], ""]
+        parts = [head, "", f"<b>{esc(d['headline'])}</b>", "", linkify(d["body"][:2600]), ""]
         if meta:
             parts.append("🗺 " + esc(meta))
         parts.append(ln + (f" · 🤖 {esc(d['model'])}" if d["model"] else ""))
         if d["unconfirmed"]:
             parts.append("⚠️ Не підтверджено: " + esc("; ".join(d["unconfirmed"]))[:400])
         if d["sources"]:
-            parts.append("🔗 " + esc(" · ".join(d["sources"]))[:400])
+            parts.append("🔗 " + src_links(d["sources"][:6]))
         if d["notes"]:
             parts.append("📝 " + esc(d["notes"])[:400])
         if d["check_report"]:
@@ -1097,8 +1121,8 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
 
     def setlen_screen(self):
         cur = int(self.store.get("target") or 0)
-        rows = [[(("● " if n == cur else "") + (f"{n} типово" if n else "Вільна типово"), self.cb("setlenv", n)) for n in LENGTHS[:3]],
-                [(("● " if n == cur else "") + f"{n} типово", self.cb("setlenv", n)) for n in LENGTHS[3:]],
+        rows = [[(("● " if n == cur else "") + (f"📌{n}" if n else "📌Вільна"), self.cb("setlenv", n)) for n in LENGTHS[:3]],
+                [(("● " if n == cur else "") + f"📌{n}", self.cb("setlenv", n)) for n in LENGTHS[3:]],
                 [("« Як писати", self.cb("H3"))]]
         return "📏 <b>Довжина нових новин</b>\n\nЗастосовується до матеріалів, що надійдуть після зміни.", rows
 
@@ -1458,12 +1482,9 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
         await self.host.notify(chat, *self.card(did))
 
     def post_html(self, d):
-        parts = [f"<b>{esc(d['headline'])}</b>", "", esc(d["body"])]
+        parts = [f"<b>{esc(d['headline'])}</b>", "", linkify(d["body"])]
         if self.store.get("show_sources") and d["sources"] and d["kind"] == "news":
-            links = []
-            for s in d["sources"][:4]:
-                links.append(f'<a href="{esc(s)}">джерело</a>' if s.startswith("http") else esc(s))
-            parts += ["", "Джерела: " + ", ".join(links)]
+            parts += ["", "Джерела: " + src_links(d["sources"][:4], ", ")]
         sig = self.store.get("signature")
         if sig:
             parts += ["", esc(sig)]
