@@ -1008,7 +1008,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
         if d["status"] in ("draft", "length_mismatch"):
             rows.append([("✅ Схвалити", self.cb("ok", i)), ("🔁 Переписати", self.cb("rw", i)), ("✍️ Правка", self.cb("ed", i))])
         rows += self.action_rows(i)          # 🧩 ваші програмовані кнопки
-        rows.append([("⋯ Ще", self.cb("more", i)), ("« Чернетки", self.cb("ls", "new"))])
+        rows.append([("🌐 Переклад", self.cb("tr", i)), ("⋯ Ще", self.cb("more", i)), ("« Чернетки", self.cb("ls", "new"))])
         return text, rows
 
     def len_screen(self, did):
@@ -1285,6 +1285,13 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
             self._bg(self._check(chat, int(x)))
             return "🔎 Звіряю…", ("🔎 <b>Звіряю з вебпошуком</b> — звіт додасться до чернетки й прийде окремим повідомленням.",
                                  [[("« Чернетка", self.cb("d", x))]])
+        if a == "tr":  # 🌐 переклад чернетки будь-якою мовою (бот надішле переклад окремим повідомленням)
+            d = self.store.draft(int(x))
+            ts = self.host.extra.get("translate_screen")
+            if not d or not ts:
+                return "Переклад недоступний", self.card(int(x))
+            t, r = ts(f"{d['headline']}\n\n{d['body']}", f"🌐 <b>Переклад новини #{d['id']}</b> — оберіть мову:")
+            return None, (t, r + [[("« Чернетка", self.cb("d", x))]])
         if a in ("obh", "obt", "obc", "obd", "ob", "obw", "obz", "obx", "obu", "obm", "oba", "obi", "obl", "obs", "obup", "obws", "obwt",
                  "obf", "obv", "obr", "obp", "obe", "oby", "obn", "obg", "obj"):
             return await self.obs_route(chat, a, x, y)
