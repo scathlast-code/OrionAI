@@ -3174,6 +3174,49 @@ def scr_mdtest():
     return text[:4000], [[("🔄 Перевірити ще раз", "m:mdtest:go"), ("« Моделі", "m:md")]]
 
 
+AVA_PRESETS = ["🤖", "✨", "🧠", "🦉", "🦊", "🐙", "🔮", "🚀", "🌿", "🐝", "🦄", "🐺", "🌟", "⚡", "🎓", "🛰", "🐱", "🐼", "👾", "🧙"]
+AVA_COLORS = ["#4f7cff", "#277055", "#93D09B", "#e0794e", "#8e5bd8", "#d84b6a", "#2aa3b8", "#555b66"]
+
+
+def avatars(chat_id):
+    return dict(prefs(chat_id).get("avatars") or {})
+
+
+def set_avatar(chat_id, pid, val):
+    a = avatars(chat_id)
+    if val is None:
+        a.pop(pid, None)
+    else:
+        a[pid] = val
+    set_pref(chat_id, "avatars", a)
+
+
+def avatar_from_photo(data: bytes):
+    """Своя аватарка: квадрат 128×128 JPEG (кілька КБ) — зберігається в налаштуваннях людини."""
+    from PIL import Image, ImageOps
+    im = ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert("RGB")
+    side = min(im.size)
+    im = im.crop(((im.width - side) // 2, (im.height - side) // 2, (im.width + side) // 2, (im.height + side) // 2)).resize((128, 128))
+    out = io.BytesIO()
+    im.save(out, "JPEG", quality=82)
+    return "data:image/jpeg;base64," + base64.b64encode(out.getvalue()).decode()
+
+
+def scr_avatar(chat_id, pid):
+    title = PROVIDERS.get(pid, {}).get("title", pid)
+    cur = avatars(chat_id).get(pid) or {}
+    now = cur.get("e") or ("своя картинка" if cur.get("img") else "стандартна (логотип)")
+    text = (f"🎭 <b>Аватарка · {esc(title)}</b>\n\nЯк ця модель виглядає в розмові застосунку. Зараз: <b>{esc(now)}</b>.\n"
+            "Оберіть значок і колір нижче, надішліть свою картинку або поверніть стандартну. Бачите лише ви.")
+    btn = [(e + (" ✓" if cur.get("e") == e else ""), f"m:ava:{pid}:e{i}") for i, e in enumerate(AVA_PRESETS)]
+    rows = [btn[i:i + 5] for i in range(0, len(btn), 5)]
+    rows.append([(("●" if cur.get("c") == c else "○") + f" {i + 1}", f"m:ava:{pid}:c{i}") for i, c in enumerate(AVA_COLORS[:4])])
+    rows.append([(("●" if cur.get("c") == c else "○") + f" {i + 5}", f"m:ava:{pid}:c{i + 4}") for i, c in enumerate(AVA_COLORS[4:])])
+    rows.append([("📷 Своя картинка", f"m:ava:{pid}:img"), ("↩️ Стандартна", f"m:ava:{pid}:reset")])
+    rows.append([("« Модель", f"m:minfo:{pid}")])
+    return text, rows
+
+
 def scr_model_info(chat_id, pid):
     """Картка моделі (торкання аватарки в розмові застосунку): стан, ліміти й налаштування."""
     if pid not in PROVIDERS:
@@ -3193,7 +3236,8 @@ def scr_model_info(chat_id, pid):
         ("● Вже відповідає вона" if mode == "one" and cur == pid else "▶️ Відповідає лише вона")
     rows = [[(pick, f"m:pick:{pid}"), ("🔁 Авто", "m:pick:auto")],
             [("🔄 Оновити ліміти", f"m:minfo:{pid}"), ("🩺 Перевірити", "m:mdtest")],
-            [("⚙️ Усі моделі й режими", "m:md"), ("ℹ️ Про модель", f"help:m:{pid}")]]
+            [("🎭 Аватарка", f"m:ava:{pid}"), ("ℹ️ Про модель", f"help:m:{pid}")],
+            [("⚙️ Усі моделі й режими", "m:md")]]
     return text[:4000], rows
 
 
@@ -7729,6 +7773,24 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         screen = scr_limits(arg)
     elif a == "st":
         screen = scr_settings(chat_id)
+    elif a == "ava":  # 🎭 аватарка моделі (для застосунку)
+        pid = arg or ""
+        sub = parts[3] if len(parts) > 3 else ""
+        if sub.startswith("e") and sub[1:].isdigit() and int(sub[1:]) < len(AVA_PRESETS):
+            cur = avatars(chat_id).get(pid) or {}
+            set_avatar(chat_id, pid, {"e": AVA_PRESETS[int(sub[1:])], "c": cur.get("c") or AVA_COLORS[0]})
+        elif sub.startswith("c") and sub[1:].isdigit() and int(sub[1:]) < len(AVA_COLORS):
+            cur = dict(avatars(chat_id).get(pid) or {})
+            cur["c"] = AVA_COLORS[int(sub[1:])]
+            cur.setdefault("e", "" if cur.get("img") else "🤖")
+            set_avatar(chat_id, pid, cur)
+        elif sub == "reset":
+            set_avatar(chat_id, pid, None)
+        elif sub == "img":
+            ask_input(chat_id, "avaimg", pid)
+            screen = ("📷 Надішліть картинку (фото) — зроблю з неї круглу аватарку для моделі.", [CANCEL_ROW])
+        if sub != "img":
+            screen = scr_avatar(chat_id, pid)
     elif a == "tclr":  # 🧹 скасувати всі «❓ чекають рішення» (питання без відповіді)
         n = 0
         for t in tasks_open(chat_id=chat_id, status="choice"):
@@ -9839,6 +9901,15 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         mid = improve.add(update.effective_user.id, "reply", L.current(chat_id) or "", "повідомлення бота", "",
                           (r.text or r.caption or "")[:300], msg.text.lstrip()[1:].strip())
         return await msg.reply_text(f"💡 Додано в «Покращити» #{mid}")
+    if msg.photo and (AWAIT.get(chat_id) or ("",))[0] == "avaimg":  # 📷 своя аватарка моделі
+        pid = AWAIT.pop(chat_id)[1]
+        try:
+            data = bytes(await (await msg.photo[-1].get_file()).download_as_bytearray())
+            set_avatar(chat_id, pid, {"img": await asyncio.to_thread(avatar_from_photo, data)})
+            await msg.reply_text("🎭 Готово — нова аватарка вже в застосунку.")
+        except Exception:  # noqa: BLE001
+            await msg.reply_text("Не вдалося обробити картинку — спробуйте інше фото.")
+        return await show(update, *scr_avatar(chat_id, pid), edit=False)
     if msg.text and msg.reply_to_message and DEL_RE.match(msg.text):  # 🗑 відповідь «видали» — прибрати і з чату, і з застосунку
         n, _f = await delete_everywhere(ctx.bot, chat_id, tg_ids=[msg.reply_to_message.message_id, msg.message_id])
         note = await ctx.bot.send_message(chat_id, "🗑 Видалено й з розмови в застосунку." if n else "🗑 Видалено з чату (у розмові застосунку його не було).",
