@@ -477,6 +477,9 @@ def migrate_db():
             "CREATE TABLE IF NOT EXISTS journal (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, dialog_id INTEGER, prompt TEXT NOT NULL, "
             "status TEXT NOT NULL, kind TEXT, task_id INTEGER, provider TEXT, attempts TEXT, result TEXT, created REAL NOT NULL, updated REAL)"
         )
+        con.execute("CREATE TABLE IF NOT EXISTS msg_links (db_id INTEGER NOT NULL, chat_id INTEGER NOT NULL, tg_id INTEGER NOT NULL)")
+        con.execute("CREATE INDEX IF NOT EXISTS msg_links_tg ON msg_links(chat_id, tg_id)")
+        con.execute("CREATE INDEX IF NOT EXISTS msg_links_db ON msg_links(db_id)")
         dcols = [r[1] for r in con.execute("PRAGMA table_info(dialogs)")]
         for col, typ in (("summary", "TEXT"), ("summary_upto", "INTEGER")):
             if col not in dcols:
@@ -893,6 +896,36 @@ def purge_old_trash():
 # ---------------------------------------------------------------- повідомлення
 
 
+def link_msg(db_id, chat_id, tg_ids):
+    """Зв'язати рядок розмови з повідомленнями в Telegram — щоб видалення в застосунку прибирало їх і в чаті, і навпаки."""
+    ids = [int(t) for t in (tg_ids or []) if isinstance(t, int) or str(t).isdigit()]
+    if not db_id or not ids:
+        return
+    with closing(db()) as con, con:
+        con.executemany("INSERT INTO msg_links(db_id, chat_id, tg_id) VALUES (?,?,?)", [(db_id, chat_id, t) for t in ids])
+
+
+async def delete_everywhere(bot, chat_id, db_ids=(), tg_ids=()):
+    """🗑 Прибрати повідомлення з розмови (і з застосунку) та з чату з ботом. Telegram дозволяє видаляти лише свіже (до 48 год)."""
+    db_ids, tg_ids = {int(x) for x in db_ids}, {int(x) for x in tg_ids}
+    with closing(db()) as con, con:
+        if tg_ids:
+            q = ",".join("?" * len(tg_ids))
+            db_ids |= {r[0] for r in con.execute(f"SELECT db_id FROM msg_links WHERE chat_id=? AND tg_id IN ({q})", (chat_id, *tg_ids))}
+        if db_ids:
+            q = ",".join("?" * len(db_ids))
+            tg_ids |= {r[0] for r in con.execute(f"SELECT tg_id FROM msg_links WHERE db_id IN ({q})", tuple(db_ids))}
+            con.execute(f"DELETE FROM messages WHERE chat_id=? AND id IN ({q})", (chat_id, *db_ids))
+            con.execute(f"DELETE FROM msg_links WHERE db_id IN ({q})", tuple(db_ids))
+    failed = 0
+    for t in tg_ids:
+        try:
+            await bot.delete_message(chat_id, t)
+        except Exception:  # noqa: BLE001 — старіше 48 год або вже видалене
+            failed += 1
+    return len(db_ids), failed
+
+
 def save_message(chat_id, role, text, source="telegram", provider=None, dialog_id=None):
     did = dialog_id or current_dialog(chat_id)
     with closing(db()) as con, con:
@@ -904,7 +937,7 @@ def save_message(chat_id, role, text, source="telegram", provider=None, dialog_i
         if role == "user":  # перше питання стає назвою нової розмови
             con.execute(
                 "UPDATE dialogs SET title=? WHERE id=? AND title='Нова розмова'",
-                (text.replace("\n", " ")[:40] or "Нова розмова", did),
+                (nice_title(text), did),
             )
     return mid
 
@@ -4514,9 +4547,48 @@ def remember_time(title, sec):
         pass
 
 
+URL_ONLY_RE = re.compile(r"^\s*(https?://\S+)")
+
+
+def nice_title(text, n=40):
+    """Назва розмови з першого питання. Якщо це посилання — не сира адреса (обрізана, вона не відкривається й виглядає погано),
+    а «🔗 сайт · слова з адреси», без https://, щоб Telegram не робив з неї бите посилання."""
+    t = (text or "").replace("\n", " ").strip()
+    m = URL_ONLY_RE.match(t)
+    if not m:
+        return t[:n] or "Нова розмова"
+    url = m.group(1)
+    host = re.sub(r"^www\.", "", re.sub(r"^https?://", "", url).split("/")[0])
+    rest = t[m.end():].strip()
+    if rest:
+        return f"🔗 {host} · {rest}"[:n]
+    slug = [p for p in re.split(r"[/?#=&]", re.sub(r"^https?://[^/]+", "", url)) if p]
+    words = re.sub(r"[-_+.]+", " ", slug[-1] if slug else "")
+    words = re.sub(r"\b[a-z]?\d{3,}\b|\bhtml?\b|\bphp\b", "", words).strip()
+    return (f"🔗 {host} · {words}" if words else f"🔗 {host}")[:n]
+
+
+async def title_from_page(did, url):
+    """Розмова почалась із посилання — підставляємо справжній заголовок сторінки замість слів з адреси."""
+    try:
+        async with httpx.AsyncClient(timeout=6, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as c:
+            r = await c.get(url)
+        html_ = r.text[:200000]
+        m = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)', html_) or re.search(r"<title[^>]*>([^<]+)</title>", html_, re.I)
+        if not m:
+            return
+        title = re.sub(r"\s+", " ", __import__("html").unescape(m.group(1))).strip()[:56]
+        if title:
+            with closing(db()) as con, con:
+                con.execute("UPDATE dialogs SET title=? WHERE id=? AND title LIKE '🔗 %'", ("🔗 " + title, did))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def dialog_name(did):
     d = dialog_get(did) if did else None
-    return (d or {}).get("title") or f"Розмова #{did}"
+    t = (d or {}).get("title") or f"Розмова #{did}"
+    return nice_title(t, 60) if URL_ONLY_RE.match(t) else t
 
 
 def busy_elsewhere(chat_id, did):
@@ -9339,6 +9411,12 @@ async def _answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE, content, histo
     use_prefs(chat_id)
     await ctx.bot.send_chat_action(chat_id, ChatAction.TYPING)
     msg_id = save_message(chat_id, "user", history_text, dialog_id=did)
+    um = update.effective_message
+    if isinstance(getattr(um, "message_id", None), int):
+        link_msg(msg_id, chat_id, [um.message_id])
+    um_url = URL_ONLY_RE.match(history_text or "")
+    if um_url and dialog_name(did).startswith("🔗 "):
+        asyncio.get_running_loop().create_task(title_from_page(did, um_url.group(1)))
     try:
         text, pid, attempts, warnings = await ask_llm(
             load_history(chat_id, before_id=msg_id, dialog_id=did), content, preferred,
@@ -9371,7 +9449,8 @@ async def _answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE, content, histo
         NOTE_SWITCH[chat_id] = f"↪️ {PROVIDERS[preferred]['title']} зараз не може ({why}) — відповідає {PROVIDERS.get(pid, {}).get('title', pid)}."
     else:
         NOTE_SWITCH.pop(chat_id, None)
-    save_message(chat_id, "assistant", ((NOTE_SWITCH[chat_id] + "\n\n") if chat_id in NOTE_SWITCH else "") + text, provider=pid, dialog_id=did)
+    aid = save_message(chat_id, "assistant", ((NOTE_SWITCH[chat_id] + "\n\n") if chat_id in NOTE_SWITCH else "") + text, provider=pid, dialog_id=did)
+    sent_tok = appfeed.SENT.set([])  # id повідомлень відповіді — щоб видалення в застосунку прибирало їх і з чату
     outcome = answer_outcome(text)
     if jid and outcome != "done":
         journal_update(jid, status=outcome)
@@ -9393,6 +9472,8 @@ async def _answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE, content, histo
     else:
         await send_long(ctx.bot, chat_id, demarkdown(body), head=top, foot=foot, html=md_html(body))
     await send_media(ctx.bot, chat_id, MEDIA.get())
+    link_msg(aid, chat_id, appfeed.SENT.get() or [])
+    appfeed.SENT.reset(sent_tok)
     if away or (parallel and outcome != "done") or (time.time() - started > 60 and outcome == "done" and away):
         await finish_note(ctx.bot, chat_id, did, outcome, jid=jid, pid=pid, q=history_text)
     elif outcome == "refused" and jid:
@@ -9702,6 +9783,16 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         mid = improve.add(update.effective_user.id, "reply", L.current(chat_id) or "", "повідомлення бота", "",
                           (r.text or r.caption or "")[:300], msg.text.lstrip()[1:].strip())
         return await msg.reply_text(f"💡 Додано в «Покращити» #{mid}")
+    if msg.text and msg.reply_to_message and DEL_RE.match(msg.text):  # 🗑 відповідь «видали» — прибрати і з чату, і з застосунку
+        n, _f = await delete_everywhere(ctx.bot, chat_id, tg_ids=[msg.reply_to_message.message_id, msg.message_id])
+        note = await ctx.bot.send_message(chat_id, "🗑 Видалено й з розмови в застосунку." if n else "🗑 Видалено з чату (у розмові застосунку його не було).",
+                                          disable_notification=True)
+        await asyncio.sleep(4)
+        try:
+            await note.delete()
+        except Exception:  # noqa: BLE001
+            pass
+        return
     bug = BUG_RE.match(msg.text or msg.caption or "")
     if bug or (msg.photo and not msg.caption and chat_id in BUG_WAIT and time.time() - BUG_WAIT[chat_id][1] < 600):
         note = (msg.text or msg.caption or "")[bug.end():].strip() if bug else ""
@@ -9787,6 +9878,7 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await answer(update, ctx, content, text, preferred)
 
 
+DEL_RE = re.compile(r"(?i)^\s*(🗑|🗑️|видали(ти)?|видалити|delete|del)\s*[.!]?\s*$")
 BUG_RE = re.compile(r"(?i)^\s*(?:(?P<bug>🐞|баг\b|bug\b|помилка\s*:)|(?P<wish>ідея\b|побажання\b|покращення\b|покращити\s*:))\s*[:—–-]?\s*")
 BUG_KINDS = {(True, False): "🐞 помилка", (False, True): "💡 побажання", (True, True): "🐞💡 помилка й побажання", (False, False): "🐞 помилка"}
 BUG_WAIT = {}  # чат -> (id позначки, час): наступний скриншот без підпису прикріпиться до неї
