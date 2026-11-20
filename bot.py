@@ -4686,6 +4686,28 @@ LAST_SCREEN = {}  # чат -> (екран, текст екрана, кнопки
 SCREEN_CTX_TTL = 20 * 60
 
 
+SETTINGS_SCREENS = ("m:st", "m:hub:st", "m:set", "m:ntf", "m:hub:btns", "m:btn", "m:acc", "m:backup", "m:lb", "m:hub:svc", "m:svc",
+                    "m:hub:diag", "m:diag", "m:rm", "m:pl", "m:lnk", "m:fr", "m:md", "m:hub:md", "m:imp")
+SETTINGS_DIALOG = "⚙️ Налаштування бота"
+
+
+def settings_dialog(chat_id):
+    """Окрема розмова «⚙️ Налаштування бота»: усе, що людина питає з меню налаштувань, іде туди, а не в поточну тему."""
+    with closing(db()) as con:
+        r = con.execute("SELECT id FROM dialogs WHERE chat_id=? AND title=? AND COALESCE(state,'active')='active' ORDER BY id LIMIT 1",
+                        (chat_id, SETTINGS_DIALOG)).fetchone()
+    if r:
+        return r["id"]
+    prev = current_dialog(chat_id)
+    did = dialog_create(chat_id, SETTINGS_DIALOG)
+    set_pref(chat_id, "dialog", prev)  # створення не перемикає — це вирішує той, хто кличе
+    return did
+
+
+def is_settings_screen(screen):
+    return bool(screen) and any(screen == p or screen.startswith(p + ":") for p in SETTINGS_SCREENS) and not screen.startswith("m:pl:")
+
+
 def screen_note(chat_id):
     """Людина пише боту, стоячи в якомусь розділі (погода, теми дня, медіа…) — даємо ШІ цей контекст, щоб відповідь була по темі.
     Використовується один раз: далі розмова вже має цю тему в історії."""
@@ -9754,6 +9776,13 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if quote:
             content = quote_note(quote) + content
             text = f"↩️ «{short_q(quote.replace(chr(10), ' '), 120)}»\n{text}"
+        sc = LAST_SCREEN.get(chat_id)
+        if sc and time.time() - sc[3] < SCREEN_CTX_TTL and is_settings_screen(sc[0]):  # ⚙️ розмова з меню налаштувань — в окремий діалог
+            prev, sdid = current_dialog(chat_id), settings_dialog(chat_id)
+            if prev != sdid:
+                set_pref(chat_id, "dialog", sdid)
+                await msg.reply_text(f"⚙️ Це питання про налаштування — веду його в окремій розмові «{SETTINGS_DIALOG}», щоб не змішувати з темою "
+                                     f"«{short_q(dialog_name(prev), 30)}».", reply_markup=kb([[(f"↩️ Назад у «{short_q(dialog_name(prev), 22)}»", f"m:dsw:{prev}")]]))
         content = screen_note(chat_id) + content  # 🧭 пише з якогось розділу — відповідь по темі розділу
         await answer(update, ctx, content, text, preferred)
 
