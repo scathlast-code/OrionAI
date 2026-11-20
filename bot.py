@@ -2329,6 +2329,7 @@ ITEMS = {
     "med": ("📥 Медіа", "m:pl:med"),
     "wx": ("🌤 Погода", "m:pl:wx"),
     "col": ("📥 Збір текстів", "m:col"),
+    "sp": ("🤝 Простори", "m:sp"),
     "sbx": ("🧪 Пісочниця", "m:sbx"),
     "imp": ("💡 Покращити", "m:imp"),
     "inbox": ("📮 Скринька", "m:pl:inb"),
@@ -2343,7 +2344,7 @@ DEFAULT_GROUPS = {
 }
 DEFAULT_LAYOUT = [
     ["g:work", "home"], ["g:plugins", "home"], ["g:ai", "home"], ["g:settings", "home"],
-    ["dl", "g:work"], ["tl", "g:work"], ["nt", "g:work"], ["col", "g:work"], ["pins", "g:work"], ["inbox", "g:work"],
+    ["dl", "g:work"], ["tl", "g:work"], ["nt", "g:work"], ["col", "g:work"], ["sp", "g:work"], ["pins", "g:work"], ["inbox", "g:work"],
     ["news", "g:plugins"], ["utm", "g:plugins"], ["stk", "g:plugins"], ["med", "g:plugins"], ["wx", "g:plugins"],
     ["md", "g:ai"], ["cr", "g:ai"],
     ["st", "g:settings"], ["acc", "g:settings"], ["backup", "g:settings"], ["svc", "g:settings"],
@@ -2429,6 +2430,9 @@ def _migrate_compact_menu(chat_id):
         if saved and "col" not in {x[0] for x in saved}:
             pos = next((i + 1 for i, x in enumerate(saved) if x[0] == "nt"), len(saved))
             saved.insert(pos, ["col", "g:work"])
+        if saved and "sp" not in {x[0] for x in saved}:
+            pos = next((i + 1 for i, x in enumerate(saved) if x[0] == "col"), len(saved))
+            saved.insert(pos, ["sp", "g:work"])
             set_pref(chat_id, "layout", saved)
         set_pref(chat_id, "collect_menu_v1", True)
         p = prefs(chat_id)
@@ -3143,6 +3147,81 @@ def generators_report():
 
 SHAPE_OPTS = [("square", "⬜ 1:1"), ("portrait", "📱 4:5"), ("landscape", "🖥 16:9"), ("story", "📲 9:16")]
 LENGTH_OPTS = [("short", "Коротко"), ("normal", "Звичайно"), ("long", "Детально")]
+
+
+def sp_who(uid):
+    m = member_get(uid) or {}
+    return m.get("name") or ("власник" if uid in ALLOWED_USERS else f"ID {uid}")
+
+
+def sp_link(space):
+    return f"https://t.me/{BOT_USERNAME}?start=sp_{space['code']}" if BOT_USERNAME else f"/start sp_{space['code']}"
+
+
+def scr_spaces(chat_id):
+    mine = SPACES.mine(chat_id)
+    text = ("🤝 <b>Спільні простори</b>\n\nРобота разом на відстані: спільні нотатки й завдання, повідомлення всім учасникам "
+            "і запитання до ШІ, відповідь на які отримують усі.\n\nЯк почати: «➕ Створити» → назва → надішліть колегам посилання-запрошення.")
+    rows = [[(f"🤝 {s['name'][:28]} · {len(SPACES.members(s['id']))}", f"m:sp:o:{s['id']}")] for s in mine]
+    if not mine:
+        text += "\n\nПросторів ще немає."
+    rows += [[("➕ Створити простір", "m:sp:new")], [HOME]]
+    return text, rows
+
+
+def scr_space(chat_id, sid):
+    sp = SPACES.get(sid)
+    if not sp or not SPACES.is_member(sid, chat_id):
+        return scr_spaces(chat_id)
+    mem = SPACES.members(sid)
+    notes, tasks = SPACES.items(sid, "note"), SPACES.items(sid, "task")
+    open_t = [t for t in tasks if not t["done"]]
+    lines = [f"🤝 <b>{esc(sp['name'])}</b>", f"👥 {len(mem)}: " + esc(", ".join(sp_who(u) for u in mem[:12])), ""]
+    if open_t or tasks:
+        lines += [f"✅ <b>Завдання</b> · відкритих {len(open_t)} з {len(tasks)}", "<blockquote expandable>" + "\n".join(
+            f"{'☑️' if t['done'] else '▫️'} {esc(t['text'][:120])} — {esc(sp_who(t['author']))}" for t in tasks[:25]) + "</blockquote>"]
+    if notes:
+        lines += [f"📝 <b>Нотатки</b> · {len(notes)}", "<blockquote expandable>" + "\n\n".join(
+            f"{esc(n['text'][:400])}\n<i>— {esc(sp_who(n['author']))}, {datetime.fromtimestamp(n['ts'], TZ):%d.%m %H:%M}</i>" for n in notes[-10:]) + "</blockquote>"]
+    if not notes and not tasks:
+        lines.append("Поки порожньо — додайте першу нотатку чи завдання.")
+    rows = [[("💬 Написати всім", f"m:sp:m:{sid}"), ("🤖 ШІ для всіх", f"m:sp:ai:{sid}")],
+            [("➕ Завдання", f"m:sp:t:{sid}"), ("➕ Нотатка", f"m:sp:n:{sid}")]]
+    if tasks or notes:
+        rows.append([("✏️ Позначити / прибрати", f"m:sp:ed:{sid}")])
+    rows.append([("🔗 Запросити", f"m:sp:inv:{sid}"), ("🚪 Вийти", f"m:sp:lv:{sid}")])
+    if sp["owner"] == chat_id:
+        rows.append([("✏️ Перейменувати", f"m:sp:ren:{sid}"), ("🗑 Видалити простір", f"m:sp:del:{sid}")])
+    rows.append([("« Простори", "m:sp")])
+    return "\n".join(lines)[:4000], rows
+
+
+def scr_space_edit(chat_id, sid):
+    items = SPACES.items(sid, "task") + SPACES.items(sid, "note")
+    lines = ["✏️ <b>Позначити виконаним або прибрати</b>", ""]
+    rows = []
+    for n, it in enumerate(items[:20], 1):
+        mark = ("☑️" if it["done"] else "▫️") if it["kind"] == "task" else "📝"
+        lines.append(f"{n}. {mark} {esc(it['text'][:80])}")
+        row = [(f"🗑 {n}", f"m:sp:d:{sid}:{it['id']}")]
+        if it["kind"] == "task":
+            row.insert(0, (f"{'↩️' if it['done'] else '✅'} {n}", f"m:sp:x:{sid}:{it['id']}"))
+        rows.append(row)
+    rows.append([("« Простір", f"m:sp:o:{sid}")])
+    return "\n".join(lines)[:4000], rows
+
+
+async def sp_broadcast(bot, sid, text, rows=None, exclude=None):
+    """Надіслати всім учасникам простору (тип сповіщень «🤝 Спільні простори»)."""
+    with notify.kind("space"):
+        for uid in SPACES.members(sid):
+            if uid == exclude or not notify.wanted(uid, "space"):
+                continue
+            try:
+                await bot.send_message(uid, text[:4096], parse_mode=ParseMode.HTML, reply_markup=kb(rows) if rows else None,
+                                       link_preview_options=NO_PREVIEW)
+            except Exception as exc:  # noqa: BLE001
+                log.info("простір %s → %s: %s", sid, uid, exc)
 
 
 def scr_collect(chat_id):
@@ -5103,6 +5182,9 @@ import appfeed  # noqa: E402
 import notify  # noqa: E402
 import collect as collect_mod  # noqa: E402
 
+import spaces as spaces_mod  # noqa: E402
+
+SPACES = spaces_mod.Spaces(__import__("datadir").path("spaces.sqlite3", "ORION_SPACES_DB"))
 COLLECT = collect_mod.Collect(__import__("datadir").path("collected.sqlite3", "ORION_COLLECT_DB"))
 
 notify.setup(lambda cid: prefs(cid).get("notify") or {}, lambda cid, v: set_pref(cid, "notify", v))
@@ -7320,6 +7402,52 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         screen = scr_limits(arg)
     elif a == "st":
         screen = scr_settings(chat_id)
+    elif a == "sp":  # 🤝 спільні простори
+        sid = parts[3] if len(parts) > 3 else ""
+        sp = SPACES.get(sid) if sid.isdigit() else None
+        member = bool(sp) and SPACES.is_member(sid, chat_id)
+        if arg == "new":
+            ask_input(chat_id, "spnew")
+            screen = ("🤝 Як назвати простір? Напр. «Редакція», «Ремонт дачі», «Проєкт Мастор».", [[("✖️ Скасувати", "m:cancel")]])
+        elif arg in ("n", "t", "m", "ai", "ren") and member:
+            ask_input(chat_id, "sp" + arg, int(sid))
+            prompt = {"n": "📝 Текст нотатки — побачать усі учасники.", "t": "✅ Що треба зробити?",
+                      "m": "💬 Повідомлення — прийде всім учасникам простору.",
+                      "ai": "🤖 Питання до ШІ — відповідь прийде всім учасникам разом із питанням.", "ren": "✏️ Нова назва простору."}[arg]
+            screen = (prompt, [[("✖️ Скасувати", "m:cancel")]])
+        elif arg == "ed" and member:
+            screen = scr_space_edit(chat_id, sid)
+        elif arg in ("x", "d") and member and len(parts) > 4:
+            it = SPACES.item(parts[4])
+            if it and str(it["space"]) == sid:
+                (SPACES.toggle if arg == "x" else SPACES.remove)(it["id"])
+            screen = scr_space_edit(chat_id, sid)
+        elif arg == "inv" and member:
+            link = sp_link(sp)
+            screen = (f"🔗 <b>Запрошення в «{esc(sp['name'])}»</b>\n\nНадішліть це посилання колегам:\n<code>{esc(link)}</code>\n\n"
+                      "Приєднатися можуть ті, хто має доступ до бота (новим людям спершу надішліть запрошення в «👥 Доступ»).",
+                      [[("📋 Копіювати", f"copy:{link}"), ("♻️ Нове посилання", f"m:sp:code:{sid}")], [("« Простір", f"m:sp:o:{sid}")]])
+        elif arg == "code" and sp and sp["owner"] == chat_id:
+            SPACES.new_code(sid)
+            toast = "Старе посилання більше не діє"
+            screen = scr_space(chat_id, sid)
+        elif arg == "lv" and member:
+            SPACES.leave(sid, chat_id)
+            if sp["owner"] == chat_id and not SPACES.members(sid):
+                SPACES.delete(sid)
+            toast = "Ви вийшли з простору"
+            screen = scr_spaces(chat_id)
+        elif arg == "del" and sp and sp["owner"] == chat_id:
+            screen = (f"🗑 Видалити простір «{esc(sp['name'])}» разом з усіма нотатками й завданнями? Це не можна скасувати.",
+                      [[("🗑 Так, видалити", f"m:sp:delok:{sid}"), ("« Ні", f"m:sp:o:{sid}")]])
+        elif arg == "delok" and sp and sp["owner"] == chat_id:
+            await sp_broadcast(ctx.bot, sid, f"🗑 Простір «{esc(sp['name'])}» видалено власником.", exclude=chat_id)
+            SPACES.delete(sid)
+            screen = scr_spaces(chat_id)
+        elif arg == "o" and member:
+            screen = scr_space(chat_id, sid)
+        else:
+            screen = scr_spaces(chat_id)
     elif a == "col":  # 📥 режим збору текстів
         sub = arg or ""
         if sub == "on":
@@ -8263,12 +8391,44 @@ async def handle_awaited(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text):
         if screen:
             return await show(update, *screen, edit=False)
         return
+    if act in ("spnew", "spn", "spt", "spm", "spai", "spren"):
+        AWAIT.pop(chat_id, None)
+        return await sp_text(update, ctx, act, data, text)
     if act in ("lren", "bgnew", "brl"):
         AWAIT.pop(chat_id, None)
         screen, tip = handle_editor_text(L, chat_id, act, data, text)
         await update.message.reply_text(tip, reply_markup=menu_kb(chat_id))
         return await show(update, *screen, edit=False)
     return await _handle_awaited(update, ctx, text)
+
+
+async def sp_text(update, ctx, act, sid, text):
+    chat_id = update.effective_chat.id
+    if act == "spnew":
+        sid = SPACES.create(chat_id, text.strip() or "Простір")
+        await update.message.reply_text("🤝 Простір створено. Тепер запросіть колег — кнопка «🔗 Запросити».")
+        return await show(update, *scr_space(chat_id, sid), edit=False)
+    sp = SPACES.get(sid)
+    if not sp or not SPACES.is_member(sid, chat_id):
+        return await show(update, *scr_spaces(chat_id), edit=False)
+    who, name = esc(sp_who(chat_id)), esc(sp["name"])
+    open_rows = [[(f"🤝 {sp['name'][:30]}", f"m:sp:o:{sid}")]]
+    if act == "spren" and sp["owner"] == chat_id:
+        SPACES.rename(sid, text.strip())
+    elif act in ("spn", "spt"):
+        SPACES.add(sid, "note" if act == "spn" else "task", text.strip(), chat_id)
+        what = "📝 нову нотатку" if act == "spn" else "✅ нове завдання"
+        await sp_broadcast(ctx.bot, sid, f"🤝 <b>{name}</b> · {who} додає {what}:\n{esc(text[:1500])}", open_rows, exclude=chat_id)
+    elif act == "spm":
+        await sp_broadcast(ctx.bot, sid, f"🤝 <b>{name}</b> · 💬 {who}:\n{esc(text[:3500])}", open_rows, exclude=chat_id)
+        await update.message.reply_text(f"💬 Надіслано учасникам: {len(SPACES.members(sid)) - 1}")
+    elif act == "spai":
+        await ctx.bot.send_chat_action(chat_id, ChatAction.TYPING)
+        ans, _model = await _plugin_ai(text, system=f"Ти помічник спільного робочого простору «{sp['name']}». Відповідай українською, по суті.",
+                                       label="🤝 Простір: питання до ШІ")
+        await sp_broadcast(ctx.bot, sid, f"🤝 <b>{name}</b> · 🤖 {who} питає ШІ:\n<i>{esc(text[:600])}</i>\n\n{esc((ans or '—')[:3200])}", open_rows)
+        return
+    return await show(update, *scr_space(chat_id, sid), edit=False)
 
 
 async def _handle_awaited(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text):
@@ -8595,6 +8755,18 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text(
             "👋 Вітаю! Запит на доступ надіслано власнику бота. Щойно він підтвердить, я напишу вам."
         )
+    if ctx.args and ctx.args[0].startswith("sp_"):  # 🤝 запрошення в спільний простір
+        sp = SPACES.by_code(ctx.args[0][3:])
+        if not sp:
+            return await update.message.reply_text("Це запрошення в простір недійсне — попросіть нове посилання.")
+        if not allowed(update):
+            return await update.message.reply_text("Щоб приєднатися до простору, спершу потрібен доступ до бота — попросіть у власника запрошення.")
+        new = not SPACES.is_member(sp["id"], user.id)
+        SPACES.join(sp["id"], user.id)
+        if new:
+            await sp_broadcast(ctx.bot, sp["id"], f"🤝 <b>{esc(sp['name'])}</b> · 👋 {esc(sp_who(user.id))} приєднується.", exclude=user.id)
+        L.visit(update.effective_chat.id, f"m:sp:o:{sp['id']}")
+        return await show(update, *scr_space(update.effective_chat.id, sp["id"]), edit=False)
     if not allowed(update):
         return await deny(update)
     chat_id = update.effective_chat.id
@@ -9546,6 +9718,7 @@ if TELEGRAM_TOKEN:
         ("access", screen_cmd("acc")),
         ("backup", screen_cmd("backup")),
         ("collect", screen_cmd("col")),
+        ("spaces", screen_cmd("sp")),
     ]:
         tg_app.add_handler(CommandHandler(name, fn))
     from access_telegram import install as install_access_commands
