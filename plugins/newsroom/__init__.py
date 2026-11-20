@@ -253,6 +253,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
                 log.exception("newsroom worker")
 
     async def _rss_loop(self):
+        __import__("notify").KIND.set("news")  # 🔔 тип сповіщень для режимів людини
         await asyncio.sleep(20)
         while True:
             try:
@@ -624,6 +625,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
         return n, errs
 
     async def _lists_loop(self):
+        __import__("notify").KIND.set("news")  # 🔔 тип сповіщень для режимів людини
         await asyncio.sleep(30)
         while True:
             try:
@@ -644,6 +646,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
         return ok
 
     async def _mt_loop(self):
+        __import__("notify").KIND.set("news")  # 🔔 тип сповіщень для режимів людини
         await asyncio.sleep(10)
         while True:
             try:

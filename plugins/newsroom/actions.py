@@ -226,6 +226,7 @@ class ActionsUI:
         return "\n".join(lines), rows
 
     async def _sched_loop(self):
+        __import__("notify").KIND.set("news")  # 🔔 тип сповіщень для режимів людини
         await asyncio.sleep(40)
         done = set()
         while True:
