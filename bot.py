@@ -44,7 +44,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ChatAction, ParseMode
-from telegram.error import BadRequest
+from telegram.error import BadRequest, NetworkError, TimedOut
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -10688,7 +10688,16 @@ async def main():
     server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="info"))
 
     if tg_app:
-        await tg_app.initialize()
+        for attempt in range(1, 31):  # Telegram на старті може не відповісти (збій мережі Railway) — не падаємо, а пробуємо ще
+            try:
+                await tg_app.initialize()
+                break
+            except (TimedOut, NetworkError) as exc:
+                wait = min(60, 5 * attempt)
+                log.warning("Telegram не відповідає на старті (%s), спроба %d — повтор через %d с", type(exc).__name__, attempt, wait)
+                await asyncio.sleep(wait)
+        else:
+            raise SystemExit("Telegram недоступний 30 спроб поспіль")
         try:
             await tg_app.bot.set_my_commands([BotCommand(c, d) for c, d in COMMANDS])
         except Exception:  # noqa: BLE001
