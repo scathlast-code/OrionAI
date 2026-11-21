@@ -2571,7 +2571,16 @@ ITEMS = {
     "dl": ("💬 Розмови", "m:dl"),
     "tl": ("⏰ Завдання", "m:tl"),
     "cr": ("🎬 Медійка", "m:hub:cr"),
+    "nr": ("📰 Новинарня", "Уся робота з новинами в одному місці: редакція (чати, завдання, люди, звіт), публікації й чернетки, "
+                          "контент-план, UTM-мітки та збір текстів.", [
+        ("🗞 Редакція", "m:pl:red", 6, "all"),
+        ("✍️ Публікації", "m:pl:news", 4, "open"),
+        ("📋 Контент-план", "m:pl:news:obcp", 2, "open"),
+        ("🔗 UTM-мітки", "m:utm", 2, "open"),
+        ("📥 Збір текстів", "m:col", 3, "open"),
+    ]),
     "zap": ("📓 Записник", "m:hub:zap"),
+    "nr": ("📰 Новинарня", "m:hub:nr"),
     "menu": ("☰ Меню", "m:home"),
     "md": ("🤖 ШІ-моделі", "m:hub:md"),
     "qask": ("❓ Спитати модель", "m:qask"),
@@ -2613,13 +2622,12 @@ ITEMS = {
 }
 DEFAULT_GROUPS = {
     "work": "💬 Робота",
-    "news": "📰 Новинарня",
     "settings": "⚙️ Налаштування",
 }
 DEFAULT_LAYOUT = [
     ["today", "home"], ["g:work", "home"], ["g:settings", "home"],
-    ["dl", "g:work"], ["zap", "g:work"], ["g:news", "g:work"], ["sp", "g:work"], ["inbox", "g:work"], ["wx", "g:work"], ["cr", "g:work"],
-    ["red", "g:news"], ["news", "g:news"], ["utm", "g:news"], ["col", "g:news"],
+    ["dl", "g:work"], ["zap", "g:work"], ["nr", "g:work"], ["sp", "g:work"], ["inbox", "g:work"], ["wx", "g:work"], ["cr", "g:work"],
+    ["red", "off"], ["news", "off"], ["utm", "off"], ["col", "off"],  # усе — в одній «📰 Новинарні»
     ["md", "g:settings"], ["pins", "g:settings"], ["acc", "g:settings"], ["backup", "g:settings"], ["svc", "g:settings"],
     ["btns", "g:settings"], ["diag", "g:settings"], ["help", "g:settings"],
     # вкладки об'єднаних розділів: окремо в меню не стоять, але відкриваються з розділу-«хаба» (і їх можна повернути в меню в «🧭 Вигляд»)
@@ -2641,6 +2649,31 @@ def _migrate_compact_menu(chat_id):
         _migrate_menu_v9(chat_id)
         _migrate_menu_v10(chat_id)
         _migrate_menu_v11(chat_id)
+        _migrate_menu_v12(chat_id)
+
+
+def _migrate_menu_v12(chat_id):
+    """«📰 Новинарня» — не тека, а одна кнопка-розділ з усім: Редакція, Публікації, контент-план, UTM-мітки, Збір текстів."""
+    p = prefs(chat_id)
+    if p.get("menu_v12"):
+        return
+    saved = [list(x) for x in (p.get("layout") or [])]
+    if saved:
+        place = next((pl for i, pl in saved if i == "g:news"), "g:work")
+        out = []
+        for i, pl in saved:
+            if i == "g:news":
+                out.append(["nr", place])
+            elif i in ("red", "news", "utm", "col"):
+                out.append([i, "off"])
+            elif i != "nr":
+                out.append([i, pl])
+        if not any(i == "nr" for i, _ in out):
+            out.append(["nr", "g:work"])
+        set_pref(chat_id, "layout", out)
+    groups = {k: v for k, v in (p.get("groups") or DEFAULT_GROUPS).items() if k != "news"}
+    set_pref(chat_id, "groups", groups)
+    set_pref(chat_id, "menu_v12", True)
 
 
 def _migrate_menu_v11(chat_id):
@@ -2705,7 +2738,7 @@ def _migrate_menu_v9(chat_id):
         out += [["red", "g:news"], ["news", "g:news"], ["utm", "g:news"], ["col", "g:news"]]
         set_pref(chat_id, "layout", out)
     groups = dict(p.get("groups") or DEFAULT_GROUPS)
-    groups.setdefault("news", DEFAULT_GROUPS["news"])
+    groups.setdefault("news", "📰 Новинарня")
     set_pref(chat_id, "groups", groups)
     labels = {k: v for k, v in (p.get("labels") or {}).items() if k not in ("news", "inbox", "stk", "med", "cr")}
     set_pref(chat_id, "labels", labels)

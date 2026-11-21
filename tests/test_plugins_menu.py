@@ -35,6 +35,6 @@ def test_menu_migration_adds_plugins_category(tmp_path):
     res = json.loads(out.stdout.strip().splitlines()[-1])
     # меню v8–v9: «🌅 Сьогодні» — першим на головному
     assert res["order"][:2] == ["today", "g:work"]
-    assert res["places"] == {"news": "g:news", "stk": "off", "plg": "off"}  # v9: «Новинарня» й «Медійка»
+    assert res["places"] == {"news": "off", "stk": "off", "plg": "off"}  # v9–v12: усе в «📰 Новинарні» й «🎬 Медійці»
     assert res["view"] == [True, True, False]
     assert res["group"] is None
