@@ -210,6 +210,50 @@ class ObservancesUI:
             done[str(yy)] = "ok" if all_ok else "partial"
         self.store.set("hol_years2", {k: v for k, v in done.items() if int(k) >= y - 1})
 
+    async def ensure_extras(self, d):
+        """🪔 Традиції, 🔭 найближчі астрономічні події, ♈ астрологічні новини, 🌌 сяйво — з джерел, кеш на день (сяйво — 3 год)."""
+        from . import dayextra as X
+        import websearch
+        key = f"dayx:{d.isoformat()}"
+        c = self.store.get(key) or {}
+        if not c.get("done"):
+            trad, tday = await X.traditions(websearch.search_items, d), d
+            k = 1
+            while not trad and k <= 5:  # на сьогодні нічого — найближчі дні (з позначкою «не на сьогодні»)
+                tday = d + dt.timedelta(days=k)
+                trad = await X.traditions(websearch.search_items, tday)
+                k += 1
+            c.update(trad=trad, trad_day=tday.isoformat() if trad else "", astro=await X.astro_news(websearch.search_items, d),
+                     astrol=await X.astrol_news(websearch.search_items, d), done=1)
+        if time.time() - (c.get("aurora_t") or 0) > 3 * 3600:
+            async def get(url):
+                async with httpx.AsyncClient(timeout=15) as cl:
+                    r = await cl.get(url)
+                    r.raise_for_status()
+                    return r.json()
+            try:
+                c["aurora"] = await X.aurora(get)
+            except Exception:  # noqa: BLE001
+                c["aurora"] = c.get("aurora")
+            c["aurora_t"] = time.time()
+        self.store.set(key, c)
+        return c
+
+    def extras_bg(self, d):
+        t = getattr(self, "_extras_task", None)
+        if t and not t.done():
+            return
+
+        async def go():
+            try:
+                await self.ensure_extras(d)
+            except Exception:  # noqa: BLE001
+                log.info("традиції/астрономія: збір не вдався", exc_info=True)
+        try:
+            self._extras_task = asyncio.get_running_loop().create_task(go())
+        except RuntimeError:
+            pass
+
     def holidays_bg(self):
         """Звірка рухомих свят — у фоні (пошук займає час), не частіше ніж раз на 6 год."""
         if time.time() - (getattr(self, "_hol_t", 0) or 0) < 6 * 3600:
@@ -510,14 +554,33 @@ class ObservancesUI:
                 if len(items) > cap:
                     body.append(f"… ще {len(items) - cap} — у «📝 Списки»")
                 out.append((cat, DB.CATS[cat][0], [x for x in body if x]))
+        x = self.store.get(f"dayx:{d.isoformat()}") or {}
+        if notes is not None and x.get("trad"):  # 🪔 традиції з джерел (якщо в списку дня їх ще немає)
+            same = x.get("trad_day") == d.isoformat()
+            tday = dt.date.fromisoformat(x["trad_day"]) if x.get("trad_day") else d
+            body = [f"• {esc(it['text'])}" + notes.mark(it["url"], it["host"]) for it in x["trad"][:8]]
+            head_ = DB.CATS["trad"][0] + ("" if same else f" · на {tday.day} {MONTHS_GEN[tday.month - 1]} (не на сьогодні)")
+            if not any(k == "trad" for k, _t, _l in out):
+                out.insert(1 if out and out[0][0] == "days" else 0, ("trad", head_, body))
+        elif notes is not None and not x.get("done") and not any(k == "trad" for k, _t, _l in out):
+            self.extras_bg(d)
         astro = DB.astro_lines(d, self.host.tz)
         if notes is not None:
-            astro = [x + notes.mark("https://gml.noaa.gov/grad/solcalc/", "NOAA") for x in astro]  # розрахунок за формулами NOAA
+            astro = [ln + notes.mark("https://gml.noaa.gov/grad/solcalc/", "NOAA") for ln in astro]  # розрахунок за формулами NOAA
+            if x.get("aurora"):
+                astro.append("🌌 " + esc(x["aurora"]["text"]) + notes.mark(x["aurora"]["url"], x["aurora"]["host"]))
+            if x.get("astro"):
+                astro += ["", "<b>Найближчим часом:</b>"] + [
+                    (f"📅 {it['date'][8:10]}.{it['date'][5:7]} · " if it.get("date") else "• ") + esc(it["text"]) + notes.mark(it["url"], it["host"])
+                    for it in x["astro"][:10]]
         out.append(("astro", DB.CATS["astro"][0], astro))
         astrol = DB.astrol_lines(d)
         if notes is not None:
             srcs = ["https://uk.wikipedia.org/wiki/Знаки_зодіаку", "https://uk.wikipedia.org/wiki/Місячний_календар", ""]
-            astrol = [x + (notes.mark(u, "Вікіпедія") if u else "") for x, u in zip(astrol, srcs)]
+            astrol = [ln + (notes.mark(u, "Вікіпедія") if u else "") for ln, u in zip(astrol, srcs)]
+            if x.get("astrol"):
+                astrol = astrol[:-1] + [(f"📅 {it['date'][8:10]}.{it['date'][5:7]} · " if it.get("date") else "• ") + esc(it["text"])
+                                        + notes.mark(it["url"], it["host"]) for it in x["astrol"][:8]] + astrol[-1:]
         out.append(("astrol", DB.CATS["astrol"][0], astrol))
         g = (self.store.get("garden_cache") or {}).get(self.garden_key(d))
         if g:
@@ -681,6 +744,7 @@ class ObservancesUI:
         await self.ensure_lore(d)
         await self.ensure_garden(d)
         self.verify_bg(d)  # перевірка джерелами — у фоні, щоб зведення відкривалось одразу
+        self.extras_bg(d)  # традиції, астрономія, астрологія — теж у фоні
         return self.obs_home(chat, weather=wx_text)
 
     def verify_bg(self, d):

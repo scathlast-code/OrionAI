@@ -10447,6 +10447,23 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception:  # noqa: BLE001
             pass
         return
+    xm = X_RE.match(msg.text or "") if msg.reply_to_message else None
+    if xm:  # ➕ «в завдання / в нотатки / на сьогодні / у простір / обговорити» — відповіддю на повідомлення
+        what = next(k for k, v in xm.groupdict().items() if v)
+        rid = msg.reply_to_message.message_id
+        with closing(db()) as con:
+            row = con.execute("SELECT db_id FROM msg_links WHERE chat_id=? AND tg_id=? ORDER BY db_id DESC LIMIT 1", (chat_id, rid)).fetchone()
+        ref = row["db_id"] if row else None
+        if not ref:  # повідомлення не з розмови з ШІ — запам'ятовуємо його текст окремо, поза контекстом моделі
+            ref = save_message(chat_id, "user", msg.reply_to_message.text or msg.reply_to_message.caption or "",
+                               source="reply-ref", dialog_id=current_dialog(chat_id))
+            set_msg(ref, in_context=0)
+        toast_, screen_ = await do_x(ctx.bot, chat_id, what, "m", ref)
+        if toast_:
+            await msg.reply_text(toast_, disable_notification=True)
+        if screen_:
+            await show(update, *screen_, edit=False)
+        return
     bug = BUG_RE.match(msg.text or msg.caption or "")
     if bug or (msg.photo and not msg.caption and chat_id in BUG_WAIT and time.time() - BUG_WAIT[chat_id][1] < 600):
         note = (msg.text or msg.caption or "")[bug.end():].strip() if bug else ""
@@ -10533,6 +10550,9 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 DEL_RE = re.compile(r"(?i)^\s*(🗑|🗑️|видали(ти)?|видалити|delete|del)\s*[.!]?\s*$")
+# ➕ відповідь на будь-яке повідомлення: «в завдання», «в нотатки», «на сьогодні», «у простір», «обговорити»
+X_RE = re.compile(r"(?i)^\s*(?:(?:в|у|до)\s+(?P<t>завдан\w*)|(?:в|у|до)\s+(?P<n>нотат\w*)|(?P<d>на\s+сьогодні)|(?:в|у)\s+(?P<s>прост[іо]р\w*)|"
+                  r"(?P<c>обговорити(?:\s+окремо)?))\s*[.!]?\s*$")
 BUG_RE = re.compile(r"(?i)^\s*(?:(?P<bug>🐞|баг\b|bug\b|помилка\s*:)|(?P<wish>ідея\b|побажання\b|покращення\b|покращити\s*:))\s*[:—–-]?\s*")
 BUG_KINDS = {(True, False): "🐞 помилка", (False, True): "💡 побажання", (True, True): "🐞💡 помилка й побажання", (False, False): "🐞 помилка"}
 BUG_WAIT = {}  # чат -> (id позначки, час): наступний скриншот без підпису прикріпиться до неї
