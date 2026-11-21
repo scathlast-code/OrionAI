@@ -161,14 +161,16 @@ class ObservancesUI:
             dcols = {r[1] for r in con.execute("PRAGMA table_info(daybook)")}
             if "imp" not in dcols:  # ❗ ручна позначка важливого пункту (NULL — автоматично за темою)
                 con.execute("ALTER TABLE daybook ADD COLUMN imp INTEGER")
-            if not self.store.get("discover_split_v1"):  # відкриття — окремим розділом (раніше були в «Історії»)
+            split = not self.store.get("discover_split_v1")
+            if split:  # відкриття — окремим розділом (раніше були в «Історії»)
                 for rid, txt in con.execute("SELECT id, text FROM daybook WHERE cat='history'").fetchall():
                     if DB.is_discovery(txt):
                         con.execute("UPDATE OR IGNORE daybook SET cat='discover', key='discover'||substr(key, 8) WHERE id=?", (rid,))
-                self.store.set("discover_split_v1", 1)
             for t, k, a, b, y, src in SEED:
                 con.execute("INSERT OR IGNORE INTO observances(title,kind,start,finish,yearly,source,added,key) VALUES(?,?,?,?,?,?,?,?)",
                             (t, k, a, b, y, src, time.time(), normalize(t)[:80] + "|" + a))
+        if split:  # позначку пишемо ПІСЛЯ транзакції: інакше друге з'єднання до тієї ж бази чекає на неї — «database is locked»
+            self.store.set("discover_split_v1", 1)
         self._obs_ready = True
 
     def today(self):

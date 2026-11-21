@@ -38,6 +38,11 @@ def install(app,scope):
     async def diagnostics(update,ctx):
         await update.effective_message.reply_text('Діагностика OrionAI: у разі помилки бот реєструє ID інциденту, компонент, тип і довідку. Для повної причини адміністратор перевіряє журнали. Підтримка: /diagnostics')
     async def on_error(update,ctx):
+        # Безпечні «шуми» Telegram — не збої: стара кнопка після перезапуску, «повідомлення не змінилось»
+        msg=str(ctx.error).lower()
+        if any(x in msg for x in ('query is too old','query id is invalid','message is not modified','message to edit not found')):
+            log.info('Telegram: %s (пропущено)',ctx.error)
+            return
         try:
             uid=update.effective_user.id if isinstance(update,Update) and update.effective_user else 0
             incident_id,data=store.incident(uid,ctx.error,'telegram_update')
