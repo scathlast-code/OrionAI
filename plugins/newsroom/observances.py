@@ -53,6 +53,14 @@ SEED = [
     ("Міжнародний рік волонтерів заради сталого розвитку (ООН)", "year", "2026-01-01", "2026-12-31", 0, "вбудований календар (ООН, перевірте)"),
     ("Міжнародний рік жінки-фермерки (ООН)", "year", "2026-01-01", "2026-12-31", 0, "вбудований календар (ООН, перевірте)"),
 ]
+SEED_URLS = {  # офіційні сторінки вбудованих тем — щоб жоден рядок не був без джерела
+    "Рожевий жовтень — місяць обізнаності про рак грудей": "https://www.who.int/news-room/fact-sheets/detail/breast-cancer",
+    "Movember — місяць чоловічого здоров'я": "https://movember.com/",
+    "Всесвітній тиждень обізнаності про протимікробну резистентність": "https://www.who.int/campaigns/world-amr-awareness-week",
+    "Міжнародний рік пасовищ і пастухів (ООН)": "https://www.un.org/en/observances/international-years",
+    "Міжнародний рік волонтерів заради сталого розвитку (ООН)": "https://www.un.org/en/observances/international-years",
+    "Міжнародний рік жінки-фермерки (ООН)": "https://www.un.org/en/observances/international-years",
+}
 
 POST_RE = re.compile(
     r"(?:(?:сьогодні|сегодня|today)\s*[—–\-:,]?\s*(?:відзначається|відзначають|святкують|триває|стартує|починається)?\s*)?"
@@ -168,8 +176,10 @@ class ObservancesUI:
                     if DB.is_discovery(txt):
                         con.execute("UPDATE OR IGNORE daybook SET cat='discover', key='discover'||substr(key, 8) WHERE id=?", (rid,))
             for t, k, a, b, y, src in SEED:
-                con.execute("INSERT OR IGNORE INTO observances(title,kind,start,finish,yearly,source,added,key) VALUES(?,?,?,?,?,?,?,?)",
-                            (t, k, a, b, y, src, time.time(), normalize(t)[:80] + "|" + a))
+                con.execute("INSERT OR IGNORE INTO observances(title,kind,start,finish,yearly,source,url,added,key) VALUES(?,?,?,?,?,?,?,?,?)",
+                            (t, k, a, b, y, src, SEED_URLS.get(t, ""), time.time(), normalize(t)[:80] + "|" + a))
+                if SEED_URLS.get(t):
+                    con.execute("UPDATE observances SET url=? WHERE title=? AND owner=0 AND (url IS NULL OR url='')", (SEED_URLS[t], t))
         if split:  # позначку пишемо ПІСЛЯ транзакції: інакше друге з'єднання до тієї ж бази чекає на неї — «database is locked»
             self.store.set("discover_split_v1", 1)
         self._obs_ready = True
@@ -677,9 +687,10 @@ class ObservancesUI:
         imp = r.get("imp_", DB.importance(r))
         marks = DB.IMP_MARK.get(imp, "") + ("⭐" if r.get("fav") else "") + ("👤" if r.get("owner") else "")
         title = esc(clean_title(r["title"]))
+        notes = notes if notes is not None else Notes()  # джерело — завжди, на кожному екрані
         if notes is not None:  # 📎 джерела — у зносці під списком; ✅/⚠️ — скільки незалежних ресурсів підтверджують
             v = self.verified(r.get("id")) if not r.get("owner") else None
-            check = (f" ✅{v['n']}" if v["n"] >= 2 else " ⚠️1") if v else ""
+            check = (f" ✅{v['n']}" if v["n"] >= 2 else " ⚠️1") if v and (v.get("urls") or r.get("url")) else ""
             src = notes.mark(r.get("url"), _src_label(r.get("url"), r.get("source") or ""))
             src += "".join(notes.mark(u, host) for u, host in (v.get("urls") or [])[:2]) if v else ""
             return f"{KINDS.get(r['kind'], '•').split()[0]}{marks} {title}{span}{check}{src}"
@@ -1192,7 +1203,10 @@ class ObservancesUI:
         title = "📌 Відзначається" if cat == "days" else DB.CATS[cat][0]
         notes = Notes()  # джерело — посиланням одразу після кожного пункту
         if cat == "days":
-            items = [(r["id"], self.obs_line(r, notes=notes)) for r in self.obs_on(d, chat)]
+            rs_ = self.obs_on(d, chat)
+            if any(not self.sourced(r) for r in rs_):
+                self.verify_bg(d)  # без джерела не показуємо — шукаємо його у фоні
+            items = [(r["id"], self.obs_line(r, notes=notes)) for r in rs_ if self.sourced(r)]
             hidden = len(self.obs_on(d, chat, hidden=True))
         else:
             items = [(it["id"], self.db_line(it, notes)) for it in self.db_items(md, cat, chat)]
