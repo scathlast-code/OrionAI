@@ -168,18 +168,53 @@ class ObservancesUI:
         return dt.datetime.now(tz).date() if tz else dt.date.today()
 
     # ----- база
-    def ensure_holidays(self):
-        """🗓 Рухомі свята з переліку редакції на цей і наступний рік (дати розраховуються, див. holidays.py)."""
+    async def ensure_holidays(self):
+        """🗓 Рухомі свята з переліку редакції на цей і наступний рік. Дата кожного щороку ЗВІРЯЄТЬСЯ з інтернетом
+        (2+ незалежні джерела); розрахунок — лише запасний варіант, поки звірки немає (тоді — «дата уточнюється»)."""
         from . import holidays as H
+        import websearch
+        self._oinit()
         y = self.today().year
-        done = self.store.get("hol_years") or []
+        done = self.store.get("hol_years2") or {}
         for yy in (y, y + 1):
-            if yy in done:
+            if done.get(str(yy)) == "ok":
                 continue
-            for title, a, b, kind, url, note in H.floating(yy):
-                self.obs_add(title + (f" — {note}" if note else ""), kind, a.isoformat(), b.isoformat(), 0, "Календар (розрахунок)", url)
-            done.append(yy)
-        self.store.set("hol_years", done[-4:])
+            all_ok = True
+            for title, a, b, kind, url, key in H.floating(yy):
+                exact, srcs = (None, [])
+                if key:
+                    try:
+                        exact, srcs = await H.verify_date(key, yy, a, websearch.search_items)
+                    except Exception:  # noqa: BLE001
+                        exact = None
+                    await asyncio.sleep(0.3)
+                if key and not exact:
+                    all_ok = False
+                shift = (exact - a) if exact else dt.timedelta(0)
+                a2, b2 = a + shift, b + shift
+                name = title if (exact or not key) else title + " — дата уточнюється"
+                with closing(self.store.db()) as con, con:  # стара версія цього свята на цей рік — прибрати
+                    con.execute("DELETE FROM observances WHERE source='Календар (розрахунок)' AND owner=0 AND start LIKE ? AND title LIKE ?",
+                                (f"{yy}-%", title.split(" (")[0] + "%"))
+                self.obs_add(name, kind, a2.isoformat(), b2.isoformat(), 0, "Календар (розрахунок)", (srcs[0] if srcs else url))
+            done[str(yy)] = "ok" if all_ok else "partial"
+        self.store.set("hol_years2", {k: v for k, v in done.items() if int(k) >= y - 1})
+
+    def holidays_bg(self):
+        """Звірка рухомих свят — у фоні (пошук займає час), не частіше ніж раз на 6 год."""
+        if time.time() - (getattr(self, "_hol_t", 0) or 0) < 6 * 3600:
+            return
+        self._hol_t = time.time()
+
+        async def go():
+            try:
+                await self.ensure_holidays()
+            except Exception:  # noqa: BLE001
+                log.info("свята: звірка не вдалася", exc_info=True)
+        try:
+            asyncio.get_running_loop().create_task(go())
+        except RuntimeError:
+            pass
 
     def clean_db_titles(self):
         """Разово: вичистити вже збережені назви (сутності, пояснення з Вікіпедії, крапки перед роком)."""
@@ -479,9 +514,9 @@ class ObservancesUI:
         d = self.today()
         try:
             self.clean_db_titles()
-            self.ensure_holidays()
         except Exception:  # noqa: BLE001
-            log.info("очищення назв / свята не вдалося", exc_info=True)
+            log.info("очищення назв не вдалося", exc_info=True)
+        self.holidays_bg()
         notes = Notes()
         head = f"📅 <b>Теми дня · {d.day} {MONTHS_GEN[d.month - 1]}, {WD[d.weekday()]}</b>\n"
         secs = self.sections(d, chat, notes=notes)
@@ -619,10 +654,15 @@ class ObservancesUI:
         """Народні прикмети: розділ Вікіпедії; якщо там порожньо — дослівні уривки з українських сайтів із посиланнями
         (через плагін погоди). ШІ нічого не вигадує."""
         md = d.strftime("%m-%d")
-        if self.store.get("lore_cache_v") != 3:  # згенероване ШІ раніше — прибрати
+        if self.store.get("lore_cache_v") != 4:  # згенероване ШІ й «сирі» уривки раніше — прибрати й зібрати наново
             self.store.set("lore_cache", {})
             self.store.set("garden_cache", {})
-            self.store.set("lore_cache_v", 3)
+            with closing(self.store.db()) as con, con:
+                con.execute("DELETE FROM daybook WHERE cat='lore' AND owner=0 AND url NOT LIKE '%wikipedia.org%'")
+                for rid, txt in con.execute("SELECT id, text FROM daybook WHERE cat='lore' AND owner=0").fetchall():
+                    if DB.NOT_LORE_RE.match(txt or ""):  # дні й свята, що потрапили в прикмети
+                        con.execute("DELETE FROM daybook WHERE id=?", (rid,))
+            self.store.set("lore_cache_v", 4)
         if self.db_items(md, "lore"):
             return
         wx = self.host.extra.get("plugin", lambda pid: None)("wx")
@@ -671,11 +711,14 @@ class ObservancesUI:
         d = dt.date(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8]))
         md = d.strftime("%m-%d")
         title = "📌 Дні" if cat == "days" else DB.CATS[cat][0]
+        notes = Notes()  # джерело — посиланням одразу після кожного пункту
         if cat == "days":
-            items = [(r["id"], self.obs_line(r)) for r in self.obs_on(d, chat)]
+            items = [(r["id"], self.obs_line(r, notes=notes)) for r in self.obs_on(d, chat)]
             hidden = len(self.obs_on(d, chat, hidden=True))
         else:
-            items = [(it["id"], ("👤 " if it["owner"] else "") + esc(it["text"])) for it in self.db_items(md, cat, chat)]
+            items = [(it["id"], ("👤 " if it["owner"] else "") + esc(it["text"])
+                      + (notes.mark(it.get("url"), _src_label(it.get("url"))) if it.get("url") else (" · <i>ваш запис</i>" if it.get("owner") else "")))
+                     for it in self.db_items(md, cat, chat)]
             hidden = len(self.db_items(md, cat, chat, hidden=True))
         per = 8
         page = max(0, min(int(page or 0), max(0, (len(items) - 1) // per)))
@@ -698,7 +741,8 @@ class ObservancesUI:
         if hidden:
             rows.append([(f"🌑 Затінені · {hidden}", self.cb("obs", f"{cat}.{ymd}"))])
         rows.append([("« Теми дня", self.cb("obh", "l"))])
-        return "\n".join(lines)[:4000], rows
+        from footnotes import html_cut
+        return html_cut("\n".join(lines), 4000), rows
 
     def obs_shadow(self, chat, cat, ymd):
         d = dt.date(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8]))

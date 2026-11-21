@@ -27,12 +27,12 @@ def nth_weekday(y, m, weekday, n):
 
 
 def floating(y):
-    """[(назва, дата_початку, дата_кінця, kind, url, примітка)] на рік y."""
+    """[(назва, дата_початку, дата_кінця, kind, url, ключ_звірки)] на рік y (ключ — для щорічної звірки з інтернетом)."""
     out = []
     e = orthodox_easter(y)
-    out.append(("Великдень (Воскресіння Христове)", e, e, "day", W + "Великдень", ""))
+    out.append(("Великдень (Воскресіння Христове)", e, e, "day", W + "Великдень", "Великдень"))
     t = e + dt.timedelta(days=49)
-    out.append(("Трійця (Зелена неділя)", t, t, "day", W + "Трійця_(свято)", ""))
+    out.append(("Трійця (Зелена неділя)", t, t, "day", W + "Трійця_(свято)", "Трійця"))
     out.append(("Русальний тиждень", t + dt.timedelta(days=1), t + dt.timedelta(days=7), "week", W + "Русалії", ""))
     out.append(("День матері", nth_weekday(y, 5, 6, 2), nth_weekday(y, 5, 6, 2), "day", W + "День_матері", ""))
     out.append(("День батька", nth_weekday(y, 6, 6, 3), nth_weekday(y, 6, 6, 3), "day", W + "День_батька", ""))
@@ -42,12 +42,62 @@ def floating(y):
         for hy in (y + 3760, y + 3761):
             g = dt.date(*hebrew.to_gregorian(hy, 7, 1))
             if g.year == y:
-                out.append(("Рош га-Шана (юдейський Новий рік)", g, g + dt.timedelta(days=1), "week", W + "Рош_га-Шана", "орієнтовно"))
+                out.append(("Рош га-Шана (юдейський Новий рік)", g, g + dt.timedelta(days=1), "week", W + "Рош_га-Шана", "Рош"))
         for iy in range(int((y - 622) * 1.0307) - 1, int((y - 622) * 1.0307) + 3):
-            for (m, dd, name, page) in ((10, 1, "Ураза-байрам (Ід аль-Фітр)", "Ід_аль-Фітр"), (12, 10, "Курбан-байрам (Ід аль-Адха)", "Курбан-байрам")):
+            for (m, dd, name, page, key) in ((10, 1, "Ураза-байрам (Ід аль-Фітр)", "Ід_аль-Фітр", "Ураза"),
+                                             (12, 10, "Курбан-байрам (Ід аль-Адха)", "Курбан-байрам", "Курбан")):
                 g = dt.date(*islamic.to_gregorian(iy, m, dd))
                 if g.year == y and not any(o[0] == name for o in out):
-                    out.append((name, g, g, "day", W + page, "орієнтовно ±1 день"))
+                    out.append((name, g, g, "day", W + page, key))
     except Exception:  # noqa: BLE001 — без бібліотеки лишаються християнські й державні
         pass
     return out
+
+
+# ---------------------------------------------------------------- 🔎 щорічна звірка дат з інтернетом
+MONTHS_GEN = ["січня", "лютого", "березня", "квітня", "травня", "червня", "липня", "серпня", "вересня", "жовтня", "листопада", "грудня"]
+QUERY = {  # як шукати точну дату свята на рік
+    "Великдень": "Великдень {y} дата",
+    "Трійця": "Трійця {y} дата",
+    "Ураза": "Ураза-байрам {y} дата",
+    "Курбан": "Курбан-байрам {y} дата",
+    "Рош": "Рош га-Шана {y} дата",
+}
+
+
+def dates_in(text, y):
+    """Усі дати «12 квітня» / «12.04.2026» у тексті → [date] цього року."""
+    import re
+    out = []
+    for d, m in re.findall(r"\b(\d{1,2})\s+(" + "|".join(MONTHS_GEN) + r")\b", text or "", re.I):
+        try:
+            out.append(dt.date(y, MONTHS_GEN.index(m.lower()) + 1, int(d)))
+        except ValueError:
+            pass
+    for d, m, yy in re.findall(r"\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b", text or ""):
+        if int(yy) == y:
+            try:
+                out.append(dt.date(y, int(m), int(d)))
+            except ValueError:
+                pass
+    return out
+
+
+async def verify_date(key, y, computed, search_items):
+    """Точна дата з інтернету: найчастіша дата поруч із назвою свята в незалежних джерелах (2+ збігів),
+    у межах ±3 дні від розрахунку. Повертає (дата, [url]) або (None, [])."""
+    q = QUERY.get(key)
+    if not q:
+        return None, []
+    rows = await search_items(q.format(y=y), limit=8)
+    votes, urls = {}, {}
+    for r in rows:
+        host = r["url"].split("/")[2] if "//" in r["url"] else r["url"]
+        for d in set(dates_in((r.get("title") or "") + " " + (r.get("snippet") or ""), y)):
+            if abs((d - computed).days) <= 3:
+                votes.setdefault(d, set()).add(host)
+                urls.setdefault(d, []).append(r["url"])
+    if not votes:
+        return None, []
+    best = max(votes, key=lambda d: len(votes[d]))
+    return (best, urls[best][:3]) if len(votes[best]) >= 2 else (None, [])
