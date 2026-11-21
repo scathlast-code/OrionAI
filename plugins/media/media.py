@@ -4,6 +4,7 @@
 короткий запис ефіру. Перевірка адрес (лише публічні HTTP/HTTPS) — як в оригіналі.
 """
 import asyncio
+import logging
 import datetime as dt
 import os
 import ipaddress
@@ -17,6 +18,8 @@ from pathlib import Path
 from urllib.parse import unquote, urljoin, urlsplit
 
 import httpx
+
+log = logging.getLogger("orion.media")
 from lxml import html
 
 from html import escape as html_escape
@@ -828,22 +831,41 @@ async def fb_story_probe(url, work):
     """Сторіс Facebook: yt-dlp їх не знає, тож — через сервіс Apify (APIFY_TOKEN), як інші боти-завантажувачі."""
     # Файли просимо зберегти в сховище Apify: пряме посилання Facebook прив'язане до сервера Apify й швидко спливає
     # (бот отримував сторінку замість відео). Зі сховища забираємо за ключем — див. apify_auth().
-    rows = await apify_run(FB_STORY_ACTOR, {"story_urls": [{"url": url}], "saveToKeyValueStore": True})
+    m = re.match(r"^https?://(?:(?:www|m|web)\.)?facebook\.com/stories/([^/?#]+)(?:/([^/?#]+))?", url)
+    clean = f"https://www.facebook.com/stories/{m.group(1)}/" + (f"{m.group(2)}/" if m and m.group(2) else "") if m else url
+    tries = list(dict.fromkeys([clean, url]))  # без зайвих ?mibextid=… — так сервіс упізнає сторіс; не вийде — як є
+    reasons = []
     items = []
-    for row in rows:
-        if row.get("status") == "failed":
-            continue
-        link = row.get("kv_store_url") or row.get("download_url")
-        if not link:
-            continue
-        who = row.get("uploader_name") or ""
-        info = {"title": f"Сторіс {who}".strip(), "author": who, "when": story_time(row), "_fallback": row.get("download_url")}
-        if row.get("media_type") == "video" and row.get("audio_download_url"):
-            info["_audio"] = row["audio_download_url"]  # відео й звук окремо — склеїмо
-        items.append(Item("direct", link, info))
-    if not items:
-        raise JobError("Сторіс не знайдено: минули 24 години, вона приватна або посилання неповне.")
-    return items
+    for u in tries:
+        for attempt in range(2):  # сервіс іноді повертає порожньо з першого разу
+            rows = await apify_run(FB_STORY_ACTOR, {"story_urls": [{"url": u}], "saveToKeyValueStore": True})
+            log.warning("Facebook-сторіс через Apify: %s → %d рядків %s", u, len(rows),
+                        [{k: str(r.get(k))[:120] for k in ("status", "error", "message", "errorMessage", "media_type") if r.get(k)} for r in rows][:3])
+            for row in rows:
+                if row.get("status") == "failed":
+                    why = row.get("error") or row.get("errorMessage") or row.get("message") or ""
+                    if why:
+                        reasons.append(str(why)[:200])
+                    continue
+                link = row.get("kv_store_url") or row.get("download_url")
+                if not link:
+                    continue
+                who = row.get("uploader_name") or ""
+                info = {"title": f"Сторіс {who}".strip(), "author": who, "when": story_time(row), "_fallback": row.get("download_url")}
+                if row.get("media_type") == "video" and row.get("audio_download_url"):
+                    info["_audio"] = row["audio_download_url"]  # відео й звук окремо — склеїмо
+                items.append(Item("direct", link, info))
+            if items:
+                return items
+            if rows:
+                break  # сервіс відповів, але сторіс не віддав — повтор не допоможе
+    if reasons:
+        raise JobError("Сервіс завантаження не віддав сторіс: " + html_escape(reasons[0]) +
+                       "\n\nЯкщо сторіс ще доступна у Facebook — спробуйте ще раз за хвилину або надішліть пряме посилання "
+                       "facebook.com/stories/… (відкрийте сторіс → «Поділитися» → «Копіювати посилання»).")
+    raise JobError("Сервіс завантаження не повернув цю сторіс. Причин може бути кілька: сторіс видно лише друзям автора, "
+                   "посилання «Поділитися» веде не на саму сторіс, або сервіс тимчасово не впорався. Спробуйте ще раз за хвилину; "
+                   "якщо не вийде — надішліть пряме посилання facebook.com/stories/….")
 
 
 async def inspect_link(url, work):
