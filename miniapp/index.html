@@ -85,7 +85,7 @@ body.marking .cell,body.marking .seg button,body.marking .card{outline:1.5px das
 .cc-b{border:0;border-radius:10px;padding:5px 9px;font:inherit;font-size:12px;background:color-mix(in srgb,var(--acc) 16%,transparent);color:var(--acc);cursor:pointer}
 .cc-v{font-family:ui-monospace,Menlo,monospace;font-size:14.5px;margin-top:6px;overflow-wrap:anywhere}.copycard details{margin-top:6px;font-size:12px;color:var(--hint)}
 .cc-f{font-family:ui-monospace,Menlo,monospace;overflow-wrap:anywhere;margin:4px 0}
-details{margin:2px 0}details summary{cursor:pointer;color:var(--hint);font-size:13.5px}blockquote{margin:6px 0;padding-left:10px;border-left:3px solid var(--sep)}
+details{margin:2px 0}details.sec-det{margin:6px 0 10px}details.sec-det>summary{color:var(--txt);font-size:15px;padding:4px 0}details.sec-det[open]>summary{margin-bottom:4px}details summary{cursor:pointer;color:var(--hint);font-size:13.5px}blockquote{margin:6px 0;padding-left:10px;border-left:3px solid var(--sep)}
 .feedcard{background:var(--card);border-radius:14px;padding:10px 12px;margin:8px 0}.feedcard.new{box-shadow:inset 3px 0 0 var(--acc)}
 .feedcard small{color:var(--hint);font-size:12px}.ftext{margin-top:4px;overflow-wrap:anywhere}.frows{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .frows button{border:0;border-radius:10px;padding:6px 10px;font:inherit;font-size:13px;background:color-mix(in srgb,var(--acc) 14%,transparent);color:var(--acc)}
@@ -129,12 +129,15 @@ function sanitize(html){
   const d=document.createElement('div');d.innerHTML=html.replace(/\n/g,'<br>');
   for(const q of [...d.querySelectorAll('blockquote')]){ // «згорнута» цитата Telegram → розкривний блок, перший рядок — заголовок
     if(q.hasAttribute('expandable')){const det=document.createElement('details'),sum=document.createElement('summary');
-      while(q.firstChild&&!(q.firstChild.nodeType===1&&q.firstChild.tagName==='BR'))sum.appendChild(q.firstChild);if(q.firstChild)q.firstChild.remove();
+      let p=q.previousSibling;while(p&&((p.nodeType===1&&p.tagName==='BR')||(p.nodeType===3&&!p.textContent.trim())))p=p.previousSibling;
+      if(p&&p.nodeType===1&&p.tagName==='B'){ // заголовок розділу («📌 Сьогодні відзначається · 8») — сам рядок, що згортає/розгортає весь розділ, як у боті
+        let n=p.nextSibling;while(n&&n!==q){const nx=n.nextSibling;n.remove();n=nx}sum.appendChild(p);det.className='sec-det'}
+      else{while(q.firstChild&&!(q.firstChild.nodeType===1&&q.firstChild.tagName==='BR'))sum.appendChild(q.firstChild);if(q.firstChild)q.firstChild.remove()}
       if(!sum.textContent.trim())sum.textContent='Докладніше';det.append(sum,...q.childNodes);q.replaceWith(det)}
     else{const b=document.createElement('blockquote');b.append(...q.childNodes);q.replaceWith(b)}}
   (function walk(n){for(const c of [...n.childNodes]){if(c.nodeType===1){const t=c.tagName.toLowerCase();
     if(!['b','strong','i','em','u','s','code','pre','a','br','details','summary','blockquote'].includes(t)){c.replaceWith(...c.childNodes);continue}
-    for(const a of [...c.attributes]) if(!(t==='a'&&a.name==='href'&&/^https?:/.test(a.value))) c.removeAttribute(a.name);
+    for(const a of [...c.attributes]) if(!(t==='a'&&a.name==='href'&&/^https?:/.test(a.value))&&!(t==='details'&&a.name==='class'&&a.value==='sec-det')) c.removeAttribute(a.name);
     if(t==='code'&&/^[А-ЯІЇЄҐA-Z'’ -]{2,40}$/.test(c.textContent.trim()))c.className='person'; // ім'я виконавця — жовтим
     if(t==='a'){c.target='_blank';c.onclick=e=>{e.preventDefault();const sl=c.href.match(/[?&]start=((?:inb|obb|obl)_[A-Za-z0-9_]+)/);if(sl){haptic();open_('m:start:'+sl[1]);return}try{TG.openLink(c.href)}catch(_){window.open(c.href)}}}
     walk(c)}}})(d);return d.innerHTML}

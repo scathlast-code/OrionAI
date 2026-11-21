@@ -3115,14 +3115,15 @@ async def show(update: Update, text, rows, edit=True, nav=True):
     LAST_SCREEN[chat] = (SCREEN.get() or "", re.sub(r"<[^>]+>", "", text or "")[:1500],
                          [t for r in rows for t, d in r if not d.startswith(("m:nav", "imp:", "m:why"))][:30], time.time())
     import miniapp
+    if SCREEN.get() != "m:clean" and len(re.sub(r"<[^>]+>", "", text or "")) > 160:
+        CLEAN_SRC[chat] = text  # 📋 «чистий текст» цього екрана — без посилань і технічних приписок
+        rows = [list(r) for r in rows] or [[]]
+        rows[-1].append(("📋 Чистий текст", "m:clean") if miniapp.CAPTURE.get() is not None else ("📋", "m:clean"))
+    import miniapp
     cap = miniapp.CAPTURE.get()
     if cap is not None:  # запит із Mini App: віддаємо екран застосунку, а не в чат
         cap.screen = (text, rows)
         return
-    if SCREEN.get() != "m:clean" and len(re.sub(r"<[^>]+>", "", text or "")) > 160:
-        CLEAN_SRC[chat] = text  # 📋 «чистий текст» цього екрана — без посилань і технічних приписок
-        rows = [list(r) for r in rows] or [[]]
-        rows[-1].append(("📋", "m:clean"))
     if rows and prefs(chat).get("improve_btn", True):
         rows = [list(r) for r in rows]
         rows[-1].append(("💡", "imp:s"))  # непомітна позначка «Покращити» на кожному екрані

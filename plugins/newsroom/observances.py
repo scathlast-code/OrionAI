@@ -374,7 +374,7 @@ class ObservancesUI:
         for day in range(1, calendar.monthrange(y, m)[1] + 1):
             x = dt.date(y, m, day)
             n = len(data.get(x.isoformat(), []))
-            label = (f"[{day}]" if x == today else f"·{day}·" if (day_mode and x == sel) else str(day)) + ("✍️" if n else "")
+            label = (f"🟢{day}" if x == today else f"👉{day}" if (day_mode and x == sel) else f"{day}" + ("✍️" if n else ""))
             week.append((label, self.cb("obcp", x.strftime("%Y%m%d"))))
             if len(week) == 7:
                 rows.append(week)
@@ -389,7 +389,7 @@ class ObservancesUI:
         rows.append([("🗓 Загальний календар", self.cb("obc", sel.strftime("%Y%m"))), ("« Теми дня", self.cb("obh", "m"))])
         month_n = sum(len(v) for k, v in data.items() if k.startswith(f"{y}-{m:02d}"))
         lines = [f"📋 <b>Контент-план · {MONTHS[m - 1]} {y}</b> · тем {month_n}",
-                 "✍️ — є теми · [число] — сьогодні · ·число· — обраний день. Торкніться дня, щоб побачити його план.", ""]
+                 "✍️ — є теми · 🟢 — сьогодні · 👉 — обраний день. Торкніться дня, щоб побачити його план.", ""]
         if day_mode and self.host.is_admin(chat):  # ✏️ правки людини — у саму таблицю, з підтвердженням
             items_ = data.get(sel.isoformat(), [])
             ed = [(f"✏️ {k + 1}", self.cb("obce", f"{sel:%Y%m%d}.{k}")) for k in range(min(len(items_), 8))]
@@ -399,15 +399,36 @@ class ObservancesUI:
         if day_mode:
             items = data.get(sel.isoformat(), [])
             lines.append(f"<b>{'Сьогодні' if sel == today else f'{sel.day} {MONTHS_GEN[sel.month - 1]}'}, {WD[sel.weekday()]} · {len(items)}</b>")
+            notes = Notes()
+            try:
+                known = [r for r in self.obs_on(sel) if r.get("source") != "Контент-план" and str(r.get("url") or "").startswith("http")]
+            except Exception:  # noqa: BLE001
+                known = []
             for k, it in enumerate(items, 1):
                 lines.append(f"{k}. {esc(it['title'])}" + (f" · ✍️ {DB.person(it['author'])}" if it.get("author") else "")
-                             + (f" · 📍 {it['where']}" if it.get("where") else ""))
+                             + (f" · 📍 {it['where']}" if it.get("where") else "") + self.cplan_sources(it, known, notes))
             if not items:
                 lines.append("На цей день у плані порожньо.")
         t = self.store.get("cplan_t")
         lines += ["", f"<i>Таблиця: оновлено {dt.datetime.fromtimestamp(t, self.host.tz).strftime('%d.%m %H:%M') if t else '—'}, "
                       "перевіряю щопівгодини. У загальному календарі ці теми — разом з усіма днями.</i>"]
         return html_cut("\n".join(lines), 4000), rows
+
+    def cplan_sources(self, it, known, notes):
+        """Джерела теми плану, як у «Сьогодні»: сайт, що підтверджує день (і ще до двох), плюс сама клітинка таблиці."""
+        out = ""
+        k = self._tkey(it["title"])
+        r = next((r for r in known if self._tkey(r["title"]) == k or (len(k) > 8 and (k in self._tkey(r["title"]) or self._tkey(r["title"]) in k))), None)
+        if r:
+            host = str(r["url"]).split("/")[2].removeprefix("www.")
+            out += notes.mark(r["url"], _src_label(r["url"], host))
+            try:
+                v = self.verified(r.get("id")) or {}
+            except Exception:  # noqa: BLE001
+                v = {}
+            out += "".join(notes.mark(u, h) for u, h in (v.get("urls") or [])[:2] if u != r["url"])
+        url = it.get("src") or (self.cplan_urls() or [""])[0]
+        return out + notes.mark(url, "таблиця")
 
     # ----- ✏️ правки контент-плану людиною (ШІ нічого не вписує): правка → перегляд «було/стане» → підтвердження → запис
     def _cp_item(self, ymd, k):
@@ -1140,6 +1161,12 @@ class ObservancesUI:
         """Склеює частини, поки вміщається в одне повідомлення Telegram (HTML не ріжемо посередині)."""
         import html as _h
         vis = lambda x: len(_h.unescape(re.sub(r"<[^>]+>", "", x)))  # noqa: E731 — ліміт Telegram рахує видимий текст, не теги
+        try:
+            import uilayout
+            if uilayout.SCOPE.get() == "app":  # у застосунку ліміту Telegram немає — усі розділи, жоден не випадає
+                limit = 60000
+        except Exception:  # noqa: BLE001
+            pass
         text = head
         for p in parts:
             if vis(text) + vis(p) + vis(tail) + 2 > limit or len(text) + len(p) + len(tail) > 30000:
@@ -1577,7 +1604,7 @@ class ObservancesUI:
             rs = self.obs_on(x, chat)
             top = max((r["imp_"] for r in rs if r["kind"] == "day"), default=-1)
             mark = "‼️" if top == 2 else "❗" if top == 1 else ("⭐" if any(r["fav"] for r in rs) else "•" if rs else "")
-            label = (f"[{day}]" if x == today else str(day)) + mark
+            label = (f"🟢{day}" if x == today else str(day)) + mark
             week.append((label, self.cb("obd", x.strftime("%Y%m%d"))))
             if len(week) == 7:
                 rows.append(week)
@@ -1588,7 +1615,7 @@ class ObservancesUI:
         nxt = (dt.date(y, m, 28) + dt.timedelta(days=5)).strftime("%Y%m")
         rows.append([("◀️ " + MONTHS[int(prev[4:]) - 1], self.cb("obc", prev)), (MONTHS[int(nxt[4:]) - 1] + " ▶️", self.cb("obc", nxt))])
         rows.append([("➕ Свій день", self.cb("oba")), ("« Теми дня", self.cb("obh"))])
-        return (f"🗓 <b>{MONTHS[m - 1]} {y}</b>\n‼️ дуже важливий · ❗ важливий · ⭐ обраний · • є теми · [число] — сьогодні.\n"
+        return (f"🗓 <b>{MONTHS[m - 1]} {y}</b>\n‼️ дуже важливий · ❗ важливий · ⭐ обраний · • є теми · 🟢 — сьогодні.\n"
                 "Торкніться дня — теми, списки, додавання й редагування."), rows
 
     def obs_day(self, ymd, chat=None):
