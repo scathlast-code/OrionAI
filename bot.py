@@ -118,6 +118,8 @@ SYSTEM_PROMPT += (
     "\nМова: відповідай тією мовою, якою користувач почав цю розмову (за його першими повідомленнями), і тримайся її далі, "
     "навіть якщо в розмові трапляються цитати, репости чи матеріали іншими мовами — їх розумій і враховуй, але відповідай мовою розмови. "
     "Перемикайся на іншу мову лише тоді, коли користувач сам почне писати нею чи попросить."
+    " Не вставляй окремих слів іншими мовами (англійською, китайською тощо) посеред тексту, якщо в мові відповіді є відповідник; "
+    "іншомовними лишай лише назви, бренди, терміни без усталеного перекладу й цитати."
 )
 # Режим «спати, коли нічого не відбувається» (Railway Serverless): Telegram сам будить бота вебхуком,
 # а бот не тримає постійного з'єднання з Telegram, тож через 10 хв тиші Railway його присипляє і не рахує гроші.
@@ -1948,6 +1950,16 @@ async def _ask_llm(history, user_content, preferred=None, fallback=True, exclude
                        attempts="\n".join(attempt_line(p, i) for p, i in attempts) or None)
         LAST_JOURNAL.set(jid)
         text = MODEL_TAG_RE.sub("", text or "", count=1)  # модель повторила позначку «⟨Інша модель⟩» з історії — прибираємо
+        try:  # 🔤 випадкові іншомовні слова («traditionally», «不幸») — та сама модель замінює їх українськими
+            import langguard
+            if langguard.foreign(text, user_content if isinstance(user_content, str) else ""):
+                progress_stage("🔤 Виправляю випадкові іншомовні слова…", 3, 3)
+
+                async def _ask_fix(prompt, _p=PROVIDERS[pid]):
+                    return (await ask_provider({**_p, "_alt": True}, [{"role": "user", "content": prompt}]))[0]
+                text = await langguard.fix(text, _ask_fix, user_content if isinstance(user_content, str) else "")
+        except Exception:  # noqa: BLE001
+            log.info("мовна перевірка: пропущено", exc_info=True)
         return text, pid, attempts, warnings + low_limit_warnings(pid)
     LIVE.pop(CHAT.get(), None)
     journal_update(jid, status="failed", attempts="\n".join(attempt_line(p, i) for p, i in attempts))
