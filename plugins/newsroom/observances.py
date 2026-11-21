@@ -715,8 +715,9 @@ class ObservancesUI:
         up = self.upcoming(chat, 30)
         tail = ""
         if up:
-            tail += "\n<b>⚠️ Найближчі важливі дні</b>\n<blockquote expandable>" + "\n".join(
-                f"{x.day:02d}.{x.month:02d} · {(x - d).days} дн. · {self.obs_line(r, notes=notes)}" for x, r in up[:10]) + "</blockquote>"
+            more = f"\n… ще {len(up) - 10} — у «⚠️ Важливі попереду» (📝 Списки дня)" if len(up) > 10 else ""
+            tail += f"\n<b>⚠️ Найближчі важливі дні · {len(up)}</b>\n<blockquote expandable>" + "\n".join(
+                f"{x.day:02d}.{x.month:02d} · {(x - d).days} дн. · {self.obs_line(r, notes=notes)}" for x, r in up[:10]) + more + "</blockquote>"
         on = self.store.get("obs_morning") is not False
         cov = self.obs_coverage()
         hm = self.store.get("obs_time") or "07:30"
@@ -961,7 +962,7 @@ class ObservancesUI:
     def obs_upcoming(self, chat):
         d = self.today()
         up = self.upcoming(chat, 60)
-        lines = ["⚠️ <b>Важливі дні попереду · 60 днів</b>", "‼️ дуже важливі · ❗ важливі", ""]
+        lines = [f"⚠️ <b>Важливі дні попереду · {len(up)} за 60 днів</b>", "‼️ дуже важливі · ❗ важливі", ""]
         lines += [f"{x.day:02d}.{x.month:02d} {WD[x.weekday()]} · через {(x - d).days} дн. · {self.obs_line(r, link=True)}" for x, r in up[:40]] or ["Немає."]
         rows = [[("🔔 Коли попереджати", self.cb("obws"))], [("« Теми дня", self.cb("obh", "l"))]]
         return "\n".join(lines)[:4000], rows
