@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, chat INT
     author TEXT, who TEXT DEFAULT '', url TEXT DEFAULT '', at REAL, done INTEGER DEFAULT 0, hidden INTEGER DEFAULT 0,
     day TEXT DEFAULT '', reason TEXT DEFAULT '', where_ TEXT DEFAULT '', key TEXT UNIQUE);
 CREATE TABLE IF NOT EXISTS people (name TEXT PRIMARY KEY, src TEXT, added REAL);
+CREATE TABLE IF NOT EXISTS links (name TEXT PRIMARY KEY, uid INTEGER, username TEXT, at REAL);
 """
 KINDS = {"news": "📰 Новини", "task": "✅ Завдання", "decision": "📌 Рішення", "talk": "💬 Обговорення"}
 TASK_RE = re.compile(r"(?i)\b(?:треба|потрібно|необхідно|зробити|напиши|напишіть|підготу\w*|завдання|дедлайн|до (?:завтра|понеділка|вівторка|"
@@ -35,7 +36,7 @@ class Plugin(Base):
     admin_only = False
     summary = ("Новини, завдання, рішення й обговорення з редакційних чатів — списками з посиланнями на повідомлення й відповідальними; "
                "завдання з контент-плану з виконавцями. У чати бот сам нічого не пише.")
-    VIEWS = {"", "l", "i", "ch", "pp", "rep", "who"}
+    VIEWS = {"", "l", "i", "ch", "pp", "pc", "rep", "who"}
     REPORT_URL = "https://docs.google.com/presentation/d/1akz9pZoUv576-nLXmIJ-4nQBHTElNLcP/edit"
 
     def __init__(self, host):
@@ -112,6 +113,9 @@ class Plugin(Base):
                          f"m{ch.id}:{post.message_id}"))
             if author:
                 con.execute("INSERT OR IGNORE INTO people(name,src,added) VALUES(?,?,?)", (author, "chat", time.time()))
+            un = getattr(post.from_user, "username", None) if post.from_user else None
+            if un:  # нікнейм, указаний для імені з плану, — тепер знаємо й ID людини
+                con.execute("UPDATE links SET uid=? WHERE lower(username)=lower(?) AND uid IS NULL", (post.from_user.id, un))
         return None
 
     # ---------------------------------------------------------------- 📋 завдання з контент-плану
@@ -142,12 +146,22 @@ class Plugin(Base):
             self.sync_plan()
         except Exception:  # noqa: BLE001
             pass
-        me = (self.host.extra.get("user_name", lambda c: "")(chat) or "").split()[0:1]
+        names = self.my_names(chat)
         with closing(self.db()) as con:
             n = con.execute("SELECT COUNT(*) FROM items WHERE kind='task' AND hidden=0 AND done=0").fetchone()[0]
-            mine = con.execute("SELECT COUNT(*) FROM items WHERE kind='task' AND hidden=0 AND done=0 AND who LIKE ?",
-                               (f"%{me[0]}%",)).fetchone()[0] if me else 0
+            mine = con.execute(f"SELECT COUNT(*) FROM items WHERE kind='task' AND hidden=0 AND done=0 AND who IN ({','.join('?' * len(names))})",
+                               names).fetchone()[0] if names else 0
         return n, mine
+
+    def link(self, name):
+        with closing(self.db()) as con:
+            r = con.execute("SELECT * FROM links WHERE name=?", (name,)).fetchone()
+        return dict(r) if r else None
+
+    def my_names(self, chat):
+        """Імена з плану/чатів, прив'язані до цього користувача Telegram."""
+        with closing(self.db()) as con:
+            return [r[0] for r in con.execute("SELECT name FROM links WHERE uid=?", (int(chat),))]
 
     def assigned(self, day):
         """Виконавці, призначені в боті, для днів контент-плану: {назва: [(хто, де)]}."""
@@ -177,7 +191,7 @@ class Plugin(Base):
                 + "\n\n<i>У редакційні чати бот сам нічого не пише — лише те й тоді, що ви скажете. Списки й відповідальних може правити будь-хто.</i>")
         rows = [[(f"{KINDS['task']} · {c['task']}", self.cb("l", "task")), (f"{KINDS['news']} · {c['news']}", self.cb("l", "news"))],
                 [(f"{KINDS['decision']} · {c['decision']}", self.cb("l", "decision")), (f"{KINDS['talk']} · {c['talk']}", self.cb("l", "talk"))],
-                [("💬 Редакційні чати", self.cb("ch")), ("👥 Люди", self.cb("pp"))],
+                [("💬 Редакційні чати", self.cb("ch")), ("👥 Люди й мої імена", self.cb("pp"))],
                 [("📋 Контент-план", "m:pl:news:obcp"), ("📊 Звіт", self.cb("rep"))]]
         return text, rows
 
@@ -264,10 +278,42 @@ class Plugin(Base):
 
     def people_screen(self, chat):
         ppl = self.people()
-        btns = [(f"✖️ {n}", self.cb("ppdel", k)) for k, n in enumerate(ppl)][:30]
+        mine = set(self.my_names(chat))
+        lines = ["👥 <b>Люди редакції</b>", "", "Імена беруться з контент-плану й чатів. Торкніться імені, щоб прив'язати його до людини в Telegram "
+                 "(або натисніть «Це я»), — тоді бот знатиме, чиї це завдання.", ""]
+        for n in ppl:
+            ln = self.link(n)
+            tg = (f" → @{esc(ln['username'])}" if ln and ln.get("username") else (" → прив'язано" if ln and ln.get("uid") else ""))
+            lines.append(f"{'⭐ ' if n in mine else '• '}<code>{esc(n.upper())}</code>{tg}")
+        btns = [(("⭐ " if n in mine else "") + n, self.cb("pc", k)) for k, n in enumerate(ppl)][:30]
         rows = [btns[i:i + 3] for i in range(0, len(btns), 3)] + [[("➕ Додати людину", self.cb("ppadd"))], [("« Редакція", self.cb())]]
-        return ("👥 <b>Люди редакції</b>\n\n" + (", ".join(esc(n) for n in ppl) or "Поки нікого.")
-                + "\n\nБеруться з контент-плану й чатів; торкніться ✖️, щоб прибрати зі списку."), rows
+        return "\n".join(lines)[:4000], rows
+
+    def person_screen(self, chat, k):
+        ppl = self.people()
+        if not (k is not None and str(k).isdigit() and int(k) < len(ppl)):
+            return self.people_screen(chat)
+        n = ppl[int(k)]
+        ln = self.link(n)
+        who = self.host.extra.get("user_name", lambda c: "")(ln["uid"]) if ln and ln.get("uid") else ""
+        text = (f"👤 <b><code>{esc(n.upper())}</code></b>\n\nTelegram: "
+                + (f"@{esc(ln['username'])}" if ln and ln.get("username") else "") + (f" {esc(who)}" if who else "")
+                + ("" if ln else "не прив'язано") + "\n\nПрив'язати може будь-хто: «Це я» — до вас, або вкажіть @нікнейм людини.")
+        rows = [[("🙋 Це я", self.cb("pme", k)), ("✏️ Вказати @нікнейм", self.cb("pnick", k))]]
+        if ln:
+            rows.append([("🔓 Відв'язати", self.cb("punl", k))])
+        rows += [[("✖️ Прибрати зі списку", self.cb("ppdel", k))], [("« Люди", self.cb("pp"))]]
+        return text, rows
+
+    def set_link(self, name, uid=None, username=None):
+        with closing(self.db()) as con, con:
+            if uid is None and username is None:
+                con.execute("DELETE FROM links WHERE name=?", (name,))
+                return
+            old = con.execute("SELECT uid, username FROM links WHERE name=?", (name,)).fetchone()
+            con.execute("INSERT OR REPLACE INTO links(name,uid,username,at) VALUES(?,?,?,?)",
+                        (name, uid if uid is not None else (old["uid"] if old else None),
+                         username if username is not None else (old["username"] if old else ""), time.time()))
 
     def report_screen(self, chat):
         return ("📊 <b>Звіт</b>\n\nДокумент звіту редакції — за посиланням нижче. Бот у звіт сам нічого не вносить: "
@@ -328,6 +374,21 @@ class Plugin(Base):
                     con.execute("INSERT INTO people(name,src,added) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET src='removed'",
                                 (ppl[int(x)], "removed", time.time()))
             return None, self.people_screen(chat)
+        if a == "pc":
+            return None, self.person_screen(chat, x)
+        if a in ("pme", "pnick", "punl"):
+            ppl = self.people()
+            if not (x and x.isdigit() and int(x) < len(ppl)):
+                return None, self.people_screen(chat)
+            n = ppl[int(x)]
+            if a == "pme":
+                self.set_link(n, uid=int(chat))
+                return f"⭐ {n} — це ви", self.person_screen(chat, x)
+            if a == "punl":
+                self.set_link(n)
+                return "Відв'язано", self.person_screen(chat, x)
+            self.ask(chat, "nick", int(x))
+            return None, (f"✏️ Надішліть @нікнейм людини в Telegram для «{esc(n)}».", [[("« Назад", self.cb("pc", x))]])
         if a == "rep":
             return None, self.report_screen(chat)
         return None, self.home(chat)
@@ -340,6 +401,13 @@ class Plugin(Base):
             with closing(self.db()) as con, con:
                 con.execute("UPDATE items SET text=? WHERE id=?", (t[:2000], int(data)))
             return "Збережено", self.item_screen(chat, data)
+        if key == "nick":
+            ppl = self.people()
+            m = re.search(r"@?([A-Za-z][\w]{3,31})", t)
+            if m and data is not None and int(data) < len(ppl):
+                self.set_link(ppl[int(data)], username=m.group(1))
+                return "🔗 Прив'язано", self.person_screen(chat, data)
+            return "Це не схоже на нікнейм Telegram", self.person_screen(chat, data)
         if key == "pp":
             with closing(self.db()) as con, con:
                 for n in [x.strip() for x in t.split(",") if x.strip()][:20]:

@@ -35,3 +35,19 @@ def test_editorial_collects_silently_and_assigns(tmp_path):
         con.execute("INSERT INTO items(chat,msg,kind,text,who,day,where_,key) VALUES(0,0,'task','Ліси','','2026-11-25','Сайт','b')")
         iid = con.execute("SELECT id FROM items WHERE key='b'").fetchone()[0]
     assert "уже бере Валентин" in p.set_who(iid, "Лариса")
+
+
+def test_people_link_to_telegram(tmp_path):
+    from plugins import Host as H
+    from plugins.editorial import Plugin
+    from contextlib import closing
+    import time
+    p = Plugin(H(data_dir=str(tmp_path), admins=lambda: [1], is_admin=lambda u: True))
+    with closing(p.db()) as con, con:
+        con.execute("INSERT INTO people(name,src,added) VALUES('Валентин','manual',?)", (time.time(),))
+        con.execute("INSERT INTO items(chat,msg,kind,text,who,key) VALUES(0,0,'task','Ліси','Валентин','k')")
+    k = str(p.people().index("Валентин"))
+    asyncio.run(p.route(None, None, 77, ["pme", k]))
+    assert p.my_names(77) == ["Валентин"] and p.my_open(77) == (1, 1)
+    t, _r = p.people_screen(77)
+    assert "⭐ <code>ВАЛЕНТИН</code>" in t
