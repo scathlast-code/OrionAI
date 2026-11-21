@@ -3045,6 +3045,7 @@ PLUGINS = orion_plugins.Registry(orion_plugins.Host(
     extra={"kb": lambda rows: kb(rows), "user_name": lambda c: sp_who(c), "secret": MCP_SECRET, "sticker_select": _plugin_sticker_select,
            "chat_answer": lambda chat, text: _plugin_chat_answer(chat, text),
            "real_bot": lambda: tg_app.bot if tg_app else None, "hubclient": hub,
+           "touched_since": lambda chat, t: LAST_CB.get(chat, 0) > t,
            "miniapp_url": miniapp_url(),
            "awaiting": lambda chat: chat in AWAIT or CM.wants_text(chat),
            "node_active": lambda: NODE.active,
@@ -3121,7 +3122,9 @@ async def show(update: Update, text, rows, edit=True, nav=True):
         hc = prefs(chat).get("hub_ctx")
         sd = SCREEN.get() or ""
         if hc and hc.get("key") in HUBS and not sd.startswith("m:hub:"):
-            if not is_view(sd) and _title_key(text) in hc.get("titles", []):
+            if sd in hc.get("datas", []):
+                pass  # кнопка саме на частину розділу (напр. «🔗 Посилання») — відкриваємо її повністю, а не той самий розділ
+            elif not is_view(sd) and _title_key(text) in hc.get("titles", []):
                 # дія всередині об'єднаного розділу (перемикач, вибір) — лишаємось на ньому, а не на старому окремому екрані
                 text, rows = await scr_hub(chat, hc["key"])
                 SCREEN.set(f"m:hub:{hc['key']}")
@@ -5623,6 +5626,9 @@ LAST_SCREEN = {}  # чат -> (екран, текст екрана, кнопки
 LAST_MSG = {}  # чат -> (id повідомлення з останнім екраном, його кнопки): «↗️ відкрити X» підсвічує кнопку саме там
 
 
+LAST_CB = {}  # чат -> коли востаннє натиснули будь-яку кнопку
+
+
 async def blink_button(bot, chat_id, label, cbd):
     """↗️ «відкрити X»: кнопка X на останньому екрані блимає (якщо її там немає — з'являється першою). Повертає, чи вдалося."""
     last = LAST_MSG.get(chat_id)
@@ -5635,7 +5641,10 @@ async def blink_button(bot, chat_id, label, cbd):
         rows.insert(0, [(label, cbd)])
         pos = (0, 0)
     base = rows[pos[0]][pos[1]][0]
+    started = time.time()
     for k in range(7):
+        if LAST_CB.get(chat_id, 0) > started:
+            return True  # кнопку вже натиснули — не повертаємо старі кнопки поверх нового екрана
         rows[pos[0]][pos[1]] = ((f"👉 {base} 👈" if k % 2 == 0 else f"▫️ {base} ▫️") if k < 6 else f"👉 {base}", cbd)
         try:
             await bot.edit_message_reply_markup(chat_id, mid, reply_markup=kb(rows))
@@ -8454,7 +8463,7 @@ async def scr_hub(chat_id, key):
     finally:
         HUB_BUILDING.reset(tok)
         SCREEN.set(f"m:hub:{key}")  # частини розділу не підміняють, що саме на екрані (інакше «Назад» плутався)
-    set_pref(chat_id, "hub_ctx", {"key": key, "titles": [t for t in titles if t]})
+    set_pref(chat_id, "hub_ctx", {"key": key, "titles": [t for t in titles if t], "datas": [p[1] for p in parts]})
     HUB_LAST[chat_id] = secs
     text = f"<b>{title}</b>\n<i>{intro}</i>\n\n" + "\n\n".join(blocks)
     import button_hints as _BH
@@ -8507,6 +8516,8 @@ async def open_data(update, ctx, data, edit=True, record=True):
 async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True, record=True):
     chat_id = update.effective_chat.id
     q = update.callback_query
+    if q is not None:
+        LAST_CB[chat_id] = time.time()  # натиснули кнопку — блимання підказки зупиняється й не затирає новий екран
     if q is not None and getattr(q, "message", None) is not None and not L_SCOPE.get():
         L_SCOPE.set(f"m{q.message.message_id}")  # «Назад» — в межах саме цього повідомлення (так само, як в open_data)
     parts = data.split(":")
