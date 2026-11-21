@@ -121,4 +121,4 @@ def test_content_plan_merged_into_day(tmp_path):
     p.store.set("cplan_data", plan)
     t, _rows = p.obs_home()
     assert "✍️ Лариса" in t and "🗓 Контент-план · 2" in t and "День павича" in t and "Як варити борщ" in t
-    assert "шукаю джерела" not in t and "триває" not in t.split("📌 Дні")[1].split("\n")[0]
+    assert "шукаю джерела" not in t and "триває" not in t.split("📌 Сьогодні відзначається")[1].split("\n")[0]
