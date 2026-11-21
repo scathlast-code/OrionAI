@@ -136,6 +136,27 @@ class Plugin(Base):
                                 "VALUES(0,0,'task',?,?,?,?,?,?,?,?,?)",
                                 (i["title"], "контент-план", i.get("author") or "", i.get("src") or "", time.time(), day, reason, where, key))
 
+    def my_open(self, chat):
+        """(усі відкриті завдання, з них — на цю людину за іменем у Telegram)."""
+        try:
+            self.sync_plan()
+        except Exception:  # noqa: BLE001
+            pass
+        me = (self.host.extra.get("user_name", lambda c: "")(chat) or "").split()[0:1]
+        with closing(self.db()) as con:
+            n = con.execute("SELECT COUNT(*) FROM items WHERE kind='task' AND hidden=0 AND done=0").fetchone()[0]
+            mine = con.execute("SELECT COUNT(*) FROM items WHERE kind='task' AND hidden=0 AND done=0 AND who LIKE ?",
+                               (f"%{me[0]}%",)).fetchone()[0] if me else 0
+        return n, mine
+
+    def assigned(self, day):
+        """Виконавці, призначені в боті, для днів контент-плану: {назва: [(хто, де)]}."""
+        out = {}
+        with closing(self.db()) as con:
+            for r in con.execute("SELECT text, reason, who, where_ FROM items WHERE chat=0 AND day=? AND who<>'' AND hidden=0", (day,)):
+                out.setdefault(r["reason"] if r["where_"] and r["reason"] else r["text"], []).append((r["who"], r["where_"]))
+        return out
+
     # ---------------------------------------------------------------- екрани
     def counts(self):
         with closing(self.db()) as con:
@@ -190,10 +211,10 @@ class Plugin(Base):
         if r.get("where_"):
             head += WHERE_TASK.get(r["where_"], r["where_"]) + ": "
         text = esc(re.sub(r"\s+", " ", r["text"])[:160])
-        who = f" · 👤 {esc(r['who'])}" if r.get("who") else " · ◽ ніхто"
+        who = f" · 👤 <code>{esc(r['who'].upper())}</code>" if r.get("who") else " · ◽ ніхто"
         why = f" · до дня «{esc(r['reason'][:60])}»" if r.get("reason") and r.get("where_") else ""
         src = f' · <a href="{esc(r["url"])}">{"контент-план" if r["chat"] == 0 else "повідомлення"}</a>' if r.get("url") else ""
-        return ("✅ " if r.get("done") else "") + head + text + why + (who if r["kind"] == "task" else (f" · ✍️ {esc(r['author'])}" if r.get("author") else "")) + src
+        return ("✅ " if r.get("done") else "") + head + text + why + (who if r["kind"] == "task" else (f" · ✍️ <code>{esc(r['author'].upper())}</code>" if r.get("author") else "")) + src
 
     def item_screen(self, chat, iid, note=""):
         with closing(self.db()) as con:

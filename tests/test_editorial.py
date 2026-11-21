@@ -27,7 +27,7 @@ def test_editorial_collects_silently_and_assigns(tmp_path):
     c = p.counts()
     assert c["task"] == 1 and c["news"] == 1 and c["decision"] == 1
     t, _r = p.list_screen(1, "task")
-    assert "t.me/c/1234567/2" in t and "👤 Лариса" in t
+    assert "t.me/c/1234567/2" in t and "👤 <code>ЛАРИСА</code>" in t
     # одну тему на сайт двоє не беруть
     from contextlib import closing
     with closing(p.db()) as con, con:

@@ -261,3 +261,9 @@ def topic_emoji(text):
         if re.search(rx, t):
             return e
     return "•"
+
+
+def person(name):
+    """Ім'я виконавця — виділене: великими літерами на сірому тлі (моноширинний шрифт Telegram)."""
+    from html import escape
+    return f"<code>{escape(str(name or '').upper())}</code>"
