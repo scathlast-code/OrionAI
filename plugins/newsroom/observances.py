@@ -264,7 +264,8 @@ class ObservancesUI:
     async def ensure_cplan(self, force=False):
         """Завантажуємо .xlsx кожного плану (не частіше ніж раз на 3 год) і зберігаємо {дата: [теми]}."""
         from . import contentplan as CP
-        if not force and time.time() - (self.store.get("cplan_t") or 0) < 3 * 3600:
+        wait = 3 * 3600 if self.store.get("cplan_data") else 600  # не вдалося — пробуємо знову за 10 хв, а не за 3 год
+        if not force and time.time() - (self.store.get("cplan_t") or 0) < wait:
             return self.store.get("cplan_data") or {}
         merged = {}
         async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0 OrionAI"}) as cl:
