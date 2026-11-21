@@ -2737,8 +2737,6 @@ async def show(update: Update, text, rows, edit=True, nav=True):
     """Показує екран меню: редагує повідомлення з кнопками або надсилає нове.
     До кожного меню додається ряд ◀️ Назад · 🏠 Додому · Вперед ▶️ (Назад/Вперед — коли є куди)."""
     chat = update.effective_chat.id
-    rows = fold_rows(chat, rows)
-    rows = L.decorate(chat, rows, nav=nav, current=L.current(chat))
     if not HUB_BUILDING.get():
         hc = prefs(chat).get("hub_ctx")
         sd = SCREEN.get() or ""
@@ -2749,6 +2747,9 @@ async def show(update: Update, text, rows, edit=True, nav=True):
                 SCREEN.set(f"m:hub:{hc['key']}")
             elif is_view(sd):
                 set_pref(chat, "hub_ctx", None)
+    # навігація ◀️ Назад · 🏠 Додому · Вперед ▶️ — ПІСЛЯ підміни на об'єднаний розділ, інакше вона губилась
+    rows = fold_rows(chat, rows)
+    rows = L.decorate(chat, rows, nav=nav, current=L.current(chat))
     if SCREEN.get() == "m:btn" and prefs(chat).get("menu_before_v7"):
         rows = [list(r) for r in rows] + [[("↩️ Меню, як було до об'єднання", "m:menuold")]]
     wk = why_key(SCREEN.get())
