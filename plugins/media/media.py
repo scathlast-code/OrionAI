@@ -362,11 +362,15 @@ def explain(raw):
         why = "Сайт обірвав з'єднання з сервером бота або не показав йому медіа (так деякі сайти відсікають сервери)."
     elif "перевищив час" in low:
         why = "Сайт відповідав надто довго."
+    elif re.search(r"unexpected response|unable to extract|failed to parse|json", low):
+        why = ("Сайт відповів серверу бота не так, як очікував завантажувач: найчастіше сайт змінив сторінку або відсікає сервери. "
+               "Бот спробував запасні способи — не вийшло. Спробуйте ще раз пізніше.")
     else:
         why = "Не вдалося отримати медіа з цього посилання."
     tech = re.sub(r"^(?:\w[\w-]*: )?(?:[\w-]+ · код \d+\. )?(?:ERROR: )?", "", raw.splitlines()[-1] if raw else "")[:220]
-    tech = html_escape(tech)
-    return why + (f"\n\n<i>Технічно: {tech}</i>" if tech and tech not in why else "")
+    if tech:  # англійський технічний текст — у журнал для розбору, а людині — лише зрозуміле пояснення
+        log.warning("медіа: %s", tech)
+    return why
 
 
 async def video_probe(url, work):
@@ -727,7 +731,7 @@ async def story_probe(url, work):
     if not apify_token() and first:
         raise JobError("Instagram показує сторіс лише після входу. Щоб бот їх качав без вашого акаунта, як інші боти, "
                        "додайте в Railway змінну APIFY_TOKEN (apify.com → Settings → API &amp; Integrations; безкоштовних "
-                       "$5 на місяць вистачає приблизно на 300 сторіс).\n\n🔎 " + apify_hint() + f"\n\n<i>Технічно: {html_escape(first[-200:])}</i>")
+                       "$5 на місяць вистачає приблизно на 300 сторіс).\n\n🔎 " + apify_hint())
     rows = await apify_run(APIFY_ACTOR, {"usernames": [user], "saveFiles": True, "maxItems": 0}, timeout=180)
     items = []
     for row in rows:
@@ -809,22 +813,45 @@ FB_STORY = re.compile(r"^https?://(?:(?:www|m|web)\.)?facebook\.com/stories/")
 FB_STORY_ACTOR = "codenest~facebook-story-downloader"
 
 
+APIFY_LAST = {}  # пояснення сервісу Apify, коли він нічого не повернув
+
+
 async def apify_run(actor, payload, timeout=240):
+    """Запуск сервісу Apify. Порожньо чи збій — з'ясовуємо чому (стан запуску, повідомлення сервісу), а не вгадуємо;
+    людині — зрозуміле пояснення українською, без сирого JSON."""
     token = apify_token()
     if not token:
         raise JobError("Facebook та Instagram показують сторіс лише після входу. Щоб бот їх качав без вашого акаунта, як інші боти, "
                        "додайте в Railway змінну APIFY_TOKEN (apify.com → Settings → API &amp; Integrations).\n\n🔎 " + apify_hint())
-    async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-        r = await client.post(f"https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items",
-                              params={"token": token}, json=payload)
-    if r.status_code in (401, 403):
-        raise JobError("APIFY_TOKEN не підходить — перевірте ключ у Railway.")
-    if r.status_code == 402:
-        raise JobError("На Apify закінчився баланс цього місяця.")
-    if r.status_code >= 400:
-        raise JobError(f"Apify відповів помилкою {r.status_code}: {r.text[:150]}")
-    data = r.json()
-    return [row for row in (data if isinstance(data, list) else []) if isinstance(row, dict)]
+    async with httpx.AsyncClient(timeout=timeout + 30, trust_env=False) as client:
+        r = await client.post(f"https://api.apify.com/v2/acts/{actor}/runs", params={"token": token, "waitForFinish": timeout}, json=payload)
+        if r.status_code in (401, 403):
+            raise JobError("Ключ Apify (APIFY_TOKEN) не підходить — перевірте його в Railway.")
+        if r.status_code == 402:
+            raise JobError("На Apify закінчився баланс цього місяця — сторіс через нього недоступні до поповнення чи нового місяця.")
+        if r.status_code >= 400:
+            log.warning("Apify %s: HTTP %s %s", actor, r.status_code, r.text[:300])
+            raise JobError("Сервіс завантаження сторіс (Apify) відмовив у запуску. Спробуйте за кілька хвилин.")
+        run = (r.json() or {}).get("data") or {}
+        status, msg = run.get("status") or "", run.get("statusMessage") or ""
+        rows = []
+        if run.get("defaultDatasetId"):
+            d = await client.get(f"https://api.apify.com/v2/datasets/{run['defaultDatasetId']}/items", params={"token": token, "clean": "true"})
+            data = d.json() if d.status_code < 400 else []
+            rows = [row for row in (data if isinstance(data, list) else []) if isinstance(row, dict)]
+    log.warning("Apify %s: стан %s · %s · рядків %d", actor, status, msg[:300], len(rows))
+    if rows:
+        return rows
+    low = msg.lower()
+    if re.search(r"limit|free|quota|upgrade|credit|balance|exceed|trial|subscription|rent", low):
+        raise JobError("Сервіс завантаження сторіс (Apify) відмовив: схоже, вичерпано безкоштовний ліміт цього сервісу. "
+                       "Потрібне поповнення в Apify або інший сервіс — скажіть, і я підключу.")
+    if status in ("FAILED", "ABORTED", "TIMED-OUT", "TIMING-OUT"):
+        raise JobError("Сервіс завантаження сторіс (Apify) не впорався з цим посиланням"
+                       + (" за відведений час" if "TIM" in status else "") + ". Найчастіше — сторіс уже зникла, видима лише друзям "
+                       "або Instagram/Facebook тимчасово не пустив сервіс. Спробуйте ще раз за хвилину.")
+    APIFY_LAST[actor] = msg[:200]
+    return rows
 
 
 async def fb_story_probe(url, work):
@@ -832,7 +859,7 @@ async def fb_story_probe(url, work):
     # Файли просимо зберегти в сховище Apify: пряме посилання Facebook прив'язане до сервера Apify й швидко спливає
     # (бот отримував сторінку замість відео). Зі сховища забираємо за ключем — див. apify_auth().
     m = re.match(r"^https?://(?:(?:www|m|web)\.)?facebook\.com/stories/([^/?#]+)(?:/([^/?#]+))?", url)
-    clean = f"https://www.facebook.com/stories/{m.group(1)}/" + (f"{m.group(2)}/" if m and m.group(2) else "") if m else url
+    clean = (f"https://www.facebook.com/stories/{m.group(1)}/" + (f"{m.group(2)}/?view_single=1" if m.group(2) else "?view_single=false")) if m else url
     tries = list(dict.fromkeys([clean, url]))  # без зайвих ?mibextid=… — так сервіс упізнає сторіс; не вийде — як є
     reasons = []
     items = []
@@ -863,9 +890,33 @@ async def fb_story_probe(url, work):
         raise JobError("Сервіс завантаження не віддав сторіс: " + html_escape(reasons[0]) +
                        "\n\nЯкщо сторіс ще доступна у Facebook — спробуйте ще раз за хвилину або надішліть пряме посилання "
                        "facebook.com/stories/… (відкрийте сторіс → «Поділитися» → «Копіювати посилання»).")
+    if APIFY_LAST.get(FB_STORY_ACTOR):
+        log.warning("Apify пояснення: %s", APIFY_LAST.pop(FB_STORY_ACTOR))
     raise JobError("Сервіс завантаження не повернув цю сторіс. Причин може бути кілька: сторіс видно лише друзям автора, "
                    "посилання «Поділитися» веде не на саму сторіс, або сервіс тимчасово не впорався. Спробуйте ще раз за хвилину; "
                    "якщо не вийде — надішліть пряме посилання facebook.com/stories/….")
+
+
+async def tikwm_probe(url, work):
+    """Запасний шлях для TikTok, коли yt-dlp сайт не пускає: відкритий сервіс tikwm.com (відео без водяного знака, фото-каруселі)."""
+    async with httpx.AsyncClient(timeout=40, follow_redirects=True, headers={"User-Agent": BROWSER}) as cl:
+        r = await cl.get("https://www.tikwm.com/api/", params={"url": url, "hd": 1})
+        r.raise_for_status()
+        js = r.json()
+    d = (js or {}).get("data") or {}
+    if (js or {}).get("code") != 0 or not d:
+        raise JobError("TikTok: запасний сервіс теж не віддав відео (" + str((js or {}).get("msg") or "без пояснення")[:80] + ").")
+    who = ((d.get("author") or {}).get("nickname")) or ""
+    info = {"title": d.get("title") or "TikTok", "author": who, "description": d.get("title") or ""}
+    pics = [p for p in (d.get("images") or []) if isinstance(p, str)]
+    if pics:
+        return [Item("direct", p, {**info, "ext": "jpg"}) for p in pics]
+    link = d.get("hdplay") or d.get("play")
+    if not link:
+        raise JobError("TikTok: у відповіді немає відео.")
+    if link.startswith("/"):
+        link = "https://www.tikwm.com" + link
+    return [Item("direct", link, {**info, "ext": "mp4"})]
 
 
 async def inspect_link(url, work):
@@ -884,7 +935,7 @@ async def inspect_link(url, work):
     elif FB_STORY.match(url):
         probes = (fb_story_probe,)
     elif domain_matches(host, ("tiktok.com",)):
-        probes = (video_probe, gallery_probe, page_probe)  # відео — yt-dlp; фото-каруселі — gallery-dl
+        probes = (video_probe, tikwm_probe, gallery_probe, page_probe)  # yt-dlp; запасний — tikwm; фото-каруселі — gallery-dl
     elif domain_matches(host, ("tumblr.com",)):
         probes = (tumblr_probe, gallery_probe, video_probe, page_probe)
     elif domain_matches(host, ("threads.net", "threads.com")):
@@ -898,7 +949,7 @@ async def inspect_link(url, work):
     errors = []
     labels = {"video_probe": "завантажувач yt-dlp", "gallery_probe": "альбоми (gallery-dl)", "page_probe": "сторінка допису",
               "threads_probe": "Threads", "tumblr_probe": "Tumblr", "story_probe": "сторіс: напряму, далі через Apify (до 1–2 хв)",
-              "fb_story_probe": "сторіс через Apify (до 1–2 хв)"}
+              "fb_story_probe": "сторіс через Apify (до 1–2 хв)", "tikwm_probe": "запасний сервіс TikTok"}
     for probe in probes:
         await note(labels.get(probe.__name__, probe.__name__))
         try:
@@ -918,7 +969,7 @@ async def inspect_link(url, work):
         detail = next((e[1] for e in errors if e[0] == "threads_probe"), "")
         raise JobError("Threads не віддав серверу саме відео, лише обкладинку."
                        + ("" if cookie_file(url) else " Якщо допис відкривається лише після входу — 🍪 додайте cookies threads у «Входи на сайти».")
-                       + (f"\n\n<i>Технічно: {html_escape(detail)}</i>" if detail else ""))
+                       )
     if SHARE.match(url) and any("unsupported url" in e[1].lower() for e in errors):
         raise JobError("Сайт не розкрив серверу це коротке посилання «Поділитися». Спробуйте інше посилання на той самий допис: "
                        "у Facebook — «Поділитися» → «Копіювати посилання» з самого відео (reel/… або watch/?v=…).")
