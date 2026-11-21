@@ -125,6 +125,9 @@ def _src_label(url, fallback=""):
     return fallback
 
 
+MONTHS_NOM = ["січень", "лютий", "березень", "квітень", "травень", "червень", "липень", "серпень", "вересень", "жовтень", "листопад", "грудень"]
+
+
 class ObservancesUI:
     def _oinit(self):
         if getattr(self, "_obs_ready", False):
@@ -372,16 +375,15 @@ class ObservancesUI:
             out.append(("days", f"📌 Дні · {len(days)}" + (f" · триває {len(ongoing)}" if ongoing else ""), lines))
         for cat in DB.LIST_CATS:
             items = self.db_items(md, cat, chat)
-            if cat == "lore" and not items:
-                cached = (self.store.get("lore_cache") or {}).get(md)
-                if cached:
-                    items = [{"text": x, "owner": 0} for x in cached.splitlines() if x.strip()]
             if items:
                 cap = {"history": 12, "born": 10, "died": 8}.get(cat, 15)
-                body = [("👤 " if it.get("owner") else "") + esc(it["text"])
-                        + (notes.mark(it.get("url"), _src_label(it.get("url"))) if notes is not None else "") for it in items[:cap]]
-                if notes is not None and cat == "lore" and not any(str(it.get("url") or "").startswith("http") for it in items):
-                    body.append("<i>(зібрано ШІ з відомих народних прикмет — звіряйте)</i>")
+                per_item = notes is not None and len({it.get("url") or "" for it in items[:cap]}) > 1  # різні джерела — зноска під кожним
+                body = []
+                for it in items[:cap]:
+                    body.append(("👤 " if it.get("owner") else "") + esc(it["text"])
+                                + (notes.mark(it.get("url"), _src_label(it.get("url"))) if notes is not None else ""))
+                    if per_item:
+                        body.append(notes.flush())
                 if len(items) > cap:
                     body.append(f"… ще {len(items) - cap} — у «📝 Списки»")
                 if notes is not None:
@@ -395,8 +397,14 @@ class ObservancesUI:
         out.append(("astrol", DB.CATS["astrol"][0], DB.astrol_lines(d)))
         g = (self.store.get("garden_cache") or {}).get(self.garden_key(d))
         if g:
-            out.append(("garden", DB.CATS["garden"][0], [esc(x) for x in g.splitlines() if x.strip()]
-                        + (["<i>(поради зібрано ШІ — звіряйте з місцевими умовами)</i>"] if notes is not None else [])))
+            body = []
+            for it in g if isinstance(g, list) else []:
+                body.append("• " + esc(it["text"]))
+                if notes is not None:
+                    notes.mark(it["url"], it.get("title") or "")
+                    body.append(notes.flush())
+            if body:
+                out.append(("garden", DB.CATS["garden"][0], body))
         return out
 
     @staticmethod
@@ -508,59 +516,55 @@ class ObservancesUI:
         return self.obs_home(chat, weather=wx_text)
 
     async def ensure_lore(self, d):
-        """Народні прикмети: з Вікіпедії, а якщо там порожньо — із плагіна погоди (ШІ, раз на дату)."""
+        """Народні прикмети: розділ Вікіпедії; якщо там порожньо — дослівні уривки з українських сайтів із посиланнями
+        (через плагін погоди). ШІ нічого не вигадує."""
         md = d.strftime("%m-%d")
-        import langguard
-        if self.store.get("lore_cache_v") != 2:  # зібране до обов'язкової перевірки — наново
+        if self.store.get("lore_cache_v") != 3:  # згенероване ШІ раніше — прибрати
             self.store.set("lore_cache", {})
             self.store.set("garden_cache", {})
-            self.store.set("lore_cache_v", 2)
-        lc = self.store.get("lore_cache") or {}
-        if lc.get(md) and langguard.foreign(lc[md]):  # кеш з іншомовними вставками — збираємо наново
-            lc.pop(md)
-            self.store.set("lore_cache", lc)
-        if self.db_items(md, "lore") or lc.get(md):
+            self.store.set("lore_cache_v", 3)
+        if self.db_items(md, "lore"):
             return
         wx = self.host.extra.get("plugin", lambda pid: None)("wx")
         if not wx:
             return
         try:
-            text = await wx.lore(d)
+            items = await wx.lore(d)
         except Exception:  # noqa: BLE001
             return
-        if text:
-            c = self.store.get("lore_cache") or {}
-            c[md] = text[:1500]
-            self.store.set("lore_cache", c)
+        for it in items or []:
+            if isinstance(it, dict) and str(it.get("url", "")).startswith("http"):
+                self.db_add(md, "lore", it["text"], it["url"])
 
     async def ensure_garden(self, d, force=False):
-        """🌱 Поради саду, городу, господарству й тваринам на цю декаду місяця (ШІ, раз на декаду)."""
+        """🌱 Поради саду, городу, господарству й тваринам на цю пору — лише з українських джерел, дослівними уривками
+        з посиланням на кожен (ШІ нічого не вигадує). [{text, url, title}], кеш на декаду."""
         key = self.garden_key(d)
         cache = self.store.get("garden_cache") or {}
-        import langguard
-        if cache.get(key) and langguard.foreign(cache[key]):
-            force = True
-        if (cache.get(key) and not force) or not self.host.ask_ai:
-            return cache.get(key, "")
+        got = cache.get(key)
+        if isinstance(got, list) and got and not force:
+            return got
         part = ("на початку", "в середині", "наприкінці")[int(key[-1]) - 1]
-        prompt = (f"Україна, {part} місяця «{MONTHS[d.month - 1]}». "
-                  "Коротко українською, рядками з емодзі на початку, без вступів і markdown:\n"
-                  "🌳 2–3 справи в саду; 🥕 2–3 на городі; 🏡 1–2 по господарству; 🐔🐄 1–2 для свійських тварин і птиці; 🐶🐱 1 для домашніх улюбленців. "
-                  "Лише перевірені агрономічні поради для клімату України, без вигаданих дат.")
+        items = []
         try:
-            text, _m = await self.host.ask_ai(prompt, label="📅 Теми дня: поради саду")
+            import websearch
+            for q in (f"що робити в саду і на городі {part} {MONTHS_NOM[d.month - 1]}",
+                      f"роботи на присадибній ділянці {MONTHS_NOM[d.month - 1]} поради"):
+                for r in await websearch.search_items(q):
+                    snip = re.sub(r"\s+", " ", r.get("snippet") or "").strip()
+                    if len(re.findall(r"[іїєґ]", snip, re.I)) < 3 or any(r["url"] == x["url"] for x in items):
+                        continue
+                    items.append({"text": snip[:300] + ("…" if len(snip) > 300 else ""), "url": r["url"], "title": (r.get("title") or "")[:80]})
+                    if len(items) >= 4:
+                        break
+                if len(items) >= 4:
+                    break
         except Exception:  # noqa: BLE001
-            return ""
-        text = re.sub(r"[*_#`]+", "", (text or "").strip())[:1500]
-        import langguard
-
-        async def _rev_ask(pr):  # 🔎 перевіряє ІНША модель, ніж та, що писала
-            return (await self.host.ask_ai(pr, label="🔎 Перевірка порад", avoid=_m))[0]
-        text = re.sub(r"[*_#`]+", "", await langguard.review(text, _rev_ask, "поради саду й господарству на цю пору"))[:1500]
-        if text:
-            cache[key] = text
+            log.info("поради саду: пошук не вдався", exc_info=True)
+        if items:
+            cache[key] = items
             self.store.set("garden_cache", cache)
-        return text
+        return items
 
     def obs_list(self, chat, cat, ymd, page=0):
         """📝 Редагований список дня: торкніться пункту — змінити, затінити, зробити особистим."""
@@ -919,16 +923,21 @@ class ObservancesUI:
                           + (" (для днів можна додати «| !» — важливий, «| !!» — дуже важливий)." if cat == "days" else "."),
                           [[("✖️ Скасувати", "m:cancel")]])
         if a == "obg":
-            text = await self.ensure_garden(self.today(), force=True)
-            body = esc(text) if text else "Не вдалося — моделі зараз недоступні. Спробуйте згодом."
-            return None, ("🌱 <b>Сад, город, господарство, тварини</b>\n\n" + body + "\n\n<i>Зібрано ШІ; звіряйте з місцевими умовами.</i>",
-                          [[("🔄 Інші поради", self.cb("obg")), ("« Теми дня", self.cb("obh"))]])
+            items = await self.ensure_garden(self.today(), force=True)
+            body = "\n\n".join(f"• {esc(it['text'])}\n↳ <i>Джерело:</i> <a href=\"{esc(it['url'])}\">{esc(it.get('title') or it['url'].split('/')[2])}</a>"
+                                for it in items) or "Порад у джерелах зараз не знайшлося — вигадувати їх бот не буде. Спробуйте згодом."
+            return None, ("🌱 <b>Сад, город, господарство, тварини</b>\n\n" + body
+                          + "\n\n<i>Дослівні уривки з українських сайтів; звіряйте з місцевими умовами.</i>",
+                          [[("🔄 Пошукати ще", self.cb("obg")), ("« Теми дня", self.cb("obh"))]])
         if a == "obj":
             d = self.today()
             await self.ensure_lore(d)
-            items = [it["text"] for it in self.db_items(d.strftime("%m-%d"), "lore", chat)] or \
-                (self.store.get("lore_cache") or {}).get(d.strftime("%m-%d"), "").splitlines()
-            body = "\n".join(esc(x) for x in items if x.strip()) or "Поки нічого — спробуйте згодом."
+            notes = Notes()
+            parts = []
+            for it in self.db_items(d.strftime("%m-%d"), "lore", chat):
+                notes.mark(it.get("url"), _src_label(it.get("url")))
+                parts.append(esc(it["text"]) + ("\n" + notes.flush() if it.get("url") else ("\n↳ <i>ваш запис</i>" if it.get("owner") else "")))
+            body = "\n\n".join(parts) or "Для цього дня прикмет у джерелах не знайшлося — вигадувати їх бот не буде."
             return None, (f"📜 <b>Народний календар · {d.day} {MONTHS_GEN[d.month - 1]}</b>\n\n{body}"[:4000],
                           [[("📝 Редагувати", self.cb("obl", f"lore.{d.strftime('%Y%m%d')}")), ("« Теми дня", self.cb("obh"))]])
         if a == "obu":
