@@ -178,14 +178,29 @@ class ObservancesUI:
         return dt.datetime.now(tz).date() if tz else dt.date.today()
 
     # ----- база
+    def ensure_church(self):
+        """⛪ Великі неперехідні церковні свята (новоюліанський календар ПЦУ й УГКЦ) — щороку; якщо свято вже є в списку дня — не дублюємо."""
+        from . import holidays as H
+        if self.store.get("church_v") == 1:
+            return
+        self._oinit()
+        y = self.today().year
+        for title, md, page, kw in H.CHURCH:
+            d = dt.date(y, int(md[:2]), int(md[3:]))
+            if any(re.search(kw, r["title"]) for r in self.obs_on(d)):
+                continue
+            self.obs_add(title, "day", md, md, 1, "Церковний календар (ПЦУ, УГКЦ)", H.W + page)
+        self.store.set("church_v", 1)
+
     async def ensure_holidays(self):
         """🗓 Рухомі свята з переліку редакції на цей і наступний рік. Дата кожного щороку ЗВІРЯЄТЬСЯ з інтернетом
         (2+ незалежні джерела); розрахунок — лише запасний варіант, поки звірки немає (тоді — «дата уточнюється»)."""
         from . import holidays as H
         import websearch
         self._oinit()
+        self.ensure_church()
         y = self.today().year
-        done = self.store.get("hol_years2") or {}
+        done = self.store.get("hol_years3") or {}
         for yy in (y, y + 1):
             if done.get(str(yy)) == "ok":
                 continue
@@ -208,7 +223,7 @@ class ObservancesUI:
                                 (f"{yy}-%", title.split(" (")[0] + "%"))
                 self.obs_add(name, kind, a2.isoformat(), b2.isoformat(), 0, "Календар (розрахунок)", (srcs[0] if srcs else url))
             done[str(yy)] = "ok" if all_ok else "partial"
-        self.store.set("hol_years2", {k: v for k, v in done.items() if int(k) >= y - 1})
+        self.store.set("hol_years3", {k: v for k, v in done.items() if int(k) >= y - 1})
 
     async def ensure_extras(self, d):
         """🪔 Традиції, 🔭 найближчі астрономічні події, ♈ астрологічні новини, 🌌 сяйво — з джерел, кеш на день (сяйво — 3 год)."""
@@ -730,6 +745,10 @@ class ObservancesUI:
             self.clean_db_titles()
         except Exception:  # noqa: BLE001
             log.info("очищення назв не вдалося", exc_info=True)
+        try:
+            self.ensure_church()  # ⛪ великі церковні свята — одразу, без пошуку
+        except Exception:  # noqa: BLE001
+            log.info("церковні свята не додано", exc_info=True)
         self.holidays_bg()
         self.cplan_bg()
         notes = Notes()
