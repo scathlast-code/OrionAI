@@ -2851,6 +2851,8 @@ async def show(update: Update, text, rows, edit=True, nav=True):
     if q and edit:
         try:
             await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup, link_preview_options=NO_PREVIEW)
+            if getattr(q.message, "message_id", None):
+                LAST_MSG[chat] = (q.message.message_id, rows)
             return
         except BadRequest as e:
             if "not modified" in str(e).lower():
@@ -2864,7 +2866,9 @@ async def show(update: Update, text, rows, edit=True, nav=True):
                 except BadRequest:
                     pass
     try:
-        await update.effective_chat.send_message(text, parse_mode=ParseMode.HTML, reply_markup=markup, link_preview_options=NO_PREVIEW)
+        sent = await update.effective_chat.send_message(text, parse_mode=ParseMode.HTML, reply_markup=markup, link_preview_options=NO_PREVIEW)
+        if getattr(sent, "message_id", None):
+            LAST_MSG[chat] = (sent.message_id, rows)
     except BadRequest as e:
         if "parse entities" not in str(e).lower():
             raise
@@ -5200,6 +5204,31 @@ def cross_context(chat_id, did, scope, budget=12000):
 
 
 LAST_SCREEN = {}  # чат -> (екран, текст екрана, кнопки, час): про що людина питає, якщо пише просто з меню
+LAST_MSG = {}  # чат -> (id повідомлення з останнім екраном, його кнопки): «↗️ відкрити X» підсвічує кнопку саме там
+
+
+async def blink_button(bot, chat_id, label, cbd):
+    """↗️ «відкрити X»: кнопка X на останньому екрані блимає (якщо її там немає — з'являється першою). Повертає, чи вдалося."""
+    last = LAST_MSG.get(chat_id)
+    if not last:
+        return False
+    mid, rows = last
+    rows = [list(r) for r in rows]
+    pos = next(((i, j) for i, r in enumerate(rows) for j, (_t, d) in enumerate(r) if d == cbd), None)
+    if not pos:
+        rows.insert(0, [(label, cbd)])
+        pos = (0, 0)
+    base = rows[pos[0]][pos[1]][0]
+    for k in range(7):
+        rows[pos[0]][pos[1]] = ((f"👉 {base} 👈" if k % 2 == 0 else f"▫️ {base} ▫️") if k < 6 else f"👉 {base}", cbd)
+        try:
+            await bot.edit_message_reply_markup(chat_id, mid, reply_markup=kb(rows))
+        except BadRequest as e:
+            if "not modified" in str(e).lower():
+                continue
+            return k > 0
+        await asyncio.sleep(0.6)
+    return True
 SCREEN_CTX_TTL = 20 * 60
 
 
@@ -9726,7 +9755,14 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.delete()  # службове «/start …» не засмічує чат
         except Exception:  # noqa: BLE001
             pass
-        await PLUGINS.get("news").jump(update.effective_chat.id, m_obb.group(1), m_obb.group(2))
+        news_ = PLUGINS.get("news")
+        try:
+            d_ = datetime.strptime(m_obb.group(2), "%Y%m%d").date()
+        except ValueError:
+            d_ = datetime.now(TZ).date()
+        label, cbd = news_.jump_target(m_obb.group(1), d_)
+        if not await blink_button(ctx.bot, update.effective_chat.id, label, cbd):  # немає екрана — окремим повідомленням
+            await news_.jump(update.effective_chat.id, m_obb.group(1), m_obb.group(2))
         return
     m_obl = re.fullmatch(r"obl_([a-z]+)_(\d{8})", ctx.args[0]) if ctx.args else None
     news_ = PLUGINS.get("news")

@@ -996,8 +996,9 @@ class ObservancesUI:
         parts = []
         for key, title, lines in secs:
             link = self.jump_link(key, d)
-            if key == "wx":
-                parts.append(lines[0] + (f"\n↗️ {link}" if link else ""))
+            if key == "wx":  # посилання — всередині розгортного блоку погоди
+                w = lines[0]
+                parts.append(w.replace("</blockquote>", f"\n↗️ {link}</blockquote>", 1) if link and "</blockquote>" in w else w + (f"\n↗️ {link}" if link else ""))
             else:
                 if link and not any("відкрити " in ln for ln in lines[-1:]):
                     lines = lines + [f"↗️ {link}"]
