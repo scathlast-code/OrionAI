@@ -252,12 +252,10 @@ class WeatherPlugin(Plugin):
             body = "\n\n".join(f"<b>{self.day_title(times[i], i)}</b>\n" + self.summary(pts, data, i)
                                 for i in range(min(days, len(times))) if self.summary(pts, data, i))
             if body:
-                foot = ""
-                if notes is not None:
-                    for nm, la, lo in pts[:6]:
-                        notes.mark(om_url(la, lo), f"Open-Meteo · {nm}")
-                    foot = "\n" + notes.flush()
-                parts.append(f"🌍 <b>Погода · {esc(co['name'])}</b> · {len(pts)} найбільших міст\n<blockquote expandable>{body}{foot}</blockquote>")
+                if notes is not None:  # джерело — одразу після кожного рядка-факту зведення
+                    src = notes.mark(om_url(pts[0][1], pts[0][2]), "Open-Meteo")
+                    body = "\n".join(ln + src if ln and not ln.startswith("<b>") else ln for ln in body.split("\n"))
+                parts.append(f"🌍 <b>Погода · {esc(co['name'])}</b> · {len(pts)} найбільших міст\n<blockquote expandable>{body}</blockquote>")
         return "\n".join(parts)
 
     def countries_screen(self, chat):
@@ -291,7 +289,13 @@ class WeatherPlugin(Plugin):
         if not rows:
             return ""
         lo, hi = min(rows, key=lambda r: r["lo"]), max(rows, key=lambda r: r["hi"])
-        lines = [f"🌡 Температура: від {t(lo['lo'])} (найхолодніше — {lo['name']}) до {t(hi['hi'])} (найтепліше — {hi['name']})"]
+        pos = {n: (la, lon) for n, la, lon, _r in UA_POINTS}
+
+        def city(n):  # 📎 назва міста — сама є посиланням на його прогноз (джерело факту одразу в реченні)
+            if notes is None or n not in pos:
+                return esc(n)
+            return f'<a href="{esc(om_url(*pos[n]))}">{esc(n)}</a>'
+        lines = [f"🌡 Температура: від {t(lo['lo'])} (найхолодніше — {city(lo['name'])}) до {t(hi['hi'])} (найтепліше — {city(hi['name'])})"]
         for region in REGIONS:
             part = [r for r in rows if r["region"] == region]
             if not part:
@@ -301,21 +305,21 @@ class WeatherPlugin(Plugin):
             rlo, rhi = min(r["lo"] for r in part), max(r["hi"] for r in part)
             pp, wind = max(r["pp"] for r in part), max(r["wind"] for r in part)
             ref = next((c for c in REGIONS[region]), None)
-            mark = notes.mark(om_url(ref[1], ref[2]), f"Open-Meteo · {region} ({ref[0]})") if notes is not None and ref else ""
+            mark = notes.mark(om_url(ref[1], ref[2]), "Open-Meteo") if notes is not None and ref else ""
             lines.append(f"{e} <b>{region}</b>: {t(rlo)}…{t(rhi)}, {what}" + (f" · ☂️ до {round(pp)}%" if pp >= 30 else "")
                          + (f" · 💨 до {round(wind)} м/с" if wind >= 8 else "") + mark)
         rain = [r["name"] for r in rows if wet(r["code"]) and r["pp"] >= 50]
         snow = [r["name"] for r in rows if 71 <= int(r["code"]) <= 86 and int(r["code"]) not in (80, 81, 82)]
         storm = [r["name"] for r in rows if int(r["code"]) >= 95]
         windy = [r["name"] for r in rows if r["wind"] >= 12]
-        most = lambda names: "майже по всій країні" if len(names) >= len(rows) * 0.7 else ", ".join(names)  # noqa: E731
+        most = lambda names: "майже по всій країні" if len(names) >= len(rows) * 0.7 else ", ".join(city(n) for n in names)  # noqa: E731
         if storm:
             lines.append("⛈ Гроза: " + most(storm))
         if snow:
             lines.append("❄️ Сніг: " + most(snow))
         rain = [n for n in rain if n not in snow and n not in storm]
         if rain:
-            lines.append("☔ Опади: " + (", ".join(rain) if len(rain) < len(rows) * 0.7 else "майже по всій країні"))
+            lines.append("☔ Опади: " + most(rain))
         elif not snow and not storm:
             lines.append("🌂 Без істотних опадів")
         if windy:
@@ -544,7 +548,7 @@ class WeatherPlugin(Plugin):
         """Кожна прикмета/уривок — окремо, з джерелом-гіперпосиланням під ним."""
         out = []
         for it in items:
-            out.append(f"• {esc(it['text'])}\n↳ <i>Джерело:</i> <a href=\"{esc(it['url'])}\">{esc(it.get('title') or it['url'].split('/')[2])}</a>")
+            out.append(f"• {esc(it['text'])} · <a href=\"{esc(it['url'])}\">{esc(it['url'].split('/')[2].removeprefix('www.'))}</a>")
         return "\n\n".join(out)
 
     async def route(self, update, ctx, chat, args):

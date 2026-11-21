@@ -116,6 +116,25 @@ def parse_wikitext(wt, include_countries=False):
 from footnotes import Notes  # noqa: E402 — 📎 зноски-джерела [n]
 
 
+CLAUSE_RE = re.compile(r"\s+(?:проголошен\w*|встановлен\w*|започатков\w*|запровадж\w*|відповідно до|згідно з|заснован\w*|відзначаєт\w*|"
+                       r"відзначають|святкуєт\w*|ухвален\w*)\b.*$", re.I)
+
+
+def clean_title(t):
+    """🧹 Назва дня/свята без сміття з Вікіпедії: HTML-сутності (&nbsp;), пояснення «проголошено Резолюцією…»,
+    крапка перед роком, подвійні пробіли. Перевіряється перед кожним показом і збереженням."""
+    import html as _h
+    t = str(t or "")
+    for _ in range(3):
+        t = _h.unescape(t)
+    t = t.replace("\xa0", " ").replace("\u200b", "")
+    year = re.search(r"\s*\((\d{4})\)\s*$", t)
+    core = t[:year.start()] if year else t
+    core = CLAUSE_RE.sub("", core)
+    core = re.sub(r"\s+", " ", core).strip(" .,;:—-")
+    return core + (f" ({year.group(1)})" if year else "")
+
+
 def _src_label(url, fallback=""):
     u = str(url or "")
     if "wikipedia.org" in u:
@@ -149,10 +168,22 @@ class ObservancesUI:
         return dt.datetime.now(tz).date() if tz else dt.date.today()
 
     # ----- база
+    def clean_db_titles(self):
+        """Разово: вичистити вже збережені назви (сутності, пояснення з Вікіпедії, крапки перед роком)."""
+        if self.store.get("titles_clean_v") == 1:
+            return
+        self._oinit()
+        with closing(self.store.db()) as con, con:
+            for rid, t in con.execute("SELECT id, title FROM observances").fetchall():
+                c = clean_title(t)
+                if c != t and len(c) >= 5:
+                    con.execute("UPDATE observances SET title=? WHERE id=?", (c[:160], rid))
+        self.store.set("titles_clean_v", 1)
+
     def obs_add(self, title, kind, start, finish, yearly, source, url="", owner=0):
         """Нова тема. Затінена (прихована) раніше не повертається: ключ той самий, INSERT OR IGNORE."""
         self._oinit()
-        title = re.sub(r"\s+", " ", title).strip(" .,;:—-")[:160]
+        title = clean_title(title)[:160]
         if len(title) < 5:
             return None
         key = normalize(title)[:80] + "|" + start + (f"|u{owner}" if owner else "")
@@ -349,16 +380,13 @@ class ObservancesUI:
             span = f" · {fmt(r['start'])}" + (f"–{fmt(r['finish'])}" if r["finish"] != r["start"] else "")
         imp = r.get("imp_", DB.importance(r))
         marks = DB.IMP_MARK.get(imp, "") + ("⭐" if r.get("fav") else "") + ("👤" if r.get("owner") else "")
-        title = esc(r["title"])
+        title = esc(clean_title(r["title"]))
         if notes is not None:  # 📎 джерела — у зносці під списком; ✅/⚠️ — скільки незалежних ресурсів підтверджують
-            v = self.verified(r.get("id")) if r.get("kind") == "day" and not r.get("owner") else None
-            check = ""
-            if v:
-                check = f" ✅{v['n']}" if v["n"] >= 2 else " ⚠️1"
-                for u, host in v.get("urls") or []:
-                    notes.mark(u, host)
-            notes.mark(r.get("url"), _src_label(r.get("url"), r.get("source") or ""))
-            return f"{KINDS.get(r['kind'], '•').split()[0]}{marks} {title}{span}{check}"
+            v = self.verified(r.get("id")) if not r.get("owner") else None
+            check = (f" ✅{v['n']}" if v["n"] >= 2 else " ⚠️1") if v else ""
+            src = notes.mark(r.get("url"), _src_label(r.get("url"), r.get("source") or ""))
+            src += "".join(notes.mark(u, host) for u, host in (v.get("urls") or [])[:2]) if v else ""
+            return f"{KINDS.get(r['kind'], '•').split()[0]}{marks} {title}{span}{check}{src}"
         if link and str(r.get("url", "")).startswith("http"):
             title = f'<a href="{esc(r["url"])}">{title}</a>'
         return f"{KINDS.get(r['kind'], '•').split()[0]}{marks} {title}{span}"
@@ -377,9 +405,8 @@ class ObservancesUI:
         if ongoing:
             lines += ["", "<b>Триває:</b>"] + [self.obs_line(r, link=with_links, notes=notes) for r in ongoing[:12]]
         if notes is not None and lines:
-            if any(self.verified(r["id"]) for r in days[:25]):
-                lines.append("<i>✅N — підтверджено N незалежними джерелами · ⚠️1 — знайдено лише в одному, звіряйте</i>")
-            lines.append(notes.flush())
+            if any(self.verified(r["id"]) for r in days[:25] + ongoing[:12]):
+                lines.append("<i>✅N — скільки незалежних ресурсів підтверджують (посилання — одразу після рядка) · ⚠️1 — лише одне джерело, звіряйте</i>")
         if lines:
             out.append(("days", f"📌 Дні · {len(days)}" + (f" · триває {len(ongoing)}" if ongoing else ""), lines))
         for cat in DB.LIST_CATS:
@@ -391,27 +418,20 @@ class ObservancesUI:
                 for it in items[:cap]:
                     body.append(("👤 " if it.get("owner") else "") + esc(it["text"])
                                 + (notes.mark(it.get("url"), _src_label(it.get("url"))) if notes is not None else ""))
-                    if per_item:
-                        body.append(notes.flush())
+
                 if len(items) > cap:
                     body.append(f"… ще {len(items) - cap} — у «📝 Списки»")
-                if notes is not None:
-                    body.append(notes.flush())
                 out.append((cat, DB.CATS[cat][0], [x for x in body if x]))
         astro = DB.astro_lines(d, self.host.tz)
         if notes is not None:
-            notes.mark("https://gml.noaa.gov/grad/solcalc/", "NOAA (розрахунок Сонця й Місяця)")
-            astro = astro + [notes.flush()]
+            astro = [x + (notes.mark("https://gml.noaa.gov/grad/solcalc/", "NOAA") if i == 0 else "") for i, x in enumerate(astro)]
         out.append(("astro", DB.CATS["astro"][0], astro))
         out.append(("astrol", DB.CATS["astrol"][0], DB.astrol_lines(d)))
         g = (self.store.get("garden_cache") or {}).get(self.garden_key(d))
         if g:
             body = []
             for it in g if isinstance(g, list) else []:
-                body.append("• " + esc(it["text"]))
-                if notes is not None:
-                    notes.mark(it["url"], it.get("title") or "")
-                    body.append(notes.flush())
+                body.append("• " + esc(it["text"]) + (notes.mark(it["url"], it["url"].split("/")[2]) if notes is not None else ""))
             if body:
                 out.append(("garden", DB.CATS["garden"][0], body))
         return out
@@ -442,8 +462,12 @@ class ObservancesUI:
 
     def obs_home(self, chat=None, open_="", weather=""):
         """Зведення дня: дні й погода першими, далі згорнуті списки; ✍️ теми, 📝 списки й ⚙️ меню — «гармоніками».
-        Джерела — зносками [n] біля кожної частини, список джерел унизу."""
+        Джерело кожного рядка — гіперпосиланням одразу після нього."""
         d = self.today()
+        try:
+            self.clean_db_titles()
+        except Exception:  # noqa: BLE001
+            log.info("очищення назв не вдалося", exc_info=True)
         notes = Notes()
         head = f"📅 <b>Теми дня · {d.day} {MONTHS_GEN[d.month - 1]}, {WD[d.weekday()]}</b>\n"
         secs = self.sections(d, chat, notes=notes)
@@ -465,7 +489,7 @@ class ObservancesUI:
         tail = ""
         if up:
             tail += "\n<b>⚠️ Найближчі важливі дні</b>\n<blockquote expandable>" + "\n".join(
-                f"{x.day:02d}.{x.month:02d} · {(x - d).days} дн. · {self.obs_line(r)}" for x, r in up[:10]) + "</blockquote>"
+                f"{x.day:02d}.{x.month:02d} · {(x - d).days} дн. · {self.obs_line(r, notes=notes)}" for x, r in up[:10]) + "</blockquote>"
         on = self.store.get("obs_morning") is not False
         cov = self.obs_coverage()
         hm = self.store.get("obs_time") or "07:30"
@@ -509,7 +533,7 @@ class ObservancesUI:
     def verified(self, rid):
         return (self.store.get("obs_verify") or {}).get(str(rid))
 
-    async def verify_days(self, d, limit=12):
+    async def verify_days(self, d, limit=20):
         """Кожен день зі списку дати шукаємо в інтернеті: скільки незалежних ресурсів (крім Вікіпедії, без .ru/.by/.ir)
         згадують його. Результат — «✅ підтверджено N джерелами» або «⚠️ лише одне джерело», посилання — у зносці.
         Кеш на рік (дні повторюються щороку)."""
@@ -517,7 +541,7 @@ class ObservancesUI:
         cache = self.store.get("obs_verify") or {}
         year, done = str(d.year), 0
         for r in self.obs_on(d):
-            if r["kind"] != "day" or r.get("owner") or done >= limit:
+            if r.get("owner") or done >= limit:  # дні, тижні, місяці, роки — усе звіряємо
                 continue
             c = cache.get(str(r["id"]))
             if c and c.get("y") == year:
@@ -526,7 +550,7 @@ class ObservancesUI:
             title = re.sub(r"\s*\(\d{4}\)\s*$", "", r["title"])
             words = [w for w in re.findall(r"[а-яіїєґa-z]{4,}", title.lower()) if w not in ("день", "всесвітній", "міжнародний")]
             try:
-                rows = await websearch.search_items(f"«{title}» {d.day} {MONTHS_GEN[d.month - 1]}")
+                rows = await websearch.search_items(f"«{title}» {d.day} {MONTHS_GEN[d.month - 1]}" if r["kind"] == "day" else f"«{title}» {d.year}")
             except Exception:  # noqa: BLE001
                 continue
             urls, hosts = [], set()
@@ -990,7 +1014,7 @@ class ObservancesUI:
                           [[("✖️ Скасувати", "m:cancel")]])
         if a == "obg":
             items = await self.ensure_garden(self.today(), force=True)
-            body = "\n\n".join(f"• {esc(it['text'])}\n↳ <i>Джерело:</i> <a href=\"{esc(it['url'])}\">{esc(it.get('title') or it['url'].split('/')[2])}</a>"
+            body = "\n\n".join(f"• {esc(it['text'])} · <a href=\"{esc(it['url'])}\">{esc(it['url'].split('/')[2].removeprefix('www.'))}</a>"
                                 for it in items) or "Порад у джерелах зараз не знайшлося — вигадувати їх бот не буде. Спробуйте згодом."
             return None, ("🌱 <b>Сад, город, господарство, тварини</b>\n\n" + body
                           + "\n\n<i>Дослівні уривки з українських сайтів; звіряйте з місцевими умовами.</i>",
@@ -1001,8 +1025,7 @@ class ObservancesUI:
             notes = Notes()
             parts = []
             for it in self.db_items(d.strftime("%m-%d"), "lore", chat):
-                notes.mark(it.get("url"), _src_label(it.get("url")))
-                parts.append(esc(it["text"]) + ("\n" + notes.flush() if it.get("url") else ("\n↳ <i>ваш запис</i>" if it.get("owner") else "")))
+                parts.append(esc(it["text"]) + (notes.mark(it.get("url"), _src_label(it.get("url"))) if it.get("url") else (" · <i>ваш запис</i>" if it.get("owner") else "")))
             body = "\n\n".join(parts) or "Для цього дня прикмет у джерелах не знайшлося — вигадувати їх бот не буде."
             return None, (f"📜 <b>Народний календар · {d.day} {MONTHS_GEN[d.month - 1]}</b>\n\n{body}"[:4000],
                           [[("📝 Редагувати", self.cb("obl", f"lore.{d.strftime('%Y%m%d')}")), ("« Теми дня", self.cb("obh"))]])
