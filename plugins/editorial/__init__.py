@@ -257,6 +257,7 @@ class Plugin(Base):
         lines = [f"<b>{title} · {len(rs)}</b>", ""]
         if kind == "news":  # 📰 Новини: і з редакційних чатів, і вся робота з новинами (чернетки, пошук, джерела, архів)
             lines = [f"📰 <b>Новини</b>", "", f"📥 Нових чернеток: <b>{self.drafts_new()}</b> — перешліть сюди будь-який допис, і він стане чернеткою.",
+                     "🔎 Теми нижче (🔥 гарячі, ♾ вічні, 🌿 екологія, 🌾 агро, 🩺 здоровʼя, ⚡️ енергетика…): бот знайде свіже, перевірить і напише.",
                      "", f"<b>З редакційних чатів · {len(rs)}</b>"]
         for n, r in enumerate(chunk, page * per + 1):
             lines.append(f"{n}. {'📌 ' if r['kind'] == 'decision' and kind == 'talk' else ''}{self.line(r)}")
@@ -270,8 +271,11 @@ class Plugin(Base):
         rows.append([("👁 Усі, з виконаними" if mode == "open" else "👁 Лише відкриті", self.cb("l", kind, 0, "all" if mode == "open" else "open"))])
         news = self.news_plugin() if kind == "news" else None
         if news:
-            try:
-                rows += news.home(chat)[1]  # чернетки, пошук, джерела, налаштування, архів, довідка
+            try:  # 🔎 теми одразу тут: гарячі, вічні, провокації, блоги, екологія, агро, здоровʼя, енергетика… — і вся робота з чернетками
+                back = news.cb()
+                topics = [r for r in news.D_home(chat)[1] if not any(d == back for _, d in r)]
+                rest = [[b for b in r if b[1] != news.cb("D")] for r in news.home(chat)[1]]
+                rows += topics + [[("📊 Звіт: де просідаємо", news.cb("rp"))]] + [r for r in rest if r]
             except Exception:  # noqa: BLE001
                 pass
         rows.append([("« Редакція", self.cb())])
