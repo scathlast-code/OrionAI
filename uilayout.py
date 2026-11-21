@@ -48,6 +48,9 @@ class Layout:
         self.is_admin = is_admin
         self.home_data = home_data
         self.settings_back = settings_back
+        self._shown = {}
+        self._last = {}  # чат -> ключ історії повідомлення, де людина натискала востаннє
+        self.view_title = {}  # (чат, область) -> заголовок останнього розділу з історії
         self.hist = {}  # chat -> [список даних екранів, позиція]; зберігається в налаштуваннях — переживає перезапуск
         self.use_kb = use_kb  # False — нижньої клавіатури немає: усе живе в головному меню (кнопки-акордеони)
 
@@ -397,11 +400,13 @@ class Layout:
             if r:
                 out.append(r)
         if nav:
-            back, fwd = self.can_back(chat), self.can_fwd(chat)
+            is_home = current == self.home_data
+            back, fwd = self.can_back(chat) and not is_home, self.can_fwd(chat)
+            parent = parent or (self.guess_parent(current) if not is_home else None)
             navrow = []
             if back:
                 navrow.append((NAV_BACK, "m:nav:back"))
-            elif parent:  # історії немає (наприклад, відкрили з сповіщення) — «Назад» веде до батьківського розділу
+            elif parent and parent != current:  # історії немає (наприклад, відкрили з сповіщення) — «Назад» веде до батьківського розділу
                 navrow.append((NAV_BACK, parent))
             if current != self.home_data:
                 navrow.append((NAV_HOME, "m:nav:home"))
@@ -411,14 +416,27 @@ class Layout:
                 out.append(navrow)
         return [[(self.relabel(chat, t), d) for t, d in row] for row in out]
 
+    def guess_parent(self, data):
+        """Куди «Назад», коли історії немає: підрозділ плагіна → його головний екран; інакше — нікуди (лишається «Додому»)."""
+        parts = (data or "").split(":")
+        if len(parts) > 3 and parts[:2] == ["m", "pl"]:
+            return ":".join(parts[:3])
+        return None
+
+    def shown(self, chat, data):
+        """Що зараз на екрані (навіть якщо це не «вид», а результат дії) — щоб «Назад» вів на попередній, а не через один."""
+        if data and not data.startswith("m:nav"):
+            self._shown[(chat, SCOPE.get())] = data
+
     def _h(self, chat):
         scope = SCOPE.get()
         if scope:
             key = (chat, scope)
             if key not in self.hist:
+                # нове повідомлення з кнопками: продовжуємо історію того повідомлення, з якого прийшли (а не застарілу загальну)
                 base = self.hist.get(chat) or [[], -1]
-                cur = base[0][base[1]] if 0 <= base[1] < len(base[0]) else None
-                self.hist[key] = [[cur] if cur else [], 0 if cur else -1]  # нове повідомлення: починаємо з його екрана
+                base = [list(base[0]), base[1]]
+                self.hist[key] = [base[0][:base[1] + 1], base[1]] if base[1] >= 0 else [[], -1]
                 scoped = [k for k in self.hist if isinstance(k, tuple)]
                 for old in scoped[:-SCOPED_MAX]:
                     self.hist.pop(old, None)
@@ -430,7 +448,18 @@ class Layout:
         return self.hist[chat]
 
     def _save_hist(self, chat):
-        if SCOPE.get():  # історії окремих повідомлень — лише в пам'яті
+        scope = SCOPE.get()
+        if scope == "app":  # у застосунку своя історія
+            return
+        if scope:  # історія повідомлення стає й загальною: нове повідомлення з кнопками продовжить саме її
+            h = self.hist.get((chat, scope))
+            if h:
+                self.hist[chat] = [list(h[0]), h[1]]
+            tok = SCOPE.set("")
+            try:
+                self._save_hist(chat)
+            finally:
+                SCOPE.reset(tok)
             return
         try:
             stack, pos = self._h(chat)
@@ -439,7 +468,12 @@ class Layout:
             pass
 
     def visit(self, chat, data):
-        """Запам'ятовує відкритий екран. Однаковий екран підряд не дублюється."""
+        """Запам'ятовує відкритий екран. Однаковий екран підряд не дублюється. Головне меню — корінь: історія починається з нього."""
+        if data == self.home_data:
+            h = self._h(chat)
+            h[0], h[1] = [data], 0
+            self._save_hist(chat)
+            return
         stack, pos = self._h(chat)
         if pos >= 0 and stack[pos] == data:
             return
@@ -456,7 +490,9 @@ class Layout:
         return stack[pos] if 0 <= pos < len(stack) else None
 
     def can_back(self, chat):
-        return self._h(chat)[1] > 0
+        stack, pos = self._h(chat)
+        cur = self._shown.get((chat, SCOPE.get()))
+        return pos > 0 or (0 <= pos < len(stack) and bool(cur) and cur != stack[pos])
 
     def can_fwd(self, chat):
         stack, pos = self._h(chat)
@@ -464,6 +500,9 @@ class Layout:
 
     def back(self, chat):
         stack, pos = self._h(chat)
+        cur = self._shown.get((chat, SCOPE.get()))
+        if 0 <= pos < len(stack) and cur and cur != stack[pos] and stack[pos] != self.home_data:
+            return stack[pos]  # на екрані — підекран, якого немає в історії: «Назад» — до розділу, з якого його відкрили
         if pos > 0:
             self._h(chat)[1] = pos - 1
             self._save_hist(chat)

@@ -3105,6 +3105,14 @@ async def show(update: Update, text, rows, edit=True, nav=True):
     # навігація ◀️ Назад · 🏠 Додому · Вперед ▶️ — ПІСЛЯ підміни на об'єднаний розділ, інакше вона губилась
     rows = fold_rows(chat, rows)
     scr = SCREEN.get() or ""
+    if nav and scr:  # що саме на екрані: розділ з історії чи підекран, відкритий дією (для правильного «Назад»)
+        tk = _title_key(text)
+        if is_view(scr):
+            L.view_title[(chat, uilayout_scope())] = tk
+            L.shown(chat, scr)
+        else:
+            same = tk and tk == L.view_title.get((chat, uilayout_scope()))
+            L.shown(chat, (L.current(chat) or scr) if same else scr)
     rows = L.decorate(chat, rows, nav=nav, current=("m:home" if scr in ("m:home", "m:nav:home") else (scr or L.current(chat))))
     if SCREEN.get() == "m:btn" and prefs(chat).get("menu_before_v7"):
         rows = [list(r) for r in rows] + [[("↩️ Меню, як було до об'єднання", "m:menuold")]]
@@ -8261,6 +8269,11 @@ HUB_BUILDING = contextvars.ContextVar("hub_building", default=False)
 HUB_LAST = {}  # chat -> частини останнього об'єднаного екрана (для застосунку: кожна згортається окремо)
 
 
+def uilayout_scope():
+    import uilayout
+    return uilayout.SCOPE.get()
+
+
 def _title_key(text):
     t = re.sub(r"<[^>]+>", "", (text or "").split("\n")[0])
     return re.sub(r"[\d·()]+", "", t).strip()
@@ -8338,6 +8351,7 @@ async def scr_hub(chat_id, key):
                 rows += part
     finally:
         HUB_BUILDING.reset(tok)
+        SCREEN.set(f"m:hub:{key}")  # частини розділу не підміняють, що саме на екрані (інакше «Назад» плутався)
     set_pref(chat_id, "hub_ctx", {"key": key, "titles": [t for t in titles if t]})
     HUB_LAST[chat_id] = secs
     text = f"<b>{title}</b>\n<i>{intro}</i>\n\n" + "\n\n".join(blocks)
@@ -8377,6 +8391,8 @@ async def open_data(update, ctx, data, edit=True, record=True):
 async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True, record=True):
     chat_id = update.effective_chat.id
     q = update.callback_query
+    if q is not None and getattr(q, "message", None) is not None and not L_SCOPE.get():
+        L_SCOPE.set(f"m{q.message.message_id}")  # «Назад» — в межах саме цього повідомлення (так само, як в open_data)
     parts = data.split(":")
     a = parts[1] if len(parts) > 1 else "home"
     arg = parts[2] if len(parts) > 2 else None
