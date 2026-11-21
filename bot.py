@@ -3075,6 +3075,7 @@ def scr_task(chat_id, tid):
         rows.append([pin_button("t", tid), ("🗄 В архів", f"m:arc:t:{tid}"), ("🗑 У кошик", f"m:trs:t:{tid}")])
     if is_admin_id(chat_id) and any(SVC.connected(x) for x in SERVICES):
         rows.append([("📤 Надіслати в таск-менеджер", f"m:svp:t:{tid}")])
+    rows.append([("➕ Дії: в нотатки, сьогодні, простір, розмову", f"m:xs:t:{tid}")])
     rows.append([("« Завдання", "m:tl"), HOME])
     return text, rows
 
@@ -3539,12 +3540,12 @@ def scr_space(chat_id, sid):
 
 def scr_space_edit(chat_id, sid):
     items = SPACES.items(sid, "task") + SPACES.items(sid, "note")
-    lines = ["✏️ <b>Позначити виконаним або прибрати</b>", ""]
+    lines = ["✏️ <b>Позначити виконаним, прибрати або ➕ взяти собі</b> (у завдання, нотатки, «На сьогодні», розмову з ШІ)", ""]
     rows = []
     for n, it in enumerate(items[:20], 1):
         mark = ("☑️" if it["done"] else "▫️") if it["kind"] == "task" else "📝"
         lines.append(f"{n}. {mark} {esc(it['text'][:80])}")
-        row = [(f"🗑 {n}", f"m:sp:d:{sid}:{it['id']}")]
+        row = [(f"➕ {n}", f"m:xs:s:{it['id']}"), (f"🗑 {n}", f"m:sp:d:{sid}:{it['id']}")]  # ➕ — собі в завдання/нотатки/сьогодні
         if it["kind"] == "task":
             row.insert(0, (f"{'↩️' if it['done'] else '✅'} {n}", f"m:sp:x:{sid}:{it['id']}"))
         rows.append(row)
@@ -3781,23 +3782,124 @@ def invite_link(code):
     return f"https://t.me/{BOT_USERNAME}?start=inv_{code}" if BOT_USERNAME else f"/start inv_{code}"
 
 
+def today_key():
+    return datetime.now(TZ).date().isoformat()
+
+
+def agenda_block(chat_id):
+    """📌 На сьогодні: винесене з розмов, завдань, нотаток і просторів + завдання, заплановані на сьогодні."""
+    day = today_key()
+    AGENDA.carry_over(chat_id, day, (datetime.now(TZ).date() - timedelta(days=1)).isoformat())
+    items = AGENDA.items(chat_id, day)
+    start = datetime.now(TZ).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    planned = [t for t in tasks_open(chat_id=chat_id, status="scheduled") if t.get("run_at") and start <= t["run_at"] < start + 86400]
+    lines, rows = [], []
+    for it in items[:12]:
+        lines.append(("✅ " if it["done"] else "▫️ ") + agenda_mod.KIND_ICON.get(it["kind"], "•") + " " + esc(short_q(it["text"], 90)))
+        rows.append([(("✅" if it["done"] else "▫️") + " " + short_q(it["text"], 26), f"m:ag:{it['id']}")])
+    for t in planned[:6]:
+        lines.append(f"🕒 {datetime.fromtimestamp(t['run_at'], TZ):%H:%M} · {esc(short_q(t['history_text'], 80))}")
+    head = "<b>📌 На сьогодні</b>\n" + ("\n".join(lines) if lines else
+                                         "<i>Порожньо. Додайте завдання чи нотатку кнопками нижче або винесіть сюди будь-що з розмови, "
+                                         "завдань, нотаток і просторів (кнопка «➕ Дії»).</i>")
+    rows.append([("➕ Завдання", "m:tnew"), ("📝 Нотатка", "m:nadd")])
+    rows.append([("🤝 Простори", "m:sp"), ("💬 Розмови", "m:dl")])
+    return head, rows
+
+
 async def scr_today(chat_id):
-    """🌅 Те саме зведення, що приходить зранку (дні, свята, погода, прикмети), — тут і зараз, скільки завгодно разів."""
+    """🌅 Сьогодні: мій список дня (винесене з розмов, завдань, нотаток, просторів) + зведення дня (дати, свята, погода, прикмети)."""
     news, wx = PLUGINS.get("news"), PLUGINS.get("wx")
-    extra = [[("🌤 Погода детально", "m:pl:wx"), ("🔄 Оновити", "m:today")]]
+    ag_text, ag_rows = agenda_block(chat_id)
+    extra = ag_rows + [[("🌤 Погода детально", "m:pl:wx"), ("🔄 Оновити", "m:today")]]
     if news and is_admin_id(chat_id) and hasattr(news, "obs_digest"):
         try:
             text, rows = await news.obs_digest(chat_id)
-            return "🌅 " + text, rows + extra
+            return ag_text + "\n\n🌅 " + text, rows + extra
         except Exception:  # noqa: BLE001
             log.exception("today: зведення днів")
     if wx:
         try:
-            return (await wx.morning_text(chat_id),
+            return (ag_text + "\n\n" + await wx.morning_text(chat_id),
                     [[("📜 Прикмети й звичаї дня", "m:pl:wx:lore")]] + extra)
         except Exception as exc:  # noqa: BLE001
-            return f"🌅 <b>Сьогодні</b>\n\n⚠️ Не вдалося отримати дані: {esc(type(exc).__name__)}. Спробуйте за хвилину.", extra
-    return "🌅 <b>Сьогодні</b>\n\nПогода й календар днів вимкнені в 🔌 Плагінах.", [[HOME]]
+            return ag_text + f"\n\n🌅 ⚠️ Зведення дня зараз недоступне ({esc(type(exc).__name__)}) — спробуйте за хвилину.", extra
+    return ag_text + "\n\n🌅 Погода й календар днів вимкнені в 🔌 Плагінах.", extra + [[HOME]]
+
+
+# ---------------------------------------------------------------- 🔗 зв'язки між розділами: «➕ Дії»
+X_SRC = {"m": "повідомлення", "t": "завдання", "n": "нотатку", "a": "пункт дня", "s": "пункт простору"}
+
+
+def x_text(chat_id, src, ref):
+    """Текст об'єкта, який виносимо в інший розділ (лише свій — чужого не віддаємо)."""
+    ref = int(ref)
+    if src == "m":
+        with closing(db()) as con:
+            r = con.execute("SELECT text, chat_id FROM messages WHERE id=?", (ref,)).fetchone()
+        return r["text"] if r and r["chat_id"] == chat_id else ""
+    if src == "t":
+        t = task_get(ref)
+        return t["history_text"] if t and t["chat_id"] == chat_id else ""
+    if src == "n":
+        n = item_get("n", ref)
+        return n["text"] if n and n.get("chat_id") == chat_id else ""
+    if src == "a":
+        a = AGENDA.get(ref)
+        return a["text"] if a and a["chat"] == chat_id else ""
+    if src == "s":
+        it = SPACES.item(ref)
+        return it["text"] if it and SPACES.is_member(it["space"], chat_id) else ""
+    return ""
+
+
+def scr_x(chat_id, src, ref):
+    """«➕ Дії»: винести це в завдання, нотатки, «На сьогодні», простір або окрему розмову з ШІ."""
+    text = x_text(chat_id, src, ref)
+    if not text:
+        return "Не знайдено (або це не ваше).", [[HOME]]
+    acts = [("⏰ В завдання", f"m:x:t:{src}:{ref}"), ("📝 В нотатки", f"m:x:n:{src}:{ref}"),
+            ("🌅 На сьогодні", f"m:x:d:{src}:{ref}"), ("🤝 У простір", f"m:x:s:{src}:{ref}"), ("💬 Обговорити з ШІ", f"m:x:c:{src}:{ref}")]
+    own = {"t": "m:x:t", "n": "m:x:n", "a": "m:x:d"}.get(src)
+    acts = [a for a in acts if not (own and a[1].startswith(own + ":"))]
+    rows = [acts[i:i + 2] for i in range(0, len(acts), 2)]
+    return (f"➕ <b>Що зробити з цим {X_SRC.get(src, '')}?</b>\n\n«{esc(short_q(text, 300))}»\n\n"
+            "<i>Це не копія: пункт пам'ятає, звідки він, — з «🌅 Сьогодні», завдань, нотаток і просторів можна повернутись до оригіналу.</i>"), rows
+
+
+async def do_x(bot, chat_id, what, src, ref, sid=None):
+    """Виконати «➕ Дію»: → (сповіщення, екран)."""
+    text = x_text(chat_id, src, ref)
+    if not text:
+        return "Не знайдено", None
+    if what == "t":
+        tid = create_planned_task(chat_id, text)
+        return "⏰ Додано в завдання", scr_task(chat_id, tid)
+    if what == "n":
+        nid = add_note_db(text, "", f"з {X_SRC.get(src, 'бота')}", chat_id)
+        return "📝 Додано в нотатки", scr_note(chat_id, nid) if nid else None
+    if what == "d":
+        AGENDA.add(chat_id, today_key(), src, ref, text)
+        return "🌅 Додано в «На сьогодні»", None
+    if what == "s":
+        mine = SPACES.mine(chat_id)
+        if not sid:
+            if not mine:
+                return None, ("🤝 Спершу створіть простір або приєднайтеся до нього.", [[("🤝 Простори", "m:sp")]])
+            return None, ("🤝 У який простір?", [[(f"🤝 {sp['name'][:30]}", f"m:x:s:{src}:{ref}:{sp['id']}")] for sp in mine[:10]])
+        if not SPACES.is_member(int(sid), chat_id):
+            return "Ви не в цьому просторі", None
+        SPACES.add(int(sid), "note", text, chat_id)
+        await sp_broadcast(bot, int(sid), f"🤝 <b>{esc(SPACES.get(int(sid))['name'])}</b>: нова нотатка\n\n{esc(short_q(text, 600))}",
+                           [[("Відкрити простір", f"m:sp:o:{sid}")]], exclude=chat_id)
+        return "🤝 Додано в простір — учасники отримали сповіщення", scr_space(chat_id, int(sid))
+    if what == "c":
+        did = dialog_create(chat_id, "💬 " + short_q(text, 40))
+        set_pref(chat_id, "dialog", did)
+        save_message(chat_id, "user", f"Ось що хочу обговорити ({X_SRC.get(src, 'з бота')}):\n\n{text}", source="context", dialog_id=did)
+        return None, (f"💬 Створено розмову «{esc(short_q(text, 40))}» — модель бачить цей текст. Напишіть, що з ним зробити.",
+                      [[("💬 До розмови", f"m:dsw:{did}")]])
+    return "?", None
 
 
 def scr_access():
@@ -3934,6 +4036,7 @@ def scr_note(chat_id, nid):
         return scr_notes(chat_id)
     text = f"<b>📝 Нотатка #{nid}</b>\n{datetime.fromtimestamp(n['ts'], TZ).strftime('%d.%m.%Y %H:%M')}\n\n{esc(n['text'])}"
     rows = [[pin_button("n", nid)] + ([("📤 Надіслати в…", f"m:svp:n:{nid}")] if is_admin_id(chat_id) and any(SVC.connected(x) for x in SERVICES) else []),
+            [("➕ Дії: в завдання, сьогодні, простір, розмову", f"m:xs:n:{nid}")],
             [("🗄 В архів", f"m:arc:n:{nid}"), ("🗑 У кошик", f"m:trs:n:{nid}")], [("« Нотатки", "m:nt"), HOME]]
     return text, rows
 
@@ -5703,6 +5806,8 @@ async def do_translate(update, ctx, text, target, custom=None, chat_id=None):
         await ctx.bot.send_message(chat_id, part, reply_markup=kb(rows) if i == len(parts) - 1 else None)
 
 SPACES = spaces_mod.Spaces(__import__("datadir").path("spaces.sqlite3", "ORION_SPACES_DB"))
+import agenda as agenda_mod  # noqa: E402 — 🌅 «На сьогодні»: усе, що винесли з розмов, завдань, нотаток і просторів
+AGENDA = agenda_mod.Agenda(DB_PATH)
 COLLECT = collect_mod.Collect(__import__("datadir").path("collected.sqlite3", "ORION_COLLECT_DB"))
 BATCH = collect_mod.Batches(COLLECT)
 SUM_LOCKS = {}  # чат -> asyncio.Lock: одне зведення за раз, нові репости тим часом просто зберігаються
@@ -7553,7 +7658,7 @@ async def finish_wizard(update, ctx, chat_id):
 
 EDITOR_ACTIONS = {"btn", "bi", "bmv", "bup", "bdn", "bset", "lren", "lunren", "bgnew", "bgdel", "brl", "brldel", "breset"}
 VIEW_ACTIONS = {"appm", "sbx", "imp", "home", "dl", "d", "f", "tl", "t", "md", "lim", "st", "nt", "cr", "canva", "pins", "box", "it", "acc",
-                "mem", "mdl", "mdv", "btn", "bi", "brl", "voice", "cpl", "cp", "bk", "fr", "svc", "sv", "svls", "diag", "jl", "j", "bks", "bkt", "bkls", "bkrs", "bkfmt", "bkscope", "lib", "mi", "note", "bl", "pr", "pri", "backup", "qask", "rm", "rw", "cl", "why", "mdtest", "hub", "today", "prem", "ava", "minfo"}
+                "mem", "mdl", "mdv", "btn", "bi", "brl", "voice", "cpl", "cp", "bk", "fr", "svc", "sv", "svls", "diag", "jl", "j", "bks", "bkt", "bkls", "bkrs", "bkfmt", "bkscope", "lib", "mi", "note", "bl", "pr", "pri", "backup", "qask", "rm", "rw", "cl", "why", "mdtest", "hub", "today", "prem", "ava", "minfo", "xs", "ag"}
 
 
 def is_view(data):
@@ -8222,6 +8327,35 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
             screen = ("🕘 О котрій питати про Premium? Напишіть час, наприклад <code>09:30</code>.", [CANCEL_ROW])
         else:
             screen = premium.screen(chat_id, TZ)
+    elif a == "xs":  # ➕ Дії з об'єктом (повідомлення, завдання, нотатка, пункт дня чи простору)
+        screen = scr_x(chat_id, parts[2], parts[3])
+        if parts[2] == "m":  # під відповіддю ШІ — окремим повідомленням, щоб не затерти саму відповідь
+            await show(update, *screen, edit=False)
+            screen = None
+    elif a == "x":
+        t_, scr_ = await do_x(ctx.bot, chat_id, parts[2], parts[3], parts[4], parts[5] if len(parts) > 5 else None)
+        toast = t_ or toast
+        screen = scr_ or (await scr_today(chat_id) if parts[2] == "d" else None)
+        if screen is None:
+            screen = scr_x(chat_id, parts[3], parts[4])
+    elif a == "ag":  # 📌 пункт «На сьогодні»
+        it = AGENDA.get(arg) if arg and arg.isdigit() else None
+        sub = parts[3] if len(parts) > 3 else ""
+        if not it or it["chat"] != chat_id:
+            screen = await scr_today(chat_id)
+        elif sub == "done":
+            AGENDA.toggle(it["id"])
+            screen = await scr_today(chat_id)
+        elif sub == "rm":
+            AGENDA.remove(it["id"])
+            toast = "Прибрано з «На сьогодні»"
+            screen = await scr_today(chat_id)
+        else:
+            open_ = {"t": f"m:t:{it['ref']}", "n": f"m:n:{it['ref']}", "s": "m:sp"}.get(it["kind"])
+            rows_ = [[("✅ Виконано" if not it["done"] else "↩️ Не виконано", f"m:ag:{it['id']}:done"), ("🗑 Прибрати", f"m:ag:{it['id']}:rm")],
+                     [("➕ Дії", f"m:xs:a:{it['id']}")] + ([("↗️ Відкрити оригінал", open_)] if open_ else []),
+                     [("« Сьогодні", "m:today")]]
+            screen = (f"📌 <b>На сьогодні</b> · {agenda_mod.KIND_ICON.get(it['kind'], '•')} з {X_SRC.get(it['kind'], 'бота')}\n\n{esc(it['text'])}", rows_)
     elif a == "today":  # 🌅 зведення дня — будь-коли
         screen = await scr_today(chat_id)
     elif a == "col":  # 📥 режим збору текстів
@@ -9975,6 +10109,12 @@ async def _answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE, content, histo
     else:
         await send_long(ctx.bot, chat_id, demarkdown(body), head=top, foot=foot, html=md_html(body))
     await send_media(ctx.bot, chat_id, MEDIA.get())
+    sent_ids = appfeed.SENT.get() or []
+    if sent_ids and aid and prefs(chat_id).get("answer_actions", True):  # ➕ одна кнопка під відповіддю: у завдання, нотатки, сьогодні, простір
+        try:
+            await ctx.bot.edit_message_reply_markup(chat_id, sent_ids[-1], reply_markup=kb([[("➕ Дії", f"m:xs:m:{aid}")]]))
+        except Exception:  # noqa: BLE001
+            pass
     link_msg(aid, chat_id, appfeed.SENT.get() or [])
     appfeed.SENT.reset(sent_tok)
     if away or (parallel and outcome != "done") or (time.time() - started > 60 and outcome == "done" and away):
