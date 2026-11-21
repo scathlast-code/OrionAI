@@ -2414,7 +2414,7 @@ ITEMS = {
     "tl": ("⏰ Завдання", "m:tl"),
     "cr": ("🎨 Створення", "m:hub:cr"),
     "menu": ("☰ Меню", "m:home"),
-    "md": ("🤖 Моделі", "m:hub:md"),
+    "md": ("🤖 ШІ-моделі", "m:hub:md"),
     "qask": ("❓ Спитати модель", "m:qask"),
     "st": ("🎛 Поведінка", "m:hub:st"),
     "help": ("❓ Допомога", "m:hub:help"),
@@ -2453,16 +2453,13 @@ ITEMS = {
 }
 DEFAULT_GROUPS = {
     "work": "💬 Робота",
-    "ai": "🤖 ШІ й створення",
     "settings": "⚙️ Налаштування",
-    "plugins": "📰 Медіа",
 }
 DEFAULT_LAYOUT = [
-    ["g:work", "home"], ["g:plugins", "home"], ["g:ai", "home"], ["g:settings", "home"],
-    ["today", "g:work"], ["dl", "g:work"], ["tl", "g:work"], ["nt", "g:work"], ["col", "g:work"], ["sp", "g:work"], ["pins", "g:work"], ["inbox", "g:work"],
-    ["news", "g:plugins"], ["utm", "g:plugins"], ["stk", "g:plugins"], ["med", "g:plugins"], ["wx", "g:plugins"],
-    ["md", "g:ai"], ["cr", "g:ai"],
-    ["st", "g:settings"], ["acc", "g:settings"], ["backup", "g:settings"], ["svc", "g:settings"],
+    ["today", "home"], ["g:work", "home"], ["g:settings", "home"],
+    ["dl", "g:work"], ["tl", "g:work"], ["nt", "g:work"], ["col", "g:work"], ["sp", "g:work"], ["pins", "g:work"], ["inbox", "g:work"],
+    ["news", "g:work"], ["utm", "g:work"], ["stk", "g:work"], ["med", "g:work"], ["wx", "g:work"], ["cr", "g:work"],
+    ["md", "g:settings"], ["st", "g:settings"], ["acc", "g:settings"], ["backup", "g:settings"], ["svc", "g:settings"],
     ["btns", "g:settings"], ["diag", "g:settings"], ["help", "g:settings"],
     # вкладки об'єднаних розділів: окремо в меню не стоять, але відкриваються з розділу-«хаба» (і їх можна повернути в меню в «🧭 Вигляд»)
     ["arc", "off"], ["trash", "off"], ["jrn", "off"], ["qask", "off"], ["prio", "off"], ["partners", "off"], ["ollama", "off"],
@@ -2475,6 +2472,13 @@ L = Layout(ITEMS, DEFAULT_LAYOUT, DEFAULT_GROUPS, lambda c: prefs(c), lambda c, 
 
 
 def _migrate_compact_menu(chat_id):
+    try:
+        _migrate_compact_menu_inner(chat_id)
+    finally:
+        _migrate_menu_v8(chat_id)
+
+
+def _migrate_compact_menu_inner(chat_id):
     """Міграція меню: шість категорій-акордеонів, без дубльованих назв."""
     p = prefs(chat_id)
     if p.get("compact_menu_v2") and not p.get("no_start_group_v6"):
@@ -2518,7 +2522,7 @@ def _migrate_compact_menu(chat_id):
     if not p.get("plugins_menu_v5"):
         # Нова головна категорія «🔌 Плагіни» (Ньюзрум, Стікери) — додаємо, не чіпаючи власних налаштувань меню.
         groups = dict(p.get("groups") or DEFAULT_GROUPS)
-        groups.setdefault("plugins", DEFAULT_GROUPS["plugins"])
+        groups.setdefault("plugins", DEFAULT_GROUPS.get("plugins", "📰 Медіа"))
         set_pref(chat_id, "groups", groups)
         saved = [list(x) for x in (p.get("layout") or [])]
         if saved:
@@ -2564,7 +2568,7 @@ def _migrate_compact_menu(chat_id):
         # «🔌 Плагіни» — технічне слово: категорія стає «📰 Медіа», а керування плагінами переходить у ⚙️ Налаштування.
         groups = dict(p.get("groups") or DEFAULT_GROUPS)
         if groups.get("plugins") in (None, "🔌 Плагіни"):
-            groups["plugins"] = DEFAULT_GROUPS["plugins"]
+            groups["plugins"] = DEFAULT_GROUPS.get("plugins", "📰 Медіа")
         set_pref(chat_id, "groups", groups)
         saved = [list(x) for x in (p.get("layout") or [])]
         saved = [["plg", "g:settings"] if x[0] == "plg" and x[1] == "g:plugins" else x for x in saved]
@@ -2586,6 +2590,40 @@ def _migrate_compact_menu(chat_id):
         set_pref(chat_id, "no_start_group_v6", True)
         set_pref(chat_id, "merged_menu_v7", True)
         p = prefs(chat_id)
+
+
+def _migrate_menu_v8(chat_id):
+    """Меню v8: «Робота» + «Медіа» → одна «💬 Робота» (з «🎨 Створенням»); «🤖 ШІ-моделі» → у «⚙️ Налаштування»;
+    «🌅 Сьогодні» — на головному, одразу під «Відкрити застосунок». Свої назви й порядок решти пунктів зберігаються."""
+    p = prefs(chat_id)
+    if p.get("menu_v8"):
+        return
+    saved = [list(x) for x in (p.get("layout") or [])]
+    if saved:
+        out = []
+        for item, place in saved:
+            if item in ("g:plugins", "g:ai", "today"):
+                continue
+            if place in ("g:plugins", "g:ai"):
+                place = "g:settings" if item == "md" else "g:work"
+            out.append([item, place])
+        if not any(i == "md" for i, _p in out):
+            out.append(["md", "g:settings"])
+        # 🤖 ШІ-моделі — першим у налаштуваннях
+        md = [x for x in out if x[0] == "md"]
+        out = [x for x in out if x[0] != "md"]
+        pos = next((k for k, x in enumerate(out) if x[1] == "g:settings"), len(out))
+        out[pos:pos] = [["md", "g:settings"]] if md else []
+        set_pref(chat_id, "layout", [["today", "home"]] + out)
+    groups = {k: v for k, v in (p.get("groups") or DEFAULT_GROUPS).items() if k not in ("plugins", "ai")}
+    groups.setdefault("work", DEFAULT_GROUPS["work"])
+    groups.setdefault("settings", DEFAULT_GROUPS["settings"])
+    set_pref(chat_id, "groups", groups)
+    labels = dict(p.get("labels") or {})
+    if labels.get("md") in ("🤖 Моделі",):
+        labels.pop("md")
+        set_pref(chat_id, "labels", labels)
+    set_pref(chat_id, "menu_v8", True)
 
 
 def layout(chat_id):
@@ -7542,7 +7580,7 @@ HUBS = {
         ("🗄 Архів — прибране з очей", "m:box:archived", 2, "all"),
         ("🗑 Кошик — 30 днів до видалення", "m:box:trash", 2, "all"),
     ]),
-    "md": ("🤖 Моделі", "Хто відповідає, чи всі моделі працюють, черговість і своя модель.", [
+    "md": ("🤖 ШІ-моделі", "Хто відповідає, чи всі моделі працюють, черговість і своя модель.", [
         ("🤖 Хто відповідає", "m:md", 6, "all"),
         ("🩺 Стан моделей", "m:mdtest:show", 30, "all"),
         ("❓ Спитати одну модель", "m:qask", 1, "all"),
