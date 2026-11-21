@@ -502,37 +502,50 @@ class WeatherPlugin(Plugin):
         return t
 
     async def lore(self, day=None):
-        """📜 Народний календар дня: назва дня в народі, прикмети про погоду, звичаї й заборони. Кеш на дату (ММ-ДД)."""
+        """📜 Народний календар дня — лише СПРАВЖНІ прикмети й звичаї з джерел (нічого не генерується ШІ):
+        [{text, url, title}] — розділ «Народний календар» Вікіпедії + дослівні уривки з українських сторінок пошуку. Кеш на дату."""
         now = dt.datetime.now(self.host.tz) if getattr(self.host, "tz", None) else dt.datetime.now()
         day = day or now.date()
         key = day.strftime("%m-%d")
         c = self.cfg()
-        if c.get("lore_v") != 2:  # прикмети, зібрані до обов'язкової перевірки, — перезбираємо й перевіряємо
-            c["lore"], c["lore_v"] = {}, 2
+        if c.get("lore_v") != 3:  # старі прикмети (згенеровані ШІ) — більше не показуємо
+            c["lore"], c["lore_v"] = {}, 3
             self.save(c)
         cached = (c.get("lore") or {}).get(key)
-        import langguard
-        if cached and not langguard.foreign(cached):  # старий кеш з іншомовними словами — перезбираємо
+        if isinstance(cached, list) and cached:
             return cached
-        if not getattr(self.host, "ask_ai", None):
-            return ""
-        prompt = (f"Народний календар України на {day.day} {MONTHS[day.month - 1]}. Напиши українською, коротко:\n"
-                  "1) як цей день називають у народі й чия пам'ять (одним рядком);\n"
-                  "2) 3–5 народних прикмет про погоду цього дня;\n"
-                  "3) 2–4 звичаї, обряди чи заборони цього дня;\n"
-                  "4) 1–2 приказки, якщо відомі.\n"
-                  "Пиши лише українською, без жодного слова іншими мовами. "
-                  "Лише справжні, відомі українські народні прикмети й звичаї; нічого не вигадуй — якщо для цього дня мало відомо, "
-                  "напиши менше. Без вступів і висновків, рядки з емодзі на початку, без markdown-зірочок.")
-        text, model = await self.host.ask_ai(prompt, label="🌤 Погода: прикмети дня")
-        text = re.sub(r"[*_#`]+", "", (text or "").strip())[:2500]
-        # 🔎 обов'язкова перевірка ІНШОЮ моделлю: вислови, кальки, факти (не той день, вигадані звичаї) — до показу й кешування
-        text = await langguard.review(text, lambda pr: self._ask_text(pr, avoid=model), "народні прикмети й звичаї дня")
-        text = re.sub(r"[*_#`]+", "", text)[:2500]
-        if text:
-            c.setdefault("lore", {})[key] = text
+        items = []
+        news = self.host.extra.get("plugin", lambda pid: None)("news")
+        if news and hasattr(news, "db_items"):
+            try:
+                items += [{"text": r["text"], "url": r.get("url") or "", "title": "Вікіпедія"} for r in news.db_items(key, "lore")
+                          if str(r.get("url") or "").startswith("http")]
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            import websearch
+            rows = await websearch.search_items(f"{day.day} {MONTHS[day.month - 1]} народний календар прикмети звичаї")
+        except Exception:  # noqa: BLE001
+            rows = []
+        for r in rows:
+            snip = re.sub(r"\s+", " ", r.get("snippet") or "").strip()
+            # лише український текст про цей день (дослівний уривок сторінки, не переказ)
+            if len(re.findall(r"[іїєґ]", snip, re.I)) < 3 or str(day.day) not in snip + (r.get("title") or ""):
+                continue
+            items.append({"text": snip[:350] + ("…" if len(snip) > 350 else ""), "url": r["url"], "title": (r.get("title") or "")[:80]})
+            if len(items) >= 8:
+                break
+        if items:
+            c.setdefault("lore", {})[key] = items
             self.save(c)
-        return text
+        return items
+
+    def lore_html(self, items):
+        """Кожна прикмета/уривок — окремо, з джерелом-гіперпосиланням під ним."""
+        out = []
+        for it in items:
+            out.append(f"• {esc(it['text'])}\n↳ <i>Джерело:</i> <a href=\"{esc(it['url'])}\">{esc(it.get('title') or it['url'].split('/')[2])}</a>")
+        return "\n\n".join(out)
 
     async def route(self, update, ctx, chat, args):
         a = args[0] if args else ""
@@ -549,15 +562,15 @@ class WeatherPlugin(Plugin):
         if a == "lore":
             now = dt.datetime.now(self.host.tz) if getattr(self.host, "tz", None) else dt.datetime.now()
             try:
-                body = await self.lore(now.date())
+                items = await self.lore(now.date())
             except Exception as exc:  # noqa: BLE001
-                body = ""
+                items = []
                 log.warning("lore: %s", exc)
-            if not body:
-                body = "Не вдалося зібрати прикмети — моделі зараз недоступні. Спробуйте трохи згодом."
+            body = self.lore_html(items) if items else ("Для цього дня не знайшов прикмет у джерелах (Вікіпедія, українські сайти). "
+                                                       "Вигадувати їх бот не буде — спробуйте пізніше.")
             head = f"📜 <b>Народний календар · {now.day} {MONTHS[now.month - 1]}</b>\n\n"
-            note = "\n\n<i>Зібрано ШІ з відомих народних прикмет; у різних регіонах вони можуть відрізнятися.</i>"
-            return None, ((head + esc(body) + note)[:4000], [[("🌤 Погода", self.cb())]])
+            note = "\n\n<i>Лише справжні прикмети й звичаї з джерел — дослівно, без переказу ШІ; у різних регіонах вони можуть відрізнятися.</i>"
+            return None, ((head + body)[:4000 - len(note)] + note, [[("🌤 Погода", self.cb())]])
         if a == "my":
             items = self.cities(chat)
             if not items:

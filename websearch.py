@@ -286,3 +286,27 @@ async def weather(city):
     for i, day in enumerate(d.get("time", [])[:3]):
         lines.append(f"{day}: {WMO.get(d['weather_code'][i], '')}, {d['temperature_2m_min'][i]}…{d['temperature_2m_max'][i]}°C, опади {d['precipitation_probability_max'][i]}%")
     return "\n".join(lines) + "\nДжерело: open-meteo.com"
+
+
+BANNED_TLD = ('.ru', '.by', '.ir', '.su')  # російські, білоруські, іранські ресурси не використовуємо
+
+
+async def search_items(query, limit=8):
+    """Сирі результати пошуку [{url, title, snippet}] — дослівні уривки зі сторінок, без переказу моделлю."""
+    query = str(query).strip()[:500]
+    if not query:
+        return []
+    providers = [('TAVILY_API_KEY', _tavily), ('BRAVE_SEARCH_API_KEY', _brave), ('SERPER_API_KEY', _serper),
+                 ('SERPAPI_API_KEY', _serpapi), ('EXA_API_KEY', _exa), ('YOU_API_KEY', _you), ('SEARCHAPI_API_KEY', _searchapi)]
+    fns = [lambda c, f=fn, k=os.getenv(env, '').strip(): f(c, query, k) for env, fn in providers if os.getenv(env, '').strip()]
+    fns.append(lambda c: _duckduckgo(c, query))
+    async with httpx.AsyncClient(timeout=12, follow_redirects=False, trust_env=False) as c:
+        for fn in fns:
+            try:
+                rows = await fn(c)
+            except (httpx.HTTPError, ValueError, TypeError, KeyError, UnicodeError):
+                continue
+            rows = [r for r in rows or [] if not (urlparse(r['url']).hostname or '').endswith(BANNED_TLD)]
+            if rows:
+                return rows[:limit]
+    return []
