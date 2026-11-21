@@ -6459,7 +6459,8 @@ def ac_offer(chat_id, text, photo=None, fwd=False):
         url = TS.URL_RE.search(text).group(0).rstrip(").,»")
         lines.append(f"<code>{esc(short_q(url, 120))}</code>")
         rows = [[("🔗 UTM-мітка для соцмереж", f"m:ac:{tok}:utm"), ("📰 Рерайт новини", f"m:ac:{tok}:rw")],
-                [("⬇️ Завантажити медіа", f"m:ac:{tok}:dl"), ("📝 Нотаткою", f"m:ac:{tok}:note")]]
+                [("⬇️ Завантажити медіа", f"m:ac:{tok}:dl"), ("📝 Нотаткою", f"m:ac:{tok}:note")],
+                [("🛡 Куди веде й чи безпечне", f"m:ac:{tok}:chk"), ("🔳 QR-код", f"m:ac:{tok}:qr")]]
     elif kind == "task":
         rows = [[("✅ Записати завданням", f"m:ac:{tok}:task"), ("📝 Нотаткою", f"m:ac:{tok}:note")]]
     elif kind == "photo":
@@ -9068,6 +9069,26 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
                 toast, screen = med.start_quick(chat_id, url) or "⬇️ Завантажую — стан і файл прийдуть сюди", None
             else:
                 toast, screen = "Завантаження вимкнене", None
+        elif act in ("chk", "qr"):  # 🛡 куди веде посилання / 🔳 QR-код
+            import linktools as LT
+            url = TS.URL_RE.search(src["text"] or "")
+            url = url.group(0).rstrip(").,»") if url else ""
+            if not url:
+                toast, screen = "Тут немає посилання", None
+            elif act == "qr":
+                await ctx.bot.send_photo(chat_id, InputFile(io.BytesIO(LT.qr_png(url)), filename="qr.png"),
+                                         caption="🔳 QR-код для посилання — наведіть камеру телефона")
+                toast, screen = "🔳 QR-код надіслано", None
+            else:
+                try:
+                    v = await LT.expand(url)
+                except Exception:  # noqa: BLE001
+                    log.info("перевірка посилання не вдалася", exc_info=True)
+                    v = LT.verdict([url], None, "не вдалося перевірити переадресації")
+                rows_ = [[("🔳 QR-код", f"m:ac:{arg}:qr"), ("🔗 UTM-мітка", f"m:ac:{arg}:utm")]]
+                if v["clean"] != url and not LT.is_bad(LT.host_of(v["clean"])):
+                    AC_SRC[arg] = dict(src, text=v["clean"])  # далі всі дії — з чистим посиланням
+                screen = (LT.report_html(v, esc), rows_)
         elif act == "note":
             add_note_db(src["text"][:4000], "", "autocat", chat_id)
             toast, screen = "📝 Записано в нотатки", None
@@ -11343,6 +11364,8 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lk = LAST_LINK.get(chat_id)
     if lk and time.time() - lk[1] < 1800 and _t and not _u and len(_t) < 120:
         act = ("utm" if re.search(r"(?i)\b(?:utm|ютм)|мітк", _t) else "rw" if re.search(r"(?i)рерайт|перепиш|новин[уа] з|зчитай|прочитай", _t)
+               else "chk" if re.search(r"(?i)перевір|безпеч|куди веде|розгорн|чист[еу] посил|без стеженн", _t)
+               else "qr" if re.search(r"(?i)\bqr\b|кюар|qr-код", _t)
                else "note" if re.search(r"(?i)нотатк|збережи|запам", _t) else "task" if re.search(r"(?i)завданн", _t) else None)
         if act:  # «мітку», «зроби рерайт» після посилання — одразу робимо саме це з тим посиланням
             return await route(update, ctx, f"m:ac:{lk[2]}:{act}", edit=False)
