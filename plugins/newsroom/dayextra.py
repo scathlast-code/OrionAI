@@ -25,11 +25,25 @@ def sentences(snippet):
     out = []
     for part in t.split("\n"):
         for x in re.findall(r"[^.!?;…]+[.!?;]", part):
-            x = re.sub(r"\s+", " ", x).strip(" ,:—-")
+            x = re.sub(r"\s+", " ", x).strip(" ,:—-[](){}…")
             x = x[:-1] + "." if x.endswith(";") else x
             if 25 <= len(x) <= 280 and not re.search(r"[ыэъё]", x, re.I) and re.search(r"[а-яіїєґ]", x, re.I):
                 out.append(x[0].upper() + x[1:])
     return out
+
+
+def tidy(text, date=""):
+    """Охайний рядок: без обривків «] … [», з пробілом перед тире; дата на початку, що збігається з показаною, — прибрана."""
+    t = re.sub(r"\[\s*(?:\.\.\.|…)?\s*\]", " ", text or "")
+    t = re.sub(r"\s+", " ", t).strip(" ,:;—–-[](){}…»«\"'")
+    t = re.sub(r"(?<=\S)\s*([—–])\s*(?=\S)", r" \1 ", t)
+    if date:
+        try:
+            d = dt.date.fromisoformat(date)
+            t = re.sub(rf"^(?:з\s+|до\s+)?{d.day}\s+{MONTHS_GEN[d.month - 1]}(?:\s+{d.year}(?:\s+року)?)?\s*[,:—–-]?\s*", "", t, flags=re.I)
+        except ValueError:
+            pass
+    return (t[0].upper() + t[1:]) if t else t
 
 
 def dates_in(text, year):
@@ -101,10 +115,10 @@ async def astrol_news(search_items, d, horizon=45):
     q = [f"ретроградний Меркурій {y}", f"ретроградні планети {MONTHS_NOM[m - 1]} {y}", f"астрологічний календар {MONTHS_NOM[m - 1]} {y}"]
 
     def keep(s):
-        return bool(ASTROL_RE.search(s)) and any(d - dt.timedelta(days=20) <= x <= d + dt.timedelta(days=horizon) for x in dates_in(s, y))
+        return bool(ASTROL_RE.search(s)) and any(d <= x <= d + dt.timedelta(days=horizon) for x in dates_in(s, y))  # лише найближчі
     items = await collect(search_items, q, keep, limit=8)
     for it in items:
-        ds = dates_in(it["text"], y)
+        ds = [x for x in dates_in(it["text"], y) if x >= d]
         it["date"] = min(ds).isoformat() if ds else ""
     return sorted(items, key=lambda it: it["date"])
 

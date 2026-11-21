@@ -163,3 +163,51 @@ def test_cplan_diff_and_tip_dedup(tmp_path):
     p.host.ask_ai = fake
     got = asyncio.run(p.adapt_tips([{"text": "a", "url": "https://a.ua"}, {"text": "b", "url": "https://b.ua"}, {"text": "c", "url": "https://c.ua"}], "листопад"))
     assert [g["url"] for g in got] == ["https://a.ua", "https://c.ua"]
+
+
+def test_cplan_month_any_language_and_year_by_weekday():
+    import io
+    import openpyxl
+    from plugins.newsroom import contentplan as CP
+    wb = openpyxl.Workbook(); ws = wb.active; ws.title = " DECEMBER"
+    ws.append(["DECEMBER"]); ws.append(["пн", "вт", "ср", "чт", "пт", "сб", "нд"])
+    ws.append([None, 1, 2, 3, 4, 5, 6]); ws.append([None, "День X - Лариса"])
+    b = io.BytesIO(); wb.save(b)
+    assert "2026-12-01" in CP.parse(b.getvalue())
+    assert CP._month_of("Listopad") == 11 and CP._month_of("Marzec") == 3 and CP._month_of("décembre") == 12
+
+
+def test_jump_blinks_target_button(tmp_path):
+    p, _sent = news(tmp_path)
+    calls = []
+
+    class B:
+        username = "ai_orion_7bot"
+
+        async def send_message(self, chat, text, **kw):
+            calls.append(("send", text, kw["reply_markup"]))
+            return type("M", (), {"message_id": 5})()
+
+        async def edit_message_reply_markup(self, chat, mid, reply_markup=None):
+            calls.append(("edit", reply_markup))
+    p.host.bot = lambda: B()
+    import plugins.newsroom.observances as O
+    real = O.asyncio.sleep
+
+    async def fast(_s):
+        await real(0)
+    O.asyncio.sleep = fast
+    try:
+        asyncio.run(p.jump(1, "lore", "20261121"))
+    finally:
+        O.asyncio.sleep = real
+    labels = [b.text for row in calls[0][2].inline_keyboard for b in row]
+    assert "👉 📜 Прикмети 👈" in labels and len(calls) == 7
+    lore_btn = [b for row in calls[0][2].inline_keyboard for b in row if "Прикмети" in b.text][0]
+    assert lore_btn.callback_data.endswith("obl:lore.20261121")
+    assert 'start=obb_cplan_20261121' in p.cplan_ref(dt.date(2026, 11, 21))
+
+
+def test_tidy_astro_lines():
+    from plugins.newsroom.dayextra import tidy
+    assert tidy("] 14 листопада Меркурій рушає вперед, петлі— у «тіні».", "2026-11-14") == "Меркурій рушає вперед, петлі — у «тіні»."
