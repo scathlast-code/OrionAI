@@ -344,38 +344,66 @@ class ObservancesUI:
         return merged
 
     def cplan_screen(self, chat, ymd=None):
-        """🗓 Стан контент-плану: чи завантажився, скільки тем, що на сьогодні — щоб було видно, звідки беремо."""
+        """🗓 Контент-план як окремий календар (лише теми плану): місяць сіткою, під ним — теми обраного дня."""
         data = self.store.get("cplan_data") or {}
-        t = self.store.get("cplan_t")
-        d = self.today()
-        if ymd and len(ymd) == 8:
+        today = self.today()
+        sel = today
+        if ymd and len(ymd) >= 6 and ymd.isdigit():
             try:
-                d = dt.date(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8]))
+                sel = dt.date(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8]) if len(ymd) == 8 else 1)
             except ValueError:
                 pass
-        lines = ["🗓 <b>Контент-план</b>", "Лише читаю таблицю — нічого в неї не пишу.", ""]
+        day_mode = bool(ymd and len(ymd) == 8) or not ymd
+        y, m = sel.year, sel.month
+        rows = [[(w, "m:noop") for w in WD]]
+        week = [(" ", "m:noop")] * dt.date(y, m, 1).weekday()
+        for day in range(1, calendar.monthrange(y, m)[1] + 1):
+            x = dt.date(y, m, day)
+            n = len(data.get(x.isoformat(), []))
+            label = (f"[{day}]" if x == today else f"·{day}·" if (day_mode and x == sel) else str(day)) + ("✍️" if n else "")
+            week.append((label, self.cb("obcp", x.strftime("%Y%m%d"))))
+            if len(week) == 7:
+                rows.append(week)
+                week = []
+        if week:
+            rows.append(week + [(" ", "m:noop")] * (7 - len(week)))
+        prev = (dt.date(y, m, 1) - dt.timedelta(days=1)).strftime("%Y%m")
+        nxt = (dt.date(y, m, 28) + dt.timedelta(days=5)).strftime("%Y%m")
+        rows.append([("◀️ План: " + MONTHS[int(prev[4:]) - 1].lower(), self.cb("obcp", prev)),
+                     ("План: " + MONTHS[int(nxt[4:]) - 1].lower() + " ▶️", self.cb("obcp", nxt))])
+        rows.append([("📄 Відкрити оригінал", "url:" + self.cplan_urls()[0]), ("ℹ️ Стан", self.cb("obcps"))])
+        rows.append([("🗓 Загальний календар", self.cb("obc", sel.strftime("%Y%m"))), ("« Теми дня", self.cb("obh", "m"))])
+        month_n = sum(len(v) for k, v in data.items() if k.startswith(f"{y}-{m:02d}"))
+        lines = [f"📋 <b>Контент-план · {MONTHS[m - 1]} {y}</b> · тем {month_n}",
+                 "✍️ — є теми · [число] — сьогодні · ·число· — обраний день. Торкніться дня, щоб побачити його план.", ""]
+        if day_mode:
+            items = data.get(sel.isoformat(), [])
+            lines.append(f"<b>{'Сьогодні' if sel == today else f'{sel.day} {MONTHS_GEN[sel.month - 1]}'}, {WD[sel.weekday()]} · {len(items)}</b>")
+            for it in items:
+                lines.append(f"• {esc(it['title'])}" + (f" · ✍️ {esc(it['author'])}" if it.get("author") else "")
+                             + (f" · 📍 {it['where']}" if it.get("where") else ""))
+            if not items:
+                lines.append("На цей день у плані порожньо.")
+        t = self.store.get("cplan_t")
+        lines += ["", f"<i>Таблиця: оновлено {dt.datetime.fromtimestamp(t, self.host.tz).strftime('%d.%m %H:%M') if t else '—'}, "
+                      "перевіряю щопівгодини. У загальному календарі ці теми — разом з усіма днями.</i>"]
+        return html_cut("\n".join(lines), 4000), rows
 
-        lines.append(f"Останнє завантаження: {dt.datetime.fromtimestamp(t, self.host.tz).strftime('%d.%m %H:%M') if t else 'ще не було'}")
-        for x in self.store.get("cplan_status") or []:
-            lines.append("  " + esc(x))
-        days = sorted(data)
-        lines.append(f"Розібрано днів: {len(days)}, тем: {sum(len(v) for v in data.values())}"
-                     + (f" ({days[0][8:]}.{days[0][5:7]}.{days[0][:4]} – {days[-1][8:]}.{days[-1][5:7]}.{days[-1][:4]})" if days else ""))
-        sheets = self.store.get("cplan_sheets") or []
-        if sheets:
-            lines += ["", "<b>Аркуші</b> (як я їх прочитав):"] + [esc(x) for x in sheets[-24:]]
+    def cplan_status(self, chat):
+        """ℹ️ Технічний стан завантаження: відповіді Google, аркуші, остання зміна."""
+        data = self.store.get("cplan_data") or {}
+        t = self.store.get("cplan_t")
+        lines = ["ℹ️ <b>Контент-план · стан</b>", "Лише читаю таблицю — нічого в неї не пишу.", "",
+                 f"Останнє завантаження: {dt.datetime.fromtimestamp(t, self.host.tz).strftime('%d.%m %H:%M') if t else 'ще не було'}"]
+        lines += ["  " + esc(x) for x in self.store.get("cplan_status") or []]
+        lines.append(f"Розібрано днів: {len(data)}, тем: {sum(len(v) for v in data.values())}")
         hist = self.store.get("cplan_hist") or []
         if hist:
-            last = hist[-1]
-            lines.append(f"Остання зміна: {dt.datetime.fromtimestamp(last['t'], self.host.tz).strftime('%d.%m %H:%M')} · змін {len(last['changes'])}")
-        lines.append("👁 Перевіряю таблицю щопівгодини й пишу, якщо в ній щось змінилось; копія останньої версії зберігається в боті.")
-        today = self.cplan_on(d)
-        if today:
-            lines += ["", f"<b>{'На сьогодні' if d == self.today() else f'На {d.day} {MONTHS_GEN[d.month - 1]}'} · {len(today)}</b>"] + [
-                f"• {esc(i['title'])}" + (f" · ✍️ {esc(i['author'])}" if i["author"] else "") + (f" · 📍 {i['where']}" if i["where"] else "")
-                for i in today]
-        return html_cut("\n".join(lines), 4000), [[("📄 Відкрити оригінал", "url:" + self.cplan_urls()[0])],
-                                                    [("🔄 Завантажити зараз", self.cb("obcpr"))], [("« Теми дня", self.cb("obh", "m"))]]
+            lines.append(f"Остання зміна: {dt.datetime.fromtimestamp(hist[-1]['t'], self.host.tz).strftime('%d.%m %H:%M')} · змін {len(hist[-1]['changes'])}")
+        sheets = self.store.get("cplan_sheets") or []
+        if sheets:
+            lines += ["", "<b>Аркуші</b>:"] + [esc(x) for x in sheets[-40:]]
+        return html_cut("\n".join(lines), 4000), [[("🔄 Завантажити зараз", self.cb("obcpr"))], [("« Контент-план", self.cb("obcp"))]]
 
     DAYLIKE_RE = re.compile(r"(?i)\b(?:день|дня|тиждень|місяць|місячник|рік|свято|декада|ніч|година)\b")
 
@@ -1568,7 +1596,7 @@ class ObservancesUI:
                 await self.ensure_cplan(force=True)
             except Exception as exc:  # noqa: BLE001
                 self.store.set("cplan_status", [f"{type(exc).__name__}: {str(exc)[:120]}"])
-            return None, self.cplan_screen(chat)
+            return None, self.cplan_status(chat)
         if a == "obws":
             return None, self.obs_warn_screen(chat)
         if a == "obwt":
