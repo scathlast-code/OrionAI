@@ -333,7 +333,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
             self.queue.put_nowait(iid)
         loop = asyncio.get_running_loop()
         self._tasks = [loop.create_task(self._worker()), loop.create_task(self._rss_loop()),
-                       loop.create_task(self._lists_loop()), loop.create_task(self._mt_loop()), loop.create_task(self._tags_loop()), loop.create_task(self._sched_loop()), loop.create_task(self._obs_loop()),
+                       loop.create_task(self._lists_loop()), loop.create_task(self._mt_loop()), loop.create_task(self._tags_loop()), loop.create_task(self._sched_loop()), loop.create_task(self._obs_loop()), loop.create_task(self.cplan_watch()),
                        loop.create_task(self._report_loop())]
         await asyncio.gather(*self._tasks)
 

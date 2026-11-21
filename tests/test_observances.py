@@ -146,3 +146,20 @@ def test_church_feasts_today(tmp_path):
     p.store.set("church_v", 0)
     p.ensure_church()
     assert sum("Введення" in r["title"] for r in p.obs_on(dt.date(2026, 11, 21))) == 1
+
+
+def test_cplan_diff_and_tip_dedup(tmp_path):
+    p, _sent = news(tmp_path)
+    far = (dt.date.today() + dt.timedelta(days=3)).isoformat()
+    old = {far: [{"title": "День супу", "author": "Лариса", "where": ""}]}
+    new = {far: [{"title": "День супу", "author": "Валентин", "where": ""}, {"title": "День чаю", "author": "", "where": "SMM"}]}
+    ch = p.cplan_diff(old, new)
+    assert ("+", far, "День чаю") in ch and ("−", far, "День супу · ✍️ Лариса") in ch
+
+    async def fake(prompt, label=None):
+        return ("1. Перекопування ґрунту з добривами — підготувати ґрунт до наступного року.\n"
+                "2. Перекопування та добрива — продовжувати перекопувати ґрунт і вносити добрива.\n"
+                "3. Обрізка смородини — прибрати старі гілки."), None
+    p.host.ask_ai = fake
+    got = asyncio.run(p.adapt_tips([{"text": "a", "url": "https://a.ua"}, {"text": "b", "url": "https://b.ua"}, {"text": "c", "url": "https://c.ua"}], "листопад"))
+    assert [g["url"] for g in got] == ["https://a.ua", "https://c.ua"]

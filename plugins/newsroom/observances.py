@@ -293,6 +293,11 @@ class ObservancesUI:
                             status.append(f"{dl.split('/')[2]}: HTTP {r.status_code}, {(r.headers.get('content-type') or '?').split(';')[0]}")
                             continue
                         n0 = sum(len(v) for v in merged.values())
+                        try:  # 💾 власна копія таблиці (остання версія) — на випадок, якщо доступ до неї зникне
+                            keep = self.cplan_dir() / f"{CP.file_id(url)}.xlsx"
+                            keep.write_bytes(r.content)
+                        except Exception:  # noqa: BLE001
+                            log.info("контент-план: копію не збережено", exc_info=True)
                         for day, items in CP.parse(r.content).items():
                             for it in items:
                                 it["src"] = url
@@ -303,8 +308,17 @@ class ObservancesUI:
                         log.warning("контент-план: не вдалось завантажити %s", dl, exc_info=True)
                         status.append(f"{dl.split('/')[2]}: {type(exc).__name__}: {str(exc)[:80]}")
         log.warning("контент-план: %d днів, %d тем", len(merged), sum(len(v) for v in merged.values()))
-        if merged or not self.store.get("cplan_data"):
+        prev = self.store.get("cplan_data") or {}
+        if merged:
+            ch = self.cplan_diff(prev, merged) if prev else []
+            if ch:
+                hist = (self.store.get("cplan_hist") or [])[-30:]
+                hist.append({"t": time.time(), "changes": ch[:40]})
+                self.store.set("cplan_hist", hist)
+                self._cplan_changes = ch
             self.store.set("cplan_data", merged)
+        elif not prev:
+            self.store.set("cplan_data", {})
         self.store.set("cplan_t", time.time())
         self.store.set("cplan_status", status)
         return merged
@@ -324,12 +338,60 @@ class ObservancesUI:
         days = sorted(data)
         lines.append(f"Розібрано днів: {len(days)}, тем: {sum(len(v) for v in data.values())}"
                      + (f" ({days[0][8:]}.{days[0][5:7]}.{days[0][:4]} – {days[-1][8:]}.{days[-1][5:7]}.{days[-1][:4]})" if days else ""))
+        hist = self.store.get("cplan_hist") or []
+        if hist:
+            last = hist[-1]
+            lines.append(f"Остання зміна: {dt.datetime.fromtimestamp(last['t'], self.host.tz).strftime('%d.%m %H:%M')} · змін {len(last['changes'])}")
+        lines.append("👁 Перевіряю таблицю щопівгодини й пишу, якщо в ній щось змінилось; копія останньої версії зберігається в боті.")
         today = self.cplan_on(d)
         if today:
             lines += ["", f"<b>На сьогодні · {len(today)}</b>"] + [
                 f"• {esc(i['title'])}" + (f" · ✍️ {esc(i['author'])}" if i["author"] else "") + (f" · 📍 {i['where']}" if i["where"] else "")
                 for i in today]
         return "\n".join(lines)[:4000], [[("🔄 Завантажити зараз", self.cb("obcpr"))], [("« Теми дня", self.cb("obh", "m"))]]
+
+    def cplan_dir(self):
+        from pathlib import Path
+        p = Path(getattr(self, "dir", None) or ".") / "contentplan"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    @staticmethod
+    def cplan_diff(old, new):
+        """Що змінилось у плані (від учора й далі): [("+"|"−", дата, тема)]."""
+        since = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+        key = lambda i: f"{i['title']} · ✍️ {i['author']}" if i.get("author") else i["title"]  # noqa: E731
+        out = []
+        for day in sorted(set(old) | set(new)):
+            if day < since:
+                continue
+            a = [key(i) for i in old.get(day, [])]
+            b = [key(i) for i in new.get(day, [])]
+            out += [("+", day, x) for x in b if x not in a] + [("−", day, x) for x in a if x not in b]
+        return out
+
+    async def cplan_watch(self):
+        """👁 Стежимо за таблицею: щопівгодини завантажуємо й повідомляємо адміністраторам, що змінилось."""
+        await asyncio.sleep(90)
+        while True:
+            try:
+                self._cplan_changes = []
+                await self.ensure_cplan(force=True)
+                ch = getattr(self, "_cplan_changes", [])
+                if ch:
+                    lines = ["🗓 <b>Контент-план змінився</b>", ""]
+                    for sign, day, x in ch[:25]:
+                        lines.append(f"{'➕' if sign == '+' else '➖'} {day[8:]}.{day[5:7]} · {esc(x)}")
+                    if len(ch) > 25:
+                        lines.append(f"… ще змін: {len(ch) - 25}")
+                    lines.append(f'\n<a href="{esc(self.cplan_urls()[0])}">Відкрити таблицю</a>')
+                    for uid in dict.fromkeys(self.host.admins()):
+                        await self.host.notify(uid, "\n".join(lines)[:4000], [[("📋 Контент-план", self.cb("obcp"))]])
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                log.warning("контент-план: стеження", exc_info=True)
+            await asyncio.sleep(1800)
 
     def cplan_bg(self):
         t = getattr(self, "_cplan_task", None)
@@ -711,7 +773,7 @@ class ObservancesUI:
                                         + notes.mark(it["url"], it["host"]) for it in x["astrol"][:8]] + astrol[-1:]
         if astrol:
             out.append(("astrol", DB.CATS["astrol"][0], astrol))
-        g = (self.store.get("garden_cache2") or {}).get(self.garden_key(d))
+        g = (self.store.get("garden_cache3") or {}).get(self.garden_key(d))
         if g:
             body = []
             for it in (g if isinstance(g, list) else [])[:3 if compact else None]:
@@ -964,7 +1026,7 @@ class ObservancesUI:
         """🌱 Поради саду, городу, господарству й тваринам на цю пору — з українських джерел, GreenPost — першим (але не лише він).
         Уривки скорочуємо й пояснюємо (що робити, навіщо, коли) — лише фактами з уривка; посилання — після кожного пункту."""
         key = self.garden_key(d)
-        cache = self.store.get("garden_cache2") or {}
+        cache = self.store.get("garden_cache3") or {}
         got = cache.get(key)
         if isinstance(got, list) and got and not force:
             return got
@@ -978,16 +1040,17 @@ class ObservancesUI:
                 for r in await websearch.search_items(q):
                     snip = self.clean_snip(r.get("snippet") or "")
                     url = r.get("url") or ""
-                    if len(snip) < 60 or len(re.findall(r"[іїєґ]", snip, re.I)) < 3 or any(url == x["url"] for x in green + other):
+                    if (len(snip) < 60 or len(re.findall(r"[іїєґ]", snip, re.I)) < 3 or any(url == x["url"] for x in green + other)
+                            or re.search(r"youtube\.|youtu\.be|facebook\.|instagram\.|tiktok\.", url)):  # відео й соцмережі — не текстові джерела
                         continue
                     (green if "greenpost.ua" in url else other).append({"text": snip, "url": url, "title": (r.get("title") or "")[:80]})
         except Exception:  # noqa: BLE001
             log.info("поради саду: пошук не вдався", exc_info=True)
-        items = green[:2] + other[: 4 - min(2, len(green))]  # GreenPost — першим, але завжди є й інші джерела
+        items = green[:2] + other[: 6 - min(2, len(green))]  # GreenPost — першим, але завжди є й інші джерела
         if items:
             items = await self.adapt_tips(items, mon)
             cache[key] = items
-            self.store.set("garden_cache2", cache)
+            self.store.set("garden_cache3", cache)
         return items
 
     async def adapt_tips(self, items, mon):
@@ -996,7 +1059,7 @@ class ObservancesUI:
         prompt = ("Ось уривки з українських сайтів про роботи в саду й на городі (" + mon + "). Для КОЖНОГО уривку напиши один рядок "
                   "у форматі «N. Коротка назва дії — пояснення: що саме зробити, навіщо й коли (якщо це є в уривку)». "
                   "До 200 символів, українською, своїми словами, без Markdown. Використовуй ЛИШЕ факти з уривку, нічого не додавай. "
-                  "Якщо в уривку немає корисної поради — напиши «N. —».\n\n" + src)
+                  "Якщо в уривку немає корисної поради або вона повторює пораду з попереднього уривку — напиши «N. —».\n\n" + src)
         try:
             ask = getattr(self.host, "ask_ai", None)
             text, _m = await ask(prompt, label="🌱 Поради городникам") if ask else ("", None)
@@ -1013,7 +1076,17 @@ class ObservancesUI:
                 out.append({**it, "head": head.strip()[:60], "text": tail.strip()[:220]})
             else:
                 out.append(it)
-        return out[:3]
+        uniq = []
+        for it in out:  # одна й та сама порада двічі — лишаємо першу (GreenPost іде першим)
+            w = self._stems(it.get("head", "") + " " + it["text"])
+            if any(len(w & self._stems(u.get("head", "") + " " + u["text"])) >= 0.5 * max(1, min(len(w), len(self._stems(u.get("head", "") + " " + u["text"])))) for u in uniq):
+                continue
+            uniq.append(it)
+        return uniq[:3]
+
+    @staticmethod
+    def _stems(text):
+        return {w[:5] for w in re.findall(r"[а-яіїєґ']{4,}", (text or "").lower())}
 
     def obs_list(self, chat, cat, ymd, page=0):
         """📝 Редагований список дня: торкніться пункту — змінити, затінити, зробити особистим."""
