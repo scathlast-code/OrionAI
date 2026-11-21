@@ -116,6 +116,43 @@ class Plugin(Base):
         self.big = Big(self.dir, host.token)  # 🚀 файли до 2 ГБ через MTProto
         self.commands = [("media", self.cmd_media, "Медіа: завантажити за посиланням")]
 
+    # ================================================================ особисті налаштування
+    DQ = (("ask", "Питати щоразу"), ("360", "360p"), ("480", "480p"), ("720", "720p"), ("1080", "1080p"), ("0", "Найкраща"), ("a", "Лише звук (MP3)"))
+
+    def _prefs(self):
+        try:
+            return json.loads((self.dir / "prefs.json").read_text("utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def pref(self, chat, key, default=None):
+        return self._prefs().get(str(chat), {}).get(key, default)
+
+    def set_pref(self, chat, key, value):
+        data = self._prefs()
+        data.setdefault(str(chat), {})[key] = value
+        (self.dir / "prefs.json").write_text(json.dumps(data, ensure_ascii=False), "utf-8")
+
+    def dq_label(self, chat):
+        return dict(self.DQ).get(self.pref(chat, "q", "ask"), "Питати щоразу")
+
+    def dq_screen(self, chat, back=None):
+        cur = self.pref(chat, "q", "ask")
+        t = ("⭐ <b>Якість за замовчуванням</b>\n<blockquote expandable>ℹ️ Як це працює\n«Питати щоразу» — на кожне відео YouTube "
+             "бот показує меню з розмірами (144p–4K, MP3, превʼю). Якщо обрати якість, бот одразу завантажує саме її, без меню; "
+             "якщо такої якості немає — найближчу нижчу. Інший формат завжди можна взяти кнопкою під готовим файлом. "
+             "Налаштування особисте — лише для вас.</blockquote>")
+        rows, line = [], []
+        for k, label in self.DQ:
+            line.append((("✅ " if k == cur else "") + label, self.cb("dqs", k)))
+            if len(line) == 2:
+                rows.append(line)
+                line = []
+        if line:
+            rows.append(line)
+        rows.append([("« Медіа", self.cb())])
+        return t, rows
+
     # ================================================================ екрани
     def home(self, chat):
         busy = self.busy(chat)
@@ -132,7 +169,8 @@ class Plugin(Base):
             rows.insert(0, [("⏹ Зупинити завдання", self.cb("stop"))])
         if chat in self.jobs:
             rows.insert(1, [("📋 Останній знайдений набір", self.cb("menu", self.jobs[chat].token))])
-        rows += [[("🍪 Входи на сайти (cookies)", self.cb("ck")), ("🛠 Інструменти", self.cb("tools"))],
+        rows += [[(f"⭐ Якість за замовчуванням: {self.dq_label(chat)}", self.cb("dq"))],
+                 [("🍪 Входи на сайти (cookies)", self.cb("ck")), ("🛠 Інструменти", self.cb("tools"))],
                  [("🩺 Перевірити, які сайти працюють", self.cb("chk"))]]
         return t, rows
 
@@ -238,6 +276,17 @@ class Plugin(Base):
         if a == "unarm":
             self.armed.pop(chat, None)
             return "Скасовано", self.home(chat)
+        if a == "dq":
+            return None, self.dq_screen(chat)
+        if a == "dqs" and x in dict(self.DQ):
+            self.set_pref(chat, "q", x)
+            return f"⭐ Тепер: {self.dq_label(chat)}", self.dq_screen(chat)
+        if a == "oth":  # 👤 інші відео автора — список з його каналу
+            job = self.job_by(chat, x)
+            url = self.author_url(job.items[0].info) if job and job.items else ""
+            if not url:
+                return "Сторінку автора не знайдено", None
+            return self.start_quick(chat, url) or "👤 Відкриваю відео автора…", None
         if a == "ck":
             return None, self.cookies_screen(chat)
         if a == "cks" and x in M.COOKIE_SITES:
@@ -704,8 +753,19 @@ class Plugin(Base):
         if len(job.items) > 1 and job.items[0].engine == "yt":  # плейлист / канал: список одним повідомленням
             await self.show_playlist(chat, job, status)
             return
+        dq = self.pref(chat, "q", "ask")
+        if dq not in ("ask", "a") and dq.isdigit():
+            job.options.height = int(dq)  # ⭐ особиста якість за замовчуванням — і для інших сайтів
         if len(job.items) == 1 and job.items[0].engine == "yt":  # одне відео: меню форматів із розмірами
-            await self.show_formats(chat, job, status)
+            if dq == "ask":
+                await self.show_formats(chat, job, status)
+            else:  # ⭐ без меню — одразу обрана якість
+                kw = {"mode": "audio"} if dq == "a" else {"mode": "video", "height": int(dq)}
+                for k, v in dict(kw, cuts=()).items():
+                    setattr(job.options, k, v)
+                status = await self._status(chat, status, f"⬇️ {esc(src)} · ⭐ {self.dq_label(chat)} (змінити: /media → Якість)",
+                                            [[("⏹ Зупинити", self.cb("stop"))]])
+                await self.download(chat, job, [1], status=status)
             return
         if len(job.items) > QUICK_MAX:
             t, rows = self.job_screen(chat)
@@ -934,6 +994,14 @@ class Plugin(Base):
         lim = self.tg_limit()
         return f"ℹ️ Ліміт Telegram: файл до {'2 ГБ' if lim >= 1024 ** 3 else mb(lim)}" + ("" if self.big.ready() else " (більше — з TELEGRAM_API_ID)")
 
+    @staticmethod
+    def author_url(info):
+        for k in ("channel_url", "uploader_url"):
+            u = (info or {}).get(k) or ""
+            if str(u).startswith("http"):
+                return u.rstrip("/") + ("/videos" if "youtube.com/" in u and not u.rstrip("/").endswith(("/videos", "/shorts")) else "")
+        return ""
+
     async def show_formats(self, chat, job, status):
         item = job.items[0]
         info = item.info
@@ -969,6 +1037,10 @@ class Plugin(Base):
         else:
             rows.append([("🔎 Розпізнати музику", self.cb("fr", tok))])
         rows.append([("🗣 Чистий звук автора ▸", self.cb("os", tok)), ("✂️ Обрізка, GIF, субтитри", self.cb("menu", tok))])
+        extra = [("⭐ Завжди так", self.cb("dq"))]
+        if self.author_url(info):
+            extra.insert(0, ("👤 Інші відео автора", self.cb("oth", tok)))
+        rows.append(extra)
         lines += ["", self.limits_line()]
         text = "\n".join(lines)[:1000]
         self.live[chat] = (text, rows)
