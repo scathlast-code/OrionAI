@@ -9720,6 +9720,14 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await show(update, *scr_space(update.effective_chat.id, sp["id"]), edit=False)
     if not allowed(update):
         return await deny(update)
+    m_obb = re.fullmatch(r"obb_([a-z]+)_(\d{8})", ctx.args[0]) if ctx.args else None
+    if m_obb and PLUGINS.get("news") and hasattr(PLUGINS.get("news"), "jump"):  # ↗️ «відкрити X» → кнопка X, що блимає
+        try:
+            await update.message.delete()  # службове «/start …» не засмічує чат
+        except Exception:  # noqa: BLE001
+            pass
+        await PLUGINS.get("news").jump(update.effective_chat.id, m_obb.group(1), m_obb.group(2))
+        return
     m_obl = re.fullmatch(r"obl_([a-z]+)_(\d{8})", ctx.args[0]) if ctx.args else None
     news_ = PLUGINS.get("news")
     if m_obl and news_ and hasattr(news_, "obs_list"):  # 📝 «… ще N — відкрити повний список» із зведення дня

@@ -18,6 +18,7 @@ import httpx
 
 from plugins import esc
 from . import daybook as DB
+from . import dayextra as DX
 from .store import normalize
 
 log = logging.getLogger("orion.plugins.newsroom.obs")
@@ -113,7 +114,7 @@ def parse_wikitext(wt, include_countries=False):
     return out
 
 
-from footnotes import Notes  # noqa: E402 — 📎 зноски-джерела [n]
+from footnotes import Notes, html_cut  # noqa: E402 — 📎 зноски-джерела [n]
 
 
 CLAUSE_RE = re.compile(r"\s+(?:проголошен\w*|встановлен\w*|започатков\w*|запровадж\w*|відповідно до|згідно з|заснован\w*|відзначаєт\w*|"
@@ -326,15 +327,18 @@ class ObservancesUI:
         self.store.set("cplan_status", status)
         return merged
 
-    def cplan_screen(self, chat):
+    def cplan_screen(self, chat, ymd=None):
         """🗓 Стан контент-плану: чи завантажився, скільки тем, що на сьогодні — щоб було видно, звідки беремо."""
         data = self.store.get("cplan_data") or {}
         t = self.store.get("cplan_t")
         d = self.today()
+        if ymd and len(ymd) == 8:
+            try:
+                d = dt.date(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8]))
+            except ValueError:
+                pass
         lines = ["🗓 <b>Контент-план</b>", "Лише читаю таблицю — нічого в неї не пишу.", ""]
-        for u in self.cplan_urls():
-            lines.append(f'• <a href="{esc(u)}">таблиця</a>')
-        lines.append("")
+
         lines.append(f"Останнє завантаження: {dt.datetime.fromtimestamp(t, self.host.tz).strftime('%d.%m %H:%M') if t else 'ще не було'}")
         for x in self.store.get("cplan_status") or []:
             lines.append("  " + esc(x))
@@ -351,10 +355,11 @@ class ObservancesUI:
         lines.append("👁 Перевіряю таблицю щопівгодини й пишу, якщо в ній щось змінилось; копія останньої версії зберігається в боті.")
         today = self.cplan_on(d)
         if today:
-            lines += ["", f"<b>На сьогодні · {len(today)}</b>"] + [
+            lines += ["", f"<b>{'На сьогодні' if d == self.today() else f'На {d.day} {MONTHS_GEN[d.month - 1]}'} · {len(today)}</b>"] + [
                 f"• {esc(i['title'])}" + (f" · ✍️ {esc(i['author'])}" if i["author"] else "") + (f" · 📍 {i['where']}" if i["where"] else "")
                 for i in today]
-        return "\n".join(lines)[:4000], [[("🔄 Завантажити зараз", self.cb("obcpr"))], [("« Теми дня", self.cb("obh", "m"))]]
+        return html_cut("\n".join(lines), 4000), [[("📄 Відкрити оригінал", "url:" + self.cplan_urls()[0])],
+                                                    [("🔄 Завантажити зараз", self.cb("obcpr"))], [("« Теми дня", self.cb("obh", "m"))]]
 
     def cplan_dir(self):
         from pathlib import Path
@@ -682,6 +687,11 @@ class ObservancesUI:
             title = f'<a href="{esc(r["url"])}">{title}</a>'
         return f"{KINDS.get(r['kind'], '•').split()[0]}{marks} {title}{span}"
 
+    @staticmethod
+    def _ahead(items, d):
+        """Лише події від цього дня й далі (минулі — не «найближчим часом»)."""
+        return [it for it in (items or []) if not it.get("date") or it["date"] >= d.isoformat()]
+
     def wiki_day_url(self, d):
         return f"https://uk.wikipedia.org/wiki/{d.day}_{MONTHS_GEN[d.month - 1]}"
 
@@ -710,7 +720,8 @@ class ObservancesUI:
             if not hit:
                 return ""
             used.update(id(i) for i in hit)
-            return " · ✍️ " + ", ".join(esc((i["author"] or "") + (f" ({i['where']})" if i["where"] else "")).strip() or "у плані" for i in hit)
+            return (" · ✍️ " + ", ".join(esc((i["author"] or "") + (f" ({i['where']})" if i["where"] else "")).strip() or "у плані" for i in hit)
+                    + " · " + self.cplan_ref(d))
         lines = [self.obs_line(r, link=with_links, notes=notes) + (who(r) if plan else "") for r in days[:25]]
         if ongoing:  # скільки триває — лише в підзаголовку «Триває», не в загальному рядку
             lines += (["", f"<b>⏳ Триває · {len(ongoing)}</b>"] if days else []) + [self.obs_line(r, link=with_links, notes=notes) for r in ongoing[:12]]
@@ -724,7 +735,7 @@ class ObservancesUI:
             pl = []
             for i in rest[:15]:
                 tail = " · ".join(x for x in ((f"✍️ {esc(i['author'])}" if i["author"] else ""), (f"📍 {i['where']}" if i["where"] else "")) if x)
-                pl.append(f"• {esc(i['title'])}" + (f" · {tail}" if tail else "") + f' · <a href="{esc(i["src"])}">контент-план</a>')
+                pl.append(f"• {esc(i['title'])}" + (f" · {tail}" if tail else "") + " · " + self.cplan_ref(d))
             out.append(("cplan", f"🗓 Контент-план · {len(rest)}", pl))
         for cat in DB.LIST_CATS:
             items = self.db_items(md, cat, chat)
@@ -745,7 +756,7 @@ class ObservancesUI:
         if notes is not None and x.get("trad"):  # 🪔 традиції з джерел (якщо в списку дня їх ще немає)
             same = x.get("trad_day") == d.isoformat()
             tday = dt.date.fromisoformat(x["trad_day"]) if x.get("trad_day") else d
-            body = [f"• {esc(it['text'])}" + notes.mark(it["url"], it["host"]) for it in x["trad"][:3 if compact else 8]]
+            body = [f"• {esc(DX.tidy(it['text']))}" + notes.mark(it["url"], it["host"]) for it in x["trad"][:3 if compact else 8]]
             head_ = DB.CATS["trad"][0] + ("" if same else f" · на {tday.day} {MONTHS_GEN[tday.month - 1]} (не на сьогодні)")
             if not any(k == "trad" for k, _t, _l in out):
                 out.insert(1 if out and out[0][0] == "days" else 0, ("trad", head_, body))
@@ -754,29 +765,29 @@ class ObservancesUI:
         astro = [] if compact else DB.astro_lines(d, self.host.tz)
         if compact:  # лише найближчі події (3); немає — розділу немає
             if notes is not None:
-                astro = [(f"📅 {it['date'][8:10]}.{it['date'][5:7]} · " if it.get("date") else "• ") + esc(it["text"]) + notes.mark(it["url"], it["host"])
-                         for it in (x.get("astro") or [])[:3]]
+                astro = [(f"📅 {it['date'][8:10]}.{it['date'][5:7]} · " if it.get("date") else "• ") + esc(DX.tidy(it["text"], it.get("date") or "")) + notes.mark(it["url"], it["host"])
+                         for it in self._ahead(x.get("astro"), d)[:3]]
         elif notes is not None:
             astro = [ln + notes.mark("https://gml.noaa.gov/grad/solcalc/", "NOAA") for ln in astro]  # розрахунок за формулами NOAA
             if x.get("aurora"):
                 astro.append("🌌 " + esc(x["aurora"]["text"]) + notes.mark(x["aurora"]["url"], x["aurora"]["host"]))
             if x.get("astro"):
                 astro += ["", "<b>Найближчим часом:</b>"] + [
-                    (f"📅 {it['date'][8:10]}.{it['date'][5:7]} · " if it.get("date") else "• ") + esc(it["text"]) + notes.mark(it["url"], it["host"])
-                    for it in x["astro"][:10]]
+                    (f"📅 {it['date'][8:10]}.{it['date'][5:7]} · " if it.get("date") else "• ") + esc(DX.tidy(it["text"], it.get("date") or "")) + notes.mark(it["url"], it["host"])
+                    for it in self._ahead(x["astro"], d)[:10]]
         if astro:
             out.append(("astro", DB.CATS["astro"][0], astro))
         astrol = [] if compact else DB.astrol_lines(d)
         if compact:
             if notes is not None:
-                astrol = [(f"📅 {it['date'][8:10]}.{it['date'][5:7]} · " if it.get("date") else "• ") + esc(it["text"]) + notes.mark(it["url"], it["host"])
-                          for it in (x.get("astrol") or [])[:3]]
+                astrol = [(f"📅 {it['date'][8:10]}.{it['date'][5:7]} · " if it.get("date") else "• ") + esc(DX.tidy(it["text"], it.get("date") or "")) + notes.mark(it["url"], it["host"])
+                          for it in self._ahead(x.get("astrol"), d)[:3]]
         elif notes is not None:
             srcs = ["https://uk.wikipedia.org/wiki/Знаки_зодіаку", "https://uk.wikipedia.org/wiki/Місячний_календар", ""]
             astrol = [ln + (notes.mark(u, "Вікіпедія") if u else "") for ln, u in zip(astrol, srcs)]
             if x.get("astrol"):
-                astrol = astrol[:-1] + [(f"📅 {it['date'][8:10]}.{it['date'][5:7]} · " if it.get("date") else "• ") + esc(it["text"])
-                                        + notes.mark(it["url"], it["host"]) for it in x["astrol"][:8]] + astrol[-1:]
+                astrol = astrol[:-1] + [(f"📅 {it['date'][8:10]}.{it['date'][5:7]} · " if it.get("date") else "• ") + esc(DX.tidy(it["text"], it.get("date") or ""))
+                                        + notes.mark(it["url"], it["host"]) for it in self._ahead(x["astrol"], d)[:8]] + astrol[-1:]
         if astrol:
             out.append(("astrol", DB.CATS["astrol"][0], astrol))
         g = (self.store.get("garden_cache3") or {}).get(self.garden_key(d))
@@ -797,14 +808,91 @@ class ObservancesUI:
     def plural(n, forms):
         return forms[0] if n % 10 == 1 and n % 100 != 11 else forms[1] if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else forms[2]
 
-    def more_line(self, cat, n, d):
-        """«… ще 11 прикмет — відкрити список «📜 Прикмети»» з гіперпосиланням просто на цей список."""
-        what = f"{n} {self.plural(n, self.NOUNS.get(cat, ('пункт', 'пункти', 'пунктів')))}"
+    # ↗️ «відкрити X»: переносить до кнопки X (вона блимає), а вже кнопка відкриває розділ
+    JUMP = {  # ключ → (назва в «відкрити …», підпис кнопки)
+        "days": ("Дні", "📅 Дні"), "up": ("Дні", "📅 Дні"), "wx": ("Погоду", "🌤 Погода"), "lore": ("Прикмети", "📜 Прикмети"),
+        "garden": ("Сад-город", "🌱 Сад-город"), "astro": ("Астрономію", "🔭 Астрономія"), "astrol": ("Астрологію", "♈ Астрологія"),
+        "trad": ("Традиції", "🪔 Традиції"), "born": ("Народились", "🎂 Народились"), "died": ("Померли", "🕯 Померли"),
+        "history": ("Історію", "🏛 Історія"), "discover": ("Відкриття", "🔬 Відкриття"), "cplan": ("Контент-план", "📋 Контент-план"),
+    }
+
+    def jump_link(self, key, d):
+        name = self.JUMP.get(key, ("", ""))[0]
+        if not name:
+            return ""
         try:
-            url = f"https://t.me/{self.host.bot().username}?start=obl_{cat}_{d:%Y%m%d}"
+            return f'<a href="https://t.me/{self.host.bot().username}?start=obb_{key}_{d:%Y%m%d}">відкрити {name}</a>'
         except Exception:  # noqa: BLE001 — бот ще не ініціалізований (тести)
-            return f"… ще {what} — у «📝 Списки дня»"
-        return f'… ще {what} — <a href="{url}">відкрити повний список «{esc(DB.CATS[cat][0])}»</a>'
+            return f"відкрити {name}"
+
+    def cplan_ref(self, d):
+        """Джерело «контент-план» → переносить до кнопки «📋 Контент-план» (блимає); там план у боті й посилання на оригінал."""
+        try:
+            return f'<a href="https://t.me/{self.host.bot().username}?start=obb_cplan_{d:%Y%m%d}">контент-план</a>'
+        except Exception:  # noqa: BLE001
+            return "контент-план"
+
+    def more_line(self, cat, n, d):
+        """«… ще 11 прикмет · відкрити Прикмети»."""
+        what = f"{n} {self.plural(n, self.NOUNS.get(cat, ('пункт', 'пункти', 'пунктів')))}"
+        return f"… ще {what} · {self.jump_link(cat, d)}"
+
+    def jump_target(self, key, d):
+        """Куди веде кнопка розділу: (підпис, callback)."""
+        ymd = f"{d:%Y%m%d}"
+        label = self.JUMP.get(key, ("", key))[1]
+        if key in ("days", "up"):
+            return label, self.cb("obc", d.strftime("%Y%m"))
+        if key == "wx":
+            return label, "m:pl:wx"
+        if key == "cplan":
+            return label, self.cb("obcp", ymd)
+        if key in ("astro", "astrol", "garden"):
+            return label, self.cb("obsec", f"{key}.{ymd}")
+        return label, self.cb("obl", f"{key}.{ymd}")
+
+    def jump_rows(self, d, hot=None, on=True):
+        keys = ["days", "wx", "lore", "garden", "astro", "astrol", "trad", "history", "born", "died", "discover", "cplan"]
+        btns = []
+        for k in keys:
+            label, cbd = self.jump_target(k, d)
+            if k == hot or (hot == "up" and k == "days"):
+                label = f"👉 {label} 👈" if on else f"▫️ {label} ▫️"
+            btns.append((label, cbd))
+        rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
+        return rows + [[("« Теми дня", self.cb("obh"))]]
+
+    async def jump(self, chat, key, ymd):
+        """Із «відкрити X» у зведенні: окреме повідомлення з кнопками розділів, потрібна блимає кілька разів."""
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        try:
+            d = dt.date(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8]))
+        except ValueError:
+            d = self.today()
+
+        def mk(on):
+            return InlineKeyboardMarkup([[InlineKeyboardButton(t, url=c[4:]) if c.startswith("url:") else InlineKeyboardButton(t, callback_data=c)
+                                          for t, c in row] for row in self.jump_rows(d, key, on)])
+        name = self.JUMP.get(key, ("", key))[1]
+        bot = self.host.bot()
+        msg = await bot.send_message(chat, f"👇 Кнопка <b>{esc(name)}</b> — натисніть, щоб відкрити ({d.day} {MONTHS_GEN[d.month - 1]}).",
+                                     parse_mode="HTML", reply_markup=mk(True))
+        for k in range(6):  # блимає: 👉…👈 ↔ ▫️…▫️
+            await asyncio.sleep(0.6)
+            try:
+                await bot.edit_message_reply_markup(chat, msg.message_id, reply_markup=mk(k % 2 == 1))
+            except Exception:  # noqa: BLE001
+                break
+        return msg
+
+    def obs_section(self, chat, key, ymd):
+        """Повний розділ дня (астрономія, астрологія, сад-город) — з джерелом після кожного рядка."""
+        d = dt.date(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8]))
+        notes = Notes()
+        for k, title, lines in self.sections(d, chat, notes=notes):
+            if k == key:
+                return html_cut(f"<b>{title} · {d.day} {MONTHS_GEN[d.month - 1]}</b>\n\n" + "\n".join(lines), 4000), self.jump_rows(d)
+        return f"<b>{DB.CATS.get(key, (key,))[0]}</b>\n\nНа цей день у джерелах поки нічого.", self.jump_rows(d)
 
     @staticmethod
     def garden_key(d):
@@ -856,14 +944,17 @@ class ObservancesUI:
                       key=lambda s_: order.index(s_[0]) if s_[0] in order else len(order))
         parts = []
         for key, title, lines in secs:
+            link = self.jump_link(key, d)
             if key == "wx":
-                parts.append(lines[0])
+                parts.append(lines[0] + (f"\n↗️ {link}" if link else ""))
             else:
+                if link and not any("відкрити " in ln for ln in lines[-1:]):
+                    lines = lines + [f"↗️ {link}"]
                 parts.append(f"<b>{title}</b>\n<blockquote expandable>" + "\n".join(lines) + "</blockquote>")
         up = self.upcoming(chat, 30)
         tail = ""
         if up:
-            more = f"\n… ще {len(up) - 10} — у «⚠️ Важливі попереду» (📝 Списки дня)" if len(up) > 10 else ""
+            more = (f"\n… ще {len(up) - 10} · " if len(up) > 10 else "\n↗️ ") + self.jump_link("up", d)
             tail += f"\n<b>⚠️ Найближчі важливі дні · {len(up)}</b>\n<blockquote expandable>" + "\n".join(
                 f"{x.day:02d}.{x.month:02d} · {(x - d).days} дн. · {self.obs_line(r, notes=notes)}" for x, r in up[:10]) + more + "</blockquote>"
         on = self.store.get("obs_morning") is not False
@@ -1408,7 +1499,10 @@ class ObservancesUI:
         if a == "obup":
             return None, self.obs_upcoming(chat)
         if a == "obcp":
-            return None, self.cplan_screen(chat)
+            return None, self.cplan_screen(chat, x)
+        if a == "obsec":
+            k, _, ymd = (x or "").partition(".")
+            return None, self.obs_section(chat, k, ymd or self.today().strftime("%Y%m%d"))
         if a == "obcpr":
             try:
                 await self.ensure_cplan(force=True)
