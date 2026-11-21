@@ -3208,8 +3208,8 @@ def scr_home(chat_id, open_group=None):
         (banner + "\n\n" if banner else "")
         + f"👋 <b>{hello}{', ' + esc(name) if name else ''}!</b>\n\n"
         + (f"У вас <b>{total}</b> {word}" + (f" (на сьогодні — {today_n})" if today_n else "") + ".\n"
-           "Перегляньте їх у розділах «🌅 Сьогодні» чи «💬 Робота»." if total else
-           "Відкритих завдань немає. Що нового — у «🌅 Сьогодні», справи й розмови — у «💬 Робота».")
+           "Перегляньте їх у «🌅 Сьогодні» чи «📓 Записнику»." if total else
+           "Відкритих завдань немає. Що нового — у «🌅 Сьогодні».")
     )
     pending = len(members_list("pending")) if is_admin_id(chat_id) else 0
     badges = {"acc": f" · 🔔 {pending}"} if pending else {}
