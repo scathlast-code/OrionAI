@@ -1161,6 +1161,12 @@ class ObservancesUI:
         """Склеює частини, поки вміщається в одне повідомлення Telegram (HTML не ріжемо посередині)."""
         import html as _h
         vis = lambda x: len(_h.unescape(re.sub(r"<[^>]+>", "", x)))  # noqa: E731 — ліміт Telegram рахує видимий текст, не теги
+        try:
+            import uilayout
+            if uilayout.SCOPE.get() == "app":  # у застосунку ліміту Telegram немає — усі розділи, жоден не випадає
+                limit = 60000
+        except Exception:  # noqa: BLE001
+            pass
         text = head
         for p in parts:
             if vis(text) + vis(p) + vis(tail) + 2 > limit or len(text) + len(p) + len(tail) > 30000:
