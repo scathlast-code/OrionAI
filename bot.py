@@ -3055,14 +3055,29 @@ def scr_home(chat_id, open_group=None):
         banner = PLUGINS.banner(chat_id)
     except Exception:  # noqa: BLE001
         banner = ""
+    # 👋 привітання й лише кількість справ — самі справи в «🌅 Сьогодні» та «💬 Робота»
+    name = (known_name(chat_id)[0] or (member_get(chat_id) or {}).get("name") or "").split(" ")[0]
+    hour = datetime.now(TZ).hour
+    hello = "Доброго ранку" if 5 <= hour < 12 else "Добрий день" if hour < 18 else "Добрий вечір" if hour < 23 else "Доброї ночі"
+    try:
+        today_n = len(AGENDA.items(chat_id, datetime.now(TZ).date().isoformat()))
+    except Exception:  # noqa: BLE001
+        today_n = 0
+    red_n = 0
+    red = PLUGINS.get("red")
+    if red and hasattr(red, "my_open"):
+        try:
+            red_n = red.my_open(chat_id)[1]
+        except Exception:  # noqa: BLE001
+            red_n = 0
+    total = open_tasks + today_n + red_n
+    word = "завдання" if total % 10 in (2, 3, 4) and not 12 <= total % 100 <= 14 else "завдання" if total % 10 == 1 and total % 100 != 11 else "завдань"
     text = (
         (banner + "\n\n" if banner else "")
-        + "<b>🏠 Головне меню</b>\n\n"
-        f"💬 Розмова: <b>{esc(d['title'])}</b>\n"
-        f"🤖 Відповідає: <b>{esc(choice_label(get_choice(chat_id)))}</b>\n"
-        f"⏰ Завдань в очікуванні: <b>{open_tasks}</b>\n"
-        f"📊 Сьогодні: {esc(limits_brief(short=True))}\n\n"
-        "Натисніть ▼, щоб розгорнути розділ. Натисніть ▲, щоб згорнути."
+        + f"👋 <b>{hello}{', ' + esc(name) if name else ''}!</b>\n\n"
+        + (f"У вас <b>{total}</b> {word}" + (f" (на сьогодні — {today_n})" if today_n else "") + ".\n"
+           "Перегляньте їх у розділах «🌅 Сьогодні» чи «💬 Робота»." if total else
+           "Відкритих завдань немає. Що нового — у «🌅 Сьогодні», справи й розмови — у «💬 Робота».")
     )
     pending = len(members_list("pending")) if is_admin_id(chat_id) else 0
     badges = {"acc": f" · 🔔 {pending}"} if pending else {}
@@ -3203,6 +3218,9 @@ def scr_tasks(chat_id):
             n_all, _n_me = red.my_open(chat_id)
             if n_all:
                 text += f"\n🗞 Редакційні: <b>{n_all}</b>"
+                mine = red.my_tasks(chat_id)
+                if mine:  # ✍️ ваші: написати про день на сайт / в блог / соцмережі — серед завдань
+                    text += "\n<b>✍️ Ваші редакційні</b>\n" + "\n".join("▫️ " + esc(red.task_line(r)) for r in mine)
                 rows.insert(1, [(f"🗞 Редакційні завдання · {n_all}", "m:pl:red:l:task")])
         except Exception:  # noqa: BLE001
             log.info("редакційні завдання не прочитано", exc_info=True)
@@ -4004,6 +4022,13 @@ def agenda_block(chat_id):
         rows.append([(("✅" if it["done"] else "▫️") + " " + short_q(it["text"], 26), f"m:ag:{it['id']}")])
     for t in planned[:6]:
         lines.append(f"🕒 {datetime.fromtimestamp(t['run_at'], TZ):%H:%M} · {esc(short_q(t['history_text'], 80))}")
+    red = PLUGINS.get("red")
+    if red and hasattr(red, "my_tasks"):  # ✍️ ваші редакційні на сьогодні (написати про день на сайт / в блог / соцмережі)
+        try:
+            for r in red.my_tasks(chat_id, day, day, 6):
+                lines.append("✍️ " + esc(red.task_line(r)))
+        except Exception:  # noqa: BLE001
+            log.info("редакційні на сьогодні не прочитано", exc_info=True)
     head = ("<b>📌 На сьогодні</b>\n" + "\n".join(lines) + "\n\n") if lines else ""  # порожнього списку не показуємо
     rows.append([("➕ Завдання", "m:tnew"), ("📝 Нотатка", "m:nadd")])
     rows.append([("🤝 Простори", "m:sp"), ("💬 Розмови", "m:dl")])

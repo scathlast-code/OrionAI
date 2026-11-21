@@ -128,7 +128,7 @@ async def astro_news(search_items, d, horizon=45):
 
 
 async def astrol_news(search_items, d, horizon=45):
-    """Астрологічні новини з датою (ретроградні планети, коридор затемнень тощо) — для розваги."""
+    """Астрологічні новини з датою (ретроградні планети, коридор затемнень тощо)."""
     y, m = d.year, d.month
     q = [f"ретроградний Меркурій {y}", f"ретроградні планети {MONTHS_NOM[m - 1]} {y}", f"астрологічний календар {MONTHS_NOM[m - 1]} {y}"]
 
@@ -139,6 +139,19 @@ async def astrol_news(search_items, d, horizon=45):
         ds = [x for x in dates_in(it["text"], y) if x >= d]
         it["date"] = min(ds).isoformat() if ds else ""
     return sorted(items, key=lambda it: it["date"])
+
+
+ZODIAC_RE = re.compile(r"(?i)\b(?:Овн|Овен|Тельц|Телець|Близнюк|Рак[иа]?\b|Лев[иа]?\b|Діва|Діви|Терез|Скорпіон|Стрілец|Стрільц|Козеріг|Козорог|Водолі|Риб[иа]?\b|гороскоп|астролог)")
+
+
+async def astrol_forecast(search_items, d):
+    """♈ Астрологічний прогноз саме на цей день (гороскопи з сайтів) і те, що вже триває (ретроградні планети тощо)."""
+    day = f"{d.day} {MONTHS_GEN[d.month - 1]}"
+    q = [f"гороскоп на {day} {d.year}", f"астрологічний прогноз на {day}", f"ретроградні планети зараз {MONTHS_NOM[d.month - 1]} {d.year}"]
+
+    def keep(s):
+        return bool(ZODIAC_RE.search(s) or ASTROL_RE.search(s)) and (day in s or re.search(r"(?i)триває|до \d{1,2} \w+|сьогодні|цього тижня", s))
+    return await collect(search_items, q, keep, limit=6)
 
 
 async def aurora(client_get):

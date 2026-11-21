@@ -170,6 +170,32 @@ class Plugin(Base):
         with closing(self.db()) as con:
             return sorted({r[0] for r in con.execute("SELECT name FROM accounts WHERE uid=?", (int(chat),))})
 
+    def my_tasks(self, chat, day_from=None, day_to=None, limit=10):
+        """Відкриті завдання, де ця людина — виконавець (за прив'язаними іменами): напр. «написати про день на сайт»."""
+        names = self.my_names(chat)
+        if not names:
+            return []
+        q = f"SELECT * FROM items WHERE kind='task' AND hidden=0 AND done=0 AND who IN ({','.join('?' * len(names))})"
+        args = list(names)
+        if day_from:
+            q += " AND day>=?"
+            args.append(day_from)
+        if day_to:
+            q += " AND day<=?"
+            args.append(day_to)
+        with closing(self.db()) as con:
+            rs = [dict(r) for r in con.execute(q + " ORDER BY CASE WHEN day='' THEN 1 ELSE 0 END, day LIMIT ?", (*args, limit))]
+        return rs
+
+    @staticmethod
+    def task_line(r):
+        what = WHERE_TASK.get(r.get("where_") or "", "")
+        head = f"{what}: " if what else ""
+        verb = "написати про «" + r["text"] + "»" if r.get("chat") == 0 else r["text"]
+        when = f" · до {r['day'][8:]}.{r['day'][5:7]}" if r.get("day") else ""
+        why = f" (день «{r['reason'][:50]}»)" if r.get("reason") and r.get("where_") and r["reason"] != r["text"] else ""
+        return head + verb[:140] + why + when
+
     def assigned(self, day):
         """Виконавці, призначені в боті, для днів контент-плану: {назва: [(хто, де)]}."""
         out = {}

@@ -251,6 +251,11 @@ class ObservancesUI:
                 k += 1
             c.update(trad=trad, trad_day=tday.isoformat() if trad else "", astro=await X.astro_news(websearch.search_items, d),
                      astrol=await X.astrol_news(websearch.search_items, d), done=1)
+        if "astrol_fc" not in c:  # ♈ прогноз на день і те, що вже триває — з сайтів
+            try:
+                c["astrol_fc"] = await X.astrol_forecast(websearch.search_items, d)
+            except Exception:  # noqa: BLE001
+                c["astrol_fc"] = []
         if c.get("trad") and c.get("trad_v") != 2:  # 🪔 пояснюємо: до якого свята, що роблять і чому
             tday = dt.date.fromisoformat(c["trad_day"]) if c.get("trad_day") else d
             c["trad_name"] = self.holiday_of(tday)
@@ -961,8 +966,8 @@ class ObservancesUI:
                     body.append(self.more_line(cat, len(items) - cap, d))
                 out.append((cat, DB.CATS[cat][0], [x for x in body if x]))
         x = self.store.get(f"dayx:{d.isoformat()}") or {}
-        if notes is not None and x.get("trad") and x.get("trad_v") != 2:
-            self.extras_bg(d)  # пояснення традицій (свято, що й чому) — у фоні
+        if notes is not None and x.get("done") and ("astrol_fc" not in x or (x.get("trad") and x.get("trad_v") != 2)):
+            self.extras_bg(d)  # пояснення традицій і прогноз астрології — у фоні
         if notes is not None and x.get("trad"):  # 🪔 традиції з джерел (якщо в списку дня їх ще немає)
             same = x.get("trad_day") == d.isoformat()
             tday = dt.date.fromisoformat(x["trad_day"]) if x.get("trad_day") else d
@@ -997,15 +1002,19 @@ class ObservancesUI:
             if notes is not None:
                 astrol = [(f"📅 {it['date'][8:10]}.{it['date'][5:7]} · " if it.get("date") else "• ") + esc(DX.tidy(it["text"], it.get("date") or "")) + notes.mark(it["url"], it["host"])
                           for it in self._ahead(x.get("astrol"), d)[:3]]
-                if not astrol:  # найближчих подій немає — знак Сонця й місячна доба (для розваги)
+                astrol += ["• " + esc(DX.tidy(it["text"])) + notes.mark(it["url"], it["host"]) for it in (x.get("astrol_fc") or [])[:3 - len(astrol)]]
+                if not astrol:  # ні подій, ні прогнозу — знак Сонця й місячна доба
                     srcs = ["https://uk.wikipedia.org/wiki/Знаки_зодіаку", "https://uk.wikipedia.org/wiki/Місячний_календар", ""]
                     astrol = [ln + (notes.mark(u, "Вікіпедія") if u else "") for ln, u in zip(DB.astrol_lines(d), srcs)]
         elif notes is not None:
-            srcs = ["https://uk.wikipedia.org/wiki/Знаки_зодіаку", "https://uk.wikipedia.org/wiki/Місячний_календар", ""]
-            astrol = [ln + (notes.mark(u, "Вікіпедія") if u else "") for ln, u in zip(astrol, srcs)]
+            srcs = ["https://uk.wikipedia.org/wiki/Знаки_зодіаку", "https://uk.wikipedia.org/wiki/Місячний_календар"]
+            astrol = [ln + notes.mark(u, "Вікіпедія") for ln, u in zip(astrol, srcs)]
+            if x.get("astrol_fc"):
+                astrol += ["", "<b>Прогноз на день:</b>"] + ["• " + esc(DX.tidy(it["text"])) + notes.mark(it["url"], it["host"]) for it in x["astrol_fc"][:6]]
             if x.get("astrol"):
-                astrol = astrol[:-1] + [(f"📅 {it['date'][8:10]}.{it['date'][5:7]} · " if it.get("date") else "• ") + esc(DX.tidy(it["text"], it.get("date") or ""))
-                                        + notes.mark(it["url"], it["host"]) for it in self._ahead(x["astrol"], d)[:8]] + astrol[-1:]
+                astrol += ["", "<b>Найближчим часом:</b>"] + [(f"📅 {it['date'][8:10]}.{it['date'][5:7]} · " if it.get("date") else "• ")
+                                                             + esc(DX.tidy(it["text"], it.get("date") or "")) + notes.mark(it["url"], it["host"])
+                                                             for it in self._ahead(x["astrol"], d)[:8]]
         if astrol:
             out.append(("astrol", DB.CATS["astrol"][0], astrol))
         g = (self.store.get("garden_cache3") or {}).get(self.garden_key(d))
