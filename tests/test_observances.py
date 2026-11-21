@@ -272,5 +272,5 @@ def test_traditions_explained_and_astrology_fallback(tmp_path):
     p.store.set("dayx:2026-11-21", {"done": 1, "trad_v": 2, "trad_day": "2026-11-21", "trad_name": "Введення в храм Пресвятої Богородиці",
                                     "trad": [{"head": "Не сваряться", "text": "щоб рік минув у мирі.", "url": "https://a.ua/t", "host": "a.ua"}]})
     t, _r = p.obs_home()
-    assert "Свято: <b>Введення в храм Пресвятої Богородиці</b> · сьогодні" in t and "<b>Не сваряться</b> — щоб рік минув у мирі." in t
+    assert "Свято: <b>Введення в храм Пресвятої Богородиці</b> · сьогодні" in t and "<b>Не сваряться</b> — щоб рік минув у мирі." in t and "🕊" in t
     assert "Сонце в знаку" in t  # астрологія є навіть без найближчих подій
