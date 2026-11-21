@@ -21,3 +21,9 @@ def test_met_cross_check():
     assert "MET Norway</a> ✅" in txt and "⚠️" in txt and "−" not in txt and "-6°C…-1°C" in txt
     assert txt.count("MET Norway") == 2  # де даних немає — нічого не пишемо
     assert metno.page(50.45, 30.52).startswith("https://www.yr.no/")
+
+
+def test_fact_questions_trigger_search():
+    import websearch as w
+    assert w.wants_search("Коли відбулася битва під Крутами?") and w.wants_search("що сказав мер учора про воду")
+    assert not w.wants_search("Привіт") and not w.wants_search("напиши вірш про осінь") and not w.wants_search("переклади hello world")
