@@ -1,0 +1,327 @@
+"""🗞 Редакція: тихо збирає з редакційних чатів переслані новини, завдання, рішення й обговорення — списками з посиланнями
+на конкретні повідомлення й відповідальними; плюс завдання з контент-плану (сайт, блог, соцмережі) з виконавцями.
+
+У редакційні чати бот НІЧОГО не пише сам: ні уточнень, ні звітів, ні помилок. Усе редагують люди — будь-хто й будь-коли."""
+from __future__ import annotations
+
+import datetime as dt
+import re
+import sqlite3
+import time
+from contextlib import closing
+
+from plugins import Plugin as Base, esc
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS chats (id INTEGER PRIMARY KEY, title TEXT, username TEXT, on_ INTEGER NOT NULL DEFAULT 0, seen REAL);
+CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER, msg INTEGER, kind TEXT, text TEXT,
+    author TEXT, who TEXT DEFAULT '', url TEXT DEFAULT '', at REAL, done INTEGER DEFAULT 0, hidden INTEGER DEFAULT 0,
+    day TEXT DEFAULT '', reason TEXT DEFAULT '', where_ TEXT DEFAULT '', key TEXT UNIQUE);
+CREATE TABLE IF NOT EXISTS people (name TEXT PRIMARY KEY, src TEXT, added REAL);
+"""
+KINDS = {"news": "📰 Новини", "task": "✅ Завдання", "decision": "📌 Рішення", "talk": "💬 Обговорення"}
+TASK_RE = re.compile(r"(?i)\b(?:треба|потрібно|необхідно|зробити|напиши|напишіть|підготу\w*|завдання|дедлайн|до (?:завтра|понеділка|вівторка|"
+                     r"середи|четверга|п.ятниці|суботи|неділі|\d{1,2}[.:]\d{2})|хто (?:візьме|напише|зробить)|візьм\w*|беру|прошу)\b")
+DECISION_RE = re.compile(r"(?i)\b(?:вирішили|домовились|домовилися|рішення|затвердж\w*|погоджено|погодили|ухвалили|остаточно)\b")
+TAKE_RE = re.compile(r"(?i)\b(?:я візьму|беру|візьму на себе|я напишу|я зроблю)\b")
+WHERE_TASK = {"Сайт": "🌐 Сайт", "Блог": "✍️ Блог", "Соцмережі": "📱 Соцмережі", "SMM": "📱 Соцмережі"}
+
+
+class Plugin(Base):
+    id = "red"
+    icon = "🗞"
+    title = "Редакція"
+    version = "1.0"
+    admin_only = False
+    summary = ("Новини, завдання, рішення й обговорення з редакційних чатів — списками з посиланнями на повідомлення й відповідальними; "
+               "завдання з контент-плану з виконавцями. У чати бот сам нічого не пише.")
+    VIEWS = {"", "l", "i", "ch", "pp", "rep", "who"}
+    REPORT_URL = "https://docs.google.com/presentation/d/1akz9pZoUv576-nLXmIJ-4nQBHTElNLcP/edit"
+
+    def __init__(self, host):
+        super().__init__(host)
+        self.db_path = self.dir / "editorial.db"
+        with closing(self.db()) as con, con:
+            con.executescript(SCHEMA)
+
+    def db(self):
+        con = sqlite3.connect(self.db_path, timeout=15)
+        con.row_factory = sqlite3.Row
+        return con
+
+    # ---------------------------------------------------------------- люди
+    def people(self):
+        names = set()
+        news = self.host.extra.get("plugin", lambda pid: None)("news")
+        if news:
+            for items in (news.store.get("cplan_data") or {}).values():
+                names.update(i["author"] for i in items if i.get("author"))
+        with closing(self.db()) as con:
+            names.update(r[0] for r in con.execute("SELECT name FROM people"))
+            gone = {r[0] for r in con.execute("SELECT name FROM people WHERE src='removed'")}
+        return sorted(n for n in names if n and n not in gone)
+
+    # ---------------------------------------------------------------- 📥 тихий збір із чатів
+    @staticmethod
+    def msg_url(chat, msg_id):
+        if chat.username:
+            return f"https://t.me/{chat.username}/{msg_id}"
+        cid = str(chat.id)
+        return f"https://t.me/c/{cid[4:] if cid.startswith('-100') else cid.lstrip('-')}/{msg_id}"
+
+    @staticmethod
+    def classify(post, text):
+        if getattr(post, "forward_origin", None) is not None or getattr(post, "forward_date", None):
+            return "news"
+        if DECISION_RE.search(text):
+            return "decision"
+        if TASK_RE.search(text):
+            return "task"
+        return "talk"
+
+    async def on_channel_post(self, update, ctx):
+        post = update.message if update.message and update.message.chat.type in ("group", "supergroup") else None
+        if not post or (post.from_user and post.from_user.is_bot):
+            return None
+        ch = post.chat
+        with closing(self.db()) as con, con:
+            r = con.execute("SELECT on_ FROM chats WHERE id=?", (ch.id,)).fetchone()
+            if not r:
+                con.execute("INSERT INTO chats(id,title,username,on_,seen) VALUES(?,?,?,0,?)", (ch.id, ch.title or "", ch.username or "", time.time()))
+        if not r:  # новий чат — питаємо адміністраторів ПРИВАТНО (у сам чат нічого не пишемо)
+            await self.host.notify_admins(f"🗞 <b>Редакція</b>: бот бачить групу «{esc(ch.title or str(ch.id))}». Це редакційний чат? "
+                                          "Якщо так — тихо збиратиму звідти новини, завдання, рішення й обговорення (у сам чат нічого не пишу).",
+                                          [[("✅ Так, редакційний", self.cb("chon", ch.id)), ("💬 Чати", self.cb("ch"))]])
+            return None
+        if not r["on_"]:
+            return None
+        text = post.text or post.caption or ""
+        if not text.strip():
+            return None
+        kind = self.classify(post, text)
+        author = post.from_user.full_name if post.from_user else (post.sender_chat.title if post.sender_chat else "")
+        who = ""
+        mentions = re.findall(r"@(\w{4,})", text)
+        if kind == "task" and TAKE_RE.search(text):
+            who = author
+        elif kind == "task" and mentions:
+            who = "@" + mentions[0]
+        with closing(self.db()) as con, con:
+            con.execute("INSERT OR IGNORE INTO items(chat,msg,kind,text,author,who,url,at,key) VALUES(?,?,?,?,?,?,?,?,?)",
+                        (ch.id, post.message_id, kind, text[:2000], author, who, self.msg_url(ch, post.message_id), time.time(),
+                         f"m{ch.id}:{post.message_id}"))
+            if author:
+                con.execute("INSERT OR IGNORE INTO people(name,src,added) VALUES(?,?,?)", (author, "chat", time.time()))
+        return None
+
+    # ---------------------------------------------------------------- 📋 завдання з контент-плану
+    def sync_plan(self):
+        """Позначки «сайт / блог / соцмережі» в плані — це завдання, імена — виконавці. Від учора на 60 днів уперед."""
+        news = self.host.extra.get("plugin", lambda pid: None)("news")
+        if not news:
+            return
+        data = news.store.get("cplan_data") or {}
+        t0 = dt.date.today()
+        lo, hi = (t0 - dt.timedelta(days=1)).isoformat(), (t0 + dt.timedelta(days=60)).isoformat()
+        with closing(self.db()) as con, con:
+            for day, items in data.items():
+                if not (lo <= day <= hi):
+                    continue
+                topics = [i["title"] for i in items if not i.get("where")]
+                for i in items:
+                    where = i.get("where") or ""
+                    reason = i["title"] if not where else (", ".join(topics[:2]) or "")
+                    key = f"p{day}|{i['title']}|{where}"
+                    con.execute("INSERT OR IGNORE INTO items(chat,msg,kind,text,author,who,url,at,day,reason,where_,key) "
+                                "VALUES(0,0,'task',?,?,?,?,?,?,?,?,?)",
+                                (i["title"], "контент-план", i.get("author") or "", i.get("src") or "", time.time(), day, reason, where, key))
+
+    # ---------------------------------------------------------------- екрани
+    def counts(self):
+        with closing(self.db()) as con:
+            return {k: con.execute("SELECT COUNT(*) FROM items WHERE kind=? AND hidden=0 AND done=0", (k,)).fetchone()[0] for k in KINDS}
+
+    def home(self, chat):
+        try:
+            self.sync_plan()
+        except Exception:  # noqa: BLE001
+            pass
+        c = self.counts()
+        with closing(self.db()) as con:
+            on = con.execute("SELECT COUNT(*) FROM chats WHERE on_=1").fetchone()[0]
+            nobody = con.execute("SELECT COUNT(*) FROM items WHERE kind='task' AND hidden=0 AND done=0 AND who=''").fetchone()[0]
+        text = ("🗞 <b>Редакція</b>\n\n"
+                f"Редакційних чатів: {on}" + ("" if on else " — додайте бота в редакційні чати, і він запитає вас тут, чи збирати з них") + "\n"
+                + "\n".join(f"{KINDS[k]}: {c[k]}" for k in KINDS) + (f"\n◽ Без відповідального: {nobody}" if nobody else "")
+                + "\n\n<i>У редакційні чати бот сам нічого не пише — лише те й тоді, що ви скажете. Списки й відповідальних може правити будь-хто.</i>")
+        rows = [[(f"{KINDS['task']} · {c['task']}", self.cb("l", "task")), (f"{KINDS['news']} · {c['news']}", self.cb("l", "news"))],
+                [(f"{KINDS['decision']} · {c['decision']}", self.cb("l", "decision")), (f"{KINDS['talk']} · {c['talk']}", self.cb("l", "talk"))],
+                [("💬 Редакційні чати", self.cb("ch")), ("👥 Люди", self.cb("pp"))],
+                [("📋 Контент-план", "m:pl:news:obcp"), ("📊 Звіт", self.cb("rep"))]]
+        return text, rows
+
+    def list_screen(self, chat, kind, page=0, mode="open"):
+        cond = "hidden=0 AND done=0" if mode == "open" else "hidden=0"
+        with closing(self.db()) as con:
+            rs = [dict(r) for r in con.execute(f"SELECT * FROM items WHERE kind=? AND {cond} ORDER BY CASE WHEN day='' THEN 1 ELSE 0 END, day, at DESC",
+                                               (kind,))]
+        per = 8
+        page = max(0, min(int(page or 0), max(0, (len(rs) - 1) // per)))
+        chunk = rs[page * per:(page + 1) * per]
+        lines = [f"<b>{KINDS[kind]} · {len(rs)}</b>", ""]
+        for n, r in enumerate(chunk, page * per + 1):
+            lines.append(f"{n}. {self.line(r)}")
+        if not rs:
+            lines.append("Поки порожньо.")
+        nums = [(str(page * per + k + 1), self.cb("i", r["id"])) for k, r in enumerate(chunk)]
+        rows = [nums[i:i + 4] for i in range(0, len(nums), 4)]
+        nav = ([("◀️", self.cb("l", kind, page - 1, mode))] if page else []) + ([("▶️", self.cb("l", kind, page + 1, mode))] if (page + 1) * per < len(rs) else [])
+        if nav:
+            rows.append(nav)
+        rows.append([("👁 Усі, з виконаними" if mode == "open" else "👁 Лише відкриті", self.cb("l", kind, 0, "all" if mode == "open" else "open"))])
+        rows.append([("« Редакція", self.cb())])
+        from footnotes import html_cut
+        return html_cut("\n".join(lines), 4000), rows
+
+    def line(self, r):
+        head = ""
+        if r.get("day"):
+            head = f"📅 {r['day'][8:]}.{r['day'][5:7]} · "
+        if r.get("where_"):
+            head += WHERE_TASK.get(r["where_"], r["where_"]) + ": "
+        text = esc(re.sub(r"\s+", " ", r["text"])[:160])
+        who = f" · 👤 {esc(r['who'])}" if r.get("who") else " · ◽ ніхто"
+        why = f" · до дня «{esc(r['reason'][:60])}»" if r.get("reason") and r.get("where_") else ""
+        src = f' · <a href="{esc(r["url"])}">{"контент-план" if r["chat"] == 0 else "повідомлення"}</a>' if r.get("url") else ""
+        return ("✅ " if r.get("done") else "") + head + text + why + (who if r["kind"] == "task" else (f" · ✍️ {esc(r['author'])}" if r.get("author") else "")) + src
+
+    def item_screen(self, chat, iid, note=""):
+        with closing(self.db()) as con:
+            r = con.execute("SELECT * FROM items WHERE id=?", (int(iid),)).fetchone()
+        if not r:
+            return self.home(chat)
+        r = dict(r)
+        text = f"<b>{KINDS[r['kind']]}</b>\n\n{self.line(r)}" + (f"\n\n{note}" if note else "")
+        rows = [[("👤 Відповідальний", self.cb("who", iid)), (("↩️ Не виконано" if r["done"] else "✅ Виконано"), self.cb("done", iid))],
+                [("✏️ Текст", self.cb("ed", iid)), ("🔀 Тип", self.cb("kd", iid)), ("🗑 Прибрати", self.cb("hide", iid))],
+                [("« До списку", self.cb("l", r["kind"]))]]
+        return text, rows
+
+    def who_screen(self, chat, iid):
+        btns = [(n, self.cb("set", iid, k)) for k, n in enumerate(self.people())][:24]
+        rows = [btns[i:i + 3] for i in range(0, len(btns), 3)]
+        rows += [[("✏️ Вписати інше ім'я", self.cb("whoask", iid)), ("◽ Нікого", self.cb("set", iid, "-"))], [("« Назад", self.cb("i", iid))]]
+        return "👤 <b>Хто відповідальний?</b>\nСписок людей — з контент-плану й редакційних чатів (правиться в «👥 Люди»).", rows
+
+    def set_who(self, iid, name):
+        """Призначити; одну тему на сайт двоє не беруть."""
+        with closing(self.db()) as con, con:
+            r = con.execute("SELECT * FROM items WHERE id=?", (int(iid),)).fetchone()
+            if not r:
+                return "Не знайдено"
+            if name and r["where_"] == "Сайт" and r["day"]:
+                other = con.execute("SELECT who FROM items WHERE id<>? AND day=? AND where_='Сайт' AND text=? AND who<>'' AND hidden=0",
+                                    (int(iid), r["day"], r["text"])).fetchone()
+                if other and other["who"] != name:
+                    return f"⚠️ Цю тему на сайт уже бере {other['who']} — двоє на одну тему для сайту не беруть"
+            con.execute("UPDATE items SET who=? WHERE id=?", (name or "", int(iid)))
+        return "👤 Призначено" if name else "◽ Без відповідального"
+
+    def chats_screen(self, chat):
+        with closing(self.db()) as con:
+            rs = [dict(r) for r in con.execute("SELECT * FROM chats ORDER BY on_ DESC, title")]
+        lines = ["💬 <b>Редакційні чати</b>", "", "Увімкнені — бот тихо збирає звідти новини, завдання, рішення й обговорення. "
+                 "Писати в них він не буде нічого, доки ви не скажете що й коли.", ""]
+        rows = []
+        for r in rs:
+            lines.append(f"{'✅' if r['on_'] else '▫️'} {esc(r['title'] or str(r['id']))}")
+            rows.append([(("✅ " if r["on_"] else "▫️ ") + (r["title"] or str(r["id"]))[:30], self.cb("chon" if not r["on_"] else "choff", r["id"]))])
+        if not rs:
+            lines.append("Поки жодного: додайте бота в редакційний чат — він з'явиться тут, а вам прийде питання в особисті.")
+        rows.append([("« Редакція", self.cb())])
+        return "\n".join(lines)[:4000], rows
+
+    def people_screen(self, chat):
+        ppl = self.people()
+        btns = [(f"✖️ {n}", self.cb("ppdel", k)) for k, n in enumerate(ppl)][:30]
+        rows = [btns[i:i + 3] for i in range(0, len(btns), 3)] + [[("➕ Додати людину", self.cb("ppadd"))], [("« Редакція", self.cb())]]
+        return ("👥 <b>Люди редакції</b>\n\n" + (", ".join(esc(n) for n in ppl) or "Поки нікого.")
+                + "\n\nБеруться з контент-плану й чатів; торкніться ✖️, щоб прибрати зі списку."), rows
+
+    def report_screen(self, chat):
+        return ("📊 <b>Звіт</b>\n\nДокумент звіту редакції — за посиланням нижче. Бот у звіт сам нічого не вносить: "
+                "правки — лише людьми й після підтвердження."), [[("📄 Відкрити звіт", "url:" + self.REPORT_URL)], [("« Редакція", self.cb())]]
+
+    # ---------------------------------------------------------------- маршрути
+    async def route(self, update, ctx, chat, args):
+        a = args[0] if args else ""
+        x = args[1] if len(args) > 1 else None
+        y = args[2] if len(args) > 2 else None
+        if a == "l":
+            return None, self.list_screen(chat, x or "task", y or 0, args[3] if len(args) > 3 else "open")
+        if a == "i":
+            return None, self.item_screen(chat, x)
+        if a == "who":
+            return None, self.who_screen(chat, x)
+        if a == "set":
+            name = "" if y == "-" else (self.people()[int(y)] if y and y.isdigit() and int(y) < len(self.people()) else "")
+            return self.set_who(x, name), self.item_screen(chat, x)
+        if a == "whoask":
+            self.ask(chat, "who", int(x))
+            return None, ("✏️ Напишіть ім'я відповідального.", [[("« Назад", self.cb("i", x))]])
+        if a == "done":
+            with closing(self.db()) as con, con:
+                con.execute("UPDATE items SET done=1-done WHERE id=?", (int(x),))
+            return None, self.item_screen(chat, x)
+        if a == "hide":
+            with closing(self.db()) as con, con:
+                r = con.execute("SELECT kind FROM items WHERE id=?", (int(x),)).fetchone()
+                con.execute("UPDATE items SET hidden=1 WHERE id=?", (int(x),))
+            return "Прибрано", self.list_screen(chat, r["kind"] if r else "task")
+        if a == "ed":
+            self.ask(chat, "ed", int(x))
+            return None, ("✏️ Надішліть новий текст пункту.", [[("« Назад", self.cb("i", x))]])
+        if a == "kd":
+            order = list(KINDS)
+            with closing(self.db()) as con, con:
+                r = con.execute("SELECT kind FROM items WHERE id=?", (int(x),)).fetchone()
+                if r:
+                    con.execute("UPDATE items SET kind=? WHERE id=?", (order[(order.index(r["kind"]) + 1) % len(order)], int(x)))
+            return None, self.item_screen(chat, x)
+        if a == "ch":
+            return None, self.chats_screen(chat)
+        if a in ("chon", "choff"):
+            with closing(self.db()) as con, con:
+                con.execute("INSERT OR IGNORE INTO chats(id,title,username,on_,seen) VALUES(?,?,?,0,?)", (int(x), "", "", time.time()))
+                con.execute("UPDATE chats SET on_=? WHERE id=?", (1 if a == "chon" else 0, int(x)))
+            return ("✅ Збираю з цього чату (у нього нічого не пишу)" if a == "chon" else "Більше не збираю"), self.chats_screen(chat)
+        if a == "pp":
+            return None, self.people_screen(chat)
+        if a == "ppadd":
+            self.ask(chat, "pp")
+            return None, ("➕ Напишіть ім'я (можна кілька через кому).", [[("« Люди", self.cb("pp"))]])
+        if a == "ppdel":
+            ppl = self.people()
+            if x and x.isdigit() and int(x) < len(ppl):
+                with closing(self.db()) as con, con:
+                    con.execute("INSERT INTO people(name,src,added) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET src='removed'",
+                                (ppl[int(x)], "removed", time.time()))
+            return None, self.people_screen(chat)
+        if a == "rep":
+            return None, self.report_screen(chat)
+        return None, self.home(chat)
+
+    async def on_text(self, update, ctx, chat, key, data, text):
+        t = text.strip()
+        if key == "who":
+            return self.set_who(data, t[:60]), self.item_screen(chat, data)
+        if key == "ed":
+            with closing(self.db()) as con, con:
+                con.execute("UPDATE items SET text=? WHERE id=?", (t[:2000], int(data)))
+            return "Збережено", self.item_screen(chat, data)
+        if key == "pp":
+            with closing(self.db()) as con, con:
+                for n in [x.strip() for x in t.split(",") if x.strip()][:20]:
+                    con.execute("INSERT INTO people(name,src,added) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET src='manual'", (n[:60], "manual", time.time()))
+            return "Додано", self.people_screen(chat)
+        return None, self.home(chat)
