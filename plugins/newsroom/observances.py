@@ -372,9 +372,9 @@ class ObservancesUI:
         y, m = sel.year, sel.month
         prev = (dt.date(y, m, 1) - dt.timedelta(days=1)).strftime("%Y%m")
         nxt = (dt.date(y, m, 28) + dt.timedelta(days=5)).strftime("%Y%m")
-        rows = [[("◀️ " + MONTHS[int(prev[4:]) - 1].lower(), self.cb("obcp", prev)),  # місяці — нагорі, щоб не ховались під «Показати ще»
+        rows = [[("◀️ План: " + MONTHS[int(prev[4:]) - 1].lower(), self.cb("obcp", prev)),  # місяці — нагорі, щоб не ховались під «Показати ще»
                  (f"📆 {MONTHS[m - 1]} {y} ▾", self.cb("obcm", y)),
-                 (MONTHS[int(nxt[4:]) - 1].lower() + " ▶️", self.cb("obcp", nxt))],
+                 ("План: " + MONTHS[int(nxt[4:]) - 1].lower() + " ▶️", self.cb("obcp", nxt))],
                 [(w, "m:noop") for w in WD]]
         week = [(" ", "m:noop")] * dt.date(y, m, 1).weekday()
         for day in range(1, calendar.monthrange(y, m)[1] + 1):
