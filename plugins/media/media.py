@@ -6,6 +6,7 @@
 import asyncio
 import logging
 import datetime as dt
+import time
 import os
 import ipaddress
 import json
@@ -897,6 +898,54 @@ async def fb_story_probe(url, work):
                    "якщо не вийде — надішліть пряме посилання facebook.com/stories/….")
 
 
+# 🛰 Cobalt — відкритий завантажувач (YouTube, TikTok, Instagram…). Свій сервер (COBALT_API_URL, COBALT_API_KEY) — першим,
+# далі спільні сервери з cobalt.directory, де YouTube перевірено як робочий (21.11.2026). Їх можна змінити змінною COBALT_INSTANCES.
+COBALT_PUBLIC = ("https://api.qwkuns.me", "https://grapefruit.clxxped.lol", "https://cobalt-alpha.wolfy.love",
+                 "https://apicobalt.mgytr.top", "https://rue-cobalt.xenon.zone")
+COBALT_BAD = {}  # сервер -> до коли не смикати (вимагає ключ/перевірку чи не відповідає)
+
+
+def cobalt_servers():
+    own = [u.strip().rstrip("/") for u in os.environ.get("COBALT_API_URL", "").split(",") if u.strip()]
+    pub = [u.strip().rstrip("/") for u in os.environ.get("COBALT_INSTANCES", ",".join(COBALT_PUBLIC)).split(",") if u.strip()]
+    now = time.time()
+    return [(u, u in own) for u in dict.fromkeys(own + pub) if COBALT_BAD.get(u, 0) < now]
+
+
+async def cobalt_probe(url, work):
+    """Запасний шлях через Cobalt, коли сайт не пускає сервер бота (YouTube «підтвердіть, що ви не бот» тощо)."""
+    notes = []
+    body = {"url": url, "videoQuality": "1080", "filenameStyle": "basic"}
+    async with httpx.AsyncClient(timeout=httpx.Timeout(45, connect=8), follow_redirects=True) as cl:
+        for server, own in cobalt_servers():
+            head = {"Accept": "application/json", "Content-Type": "application/json", "User-Agent": "OrionAI-bot/1.0"}
+            if own and os.environ.get("COBALT_API_KEY"):
+                head["Authorization"] = "Api-Key " + os.environ["COBALT_API_KEY"]
+            try:
+                r = await cl.post(server + "/", json=body, headers=head)
+                js = r.json()
+            except (httpx.HTTPError, ValueError) as exc:
+                COBALT_BAD[server] = time.time() + 900
+                notes.append(f"{urlsplit(server).hostname}: {type(exc).__name__}")
+                continue
+            st = js.get("status")
+            if st in ("tunnel", "redirect") and js.get("url"):
+                name = js.get("filename") or ""
+                ext = (name.rsplit(".", 1)[-1] if "." in name else "mp4")[:5]
+                return [Item("direct", js["url"], {"title": name.rsplit(".", 1)[0] or "Відео", "ext": ext, "via": "cobalt"})]
+            if st == "picker" and js.get("picker"):
+                out = [Item("direct", p["url"], {"title": "Медіа", "ext": "jpg" if p.get("type") == "photo" else "mp4", "via": "cobalt"})
+                       for p in js["picker"] if p.get("url")]
+                if out:
+                    return out
+            code = str(((js.get("error") or {}).get("code")) or st or r.status_code)
+            if re.search(r"auth|jwt|turnstile|api\.key|rate", code):
+                COBALT_BAD[server] = time.time() + 6 * 3600  # потребує ключа чи обмежив — не смикаємо кілька годин
+            notes.append(f"{urlsplit(server).hostname}: {code}")
+    log.warning("cobalt: %s → %s", url, "; ".join(notes)[:400])
+    raise JobError("cobalt · " + "; ".join(notes)[:300])
+
+
 async def tikwm_probe(url, work):
     """Запасний шлях для TikTok, коли yt-dlp сайт не пускає: відкритий сервіс tikwm.com (відео без водяного знака, фото-каруселі)."""
     async with httpx.AsyncClient(timeout=40, follow_redirects=True, headers={"User-Agent": BROWSER}) as cl:
@@ -935,7 +984,9 @@ async def inspect_link(url, work):
     elif FB_STORY.match(url):
         probes = (fb_story_probe,)
     elif domain_matches(host, ("tiktok.com",)):
-        probes = (video_probe, tikwm_probe, gallery_probe, page_probe)  # yt-dlp; запасний — tikwm; фото-каруселі — gallery-dl
+        probes = (video_probe, tikwm_probe, cobalt_probe, gallery_probe, page_probe)
+    elif domain_matches(host, ("youtube.com", "youtu.be")):
+        probes = (video_probe, cobalt_probe, gallery_probe, page_probe)  # YouTube блокує сервери — запасний шлях через Cobalt  # yt-dlp; запасний — tikwm; фото-каруселі — gallery-dl
     elif domain_matches(host, ("tumblr.com",)):
         probes = (tumblr_probe, gallery_probe, video_probe, page_probe)
     elif domain_matches(host, ("threads.net", "threads.com")):
@@ -949,7 +1000,8 @@ async def inspect_link(url, work):
     errors = []
     labels = {"video_probe": "завантажувач yt-dlp", "gallery_probe": "альбоми (gallery-dl)", "page_probe": "сторінка допису",
               "threads_probe": "Threads", "tumblr_probe": "Tumblr", "story_probe": "сторіс: напряму, далі через Apify (до 1–2 хв)",
-              "fb_story_probe": "сторіс через Apify (до 1–2 хв)", "tikwm_probe": "запасний сервіс TikTok"}
+              "fb_story_probe": "сторіс через Apify (до 1–2 хв)", "tikwm_probe": "запасний сервіс TikTok",
+              "cobalt_probe": "запасний завантажувач Cobalt"}
     for probe in probes:
         await note(labels.get(probe.__name__, probe.__name__))
         try:
