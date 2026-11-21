@@ -263,3 +263,14 @@ def test_astro_no_duplicate_dates():
     assert tidy("📅 24 листопада — Повня та Супермісяць.", "2026-11-24") == "Повня та Супермісяць."
     assert "з 6 по 30 листопада" in tidy("Потік активний з 6 по 30 листопада.", "2026-11-30")
     assert len(dedupe([{"date": "2026-11-24", "text": "Повня настане"}, {"date": "2026-11-24", "text": "Повня та Супермісяць"}])) == 1
+
+
+def test_traditions_explained_and_astrology_fallback(tmp_path):
+    p, _sent = news(tmp_path)
+    p.today = lambda: dt.date(2026, 11, 21)
+    p.cplan_bg = p.holidays_bg = p.extras_bg = lambda *a: None
+    p.store.set("dayx:2026-11-21", {"done": 1, "trad_v": 2, "trad_day": "2026-11-21", "trad_name": "Введення в храм Пресвятої Богородиці",
+                                    "trad": [{"head": "Не сваряться", "text": "щоб рік минув у мирі.", "url": "https://a.ua/t", "host": "a.ua"}]})
+    t, _r = p.obs_home()
+    assert "Свято: <b>Введення в храм Пресвятої Богородиці</b> · сьогодні" in t and "<b>Не сваряться</b> — щоб рік минув у мирі." in t
+    assert "Сонце в знаку" in t  # астрологія є навіть без найближчих подій
