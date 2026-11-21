@@ -6252,6 +6252,14 @@ async def take_forward(update, ctx, text, fwd=True):
     msg = update.effective_message
     if text:
         COLLECT.add(chat_id, text, fwd)
+        if prefs(chat_id).get("fwd_in_app", True):  # 📱 репост видно й у застосунку (у розмові, але не в пам'яті ШІ)
+            try:
+                mid = save_message(chat_id, "user", ("↪️ " if fwd else "") + text[:4000], source="forward")
+                with closing(db()) as con, con:
+                    con.execute("UPDATE messages SET in_context=0 WHERE id=?", (mid,))
+                link_msg(mid, chat_id, [msg.message_id])
+            except Exception:  # noqa: BLE001
+                log.info("репост у застосунок не збережено", exc_info=True)
     grp = getattr(msg, "media_group_id", None)
     if grp:
         now = time.time()
@@ -8271,6 +8279,11 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
             rows.append([("🧩 Відкрити застосунок", "app:" + url)])
             rows.append([(("● " if cur == "app" else "") + "🔵 Синя кнопка: 🧩 застосунок", "m:appbtn:app")])
         rows.append([(("● " if cur != "app" else "") + "🔵 Синя кнопка: ☰ команди", "m:appbtn:commands")])
+        if a == "appbtn" and arg == "fwd":
+            set_pref(chat_id, "fwd_in_app", not prefs(chat_id).get("fwd_in_app", True))
+            toast = "Готово"
+        on = prefs(chat_id).get("fwd_in_app", True)
+        rows.append([(("✅" if on else "▫️") + " Репости в бот — видно й у застосунку", "m:appbtn:fwd")])
         screen = (text, rows)
     elif a == "impimg":  # 🖼 скриншот позначки
         import improve
