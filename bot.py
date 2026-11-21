@@ -6227,6 +6227,7 @@ def scr_devbk(chat_id, key=None):
             lines.append(f"{title} — " + (f"{len(h)} зн., останній {datetime.fromtimestamp(h[-1]['at'], TZ):%d.%m %H:%M}" if h else "ще немає"))
             rows.append([(f"{title.split(' (')[0]} · {len(h)}", f"m:devbk:{k}")])
         rows.append([("📸 Зняти зараз", "m:devbk:_now"), ("« Копії", "m:backup")])
+        rows.append([("🌐 Веб-версія з живими даними (архів)", "m:devweb")])
         return "\n".join(lines), rows
     title = secs.get(key, (key, []))[0]
     hist = list(reversed(idx.get(key) or []))
@@ -9108,6 +9109,24 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
             screen = scr_devbk_item(chat_id, arg, int(parts[3]))
         else:
             screen = scr_devbk(chat_id, arg or None)
+    elif a == "devweb" and is_admin_id(chat_id):  # 🌐 веб-версія бота й мініапп з сьогоднішніми даними + повний код — архівом у чат
+        async def build_web():
+            import webdemo
+            msg = await ctx.bot.send_message(chat_id, "🌐 Збираю веб-версію з живими даними й повний код… (1–3 хв)")
+            try:
+                screens, app = await webdemo.capture_live(sys.modules[__name__], chat_id)
+                data = await asyncio.to_thread(webdemo.build_zip, sys.modules[__name__], screens, app, " · живі дані",
+                                               "Живі дані з бота на момент знімка (дні, погода, ваші нотатки й завдання). Ключі й паролі приховано. "
+                                               "ШІ тут не відповідає — відповіді лише в справжньому боті.")
+                await ctx.bot.send_document(chat_id, data, filename=f"orionai-webdemo-{now():%Y-%m-%d-%H%M}.zip",
+                                            caption=f"🌐 Веб-версія: екранів {len(screens)} · повний код і опис сервісів (без ключів). "
+                                                    "⚠️ Містить ваші нотатки й завдання — пересилайте обережно.")
+                await msg.delete()
+            except Exception as e:  # noqa: BLE001
+                log.exception("веб-версія")
+                await msg.edit_text(f"⚠️ Не вдалося зібрати веб-версію: {esc(str(e)[:200])}")
+        asyncio.get_running_loop().create_task(build_web())
+        toast, screen = "🌐 Збираю — архів прийде сюди", None
     elif a == "devbkz" and is_admin_id(chat_id):
         import devbackup as DB_
         hist = list(reversed(DB_.index().get(arg) or []))
