@@ -2,7 +2,7 @@
 
 Звичайний Bot API дає боту надіслати лише 50 МБ і отримати 20 МБ. Інші боти, що віддають по 1–2 ГБ, працюють
 через MTProto — так само робимо й ми: тим самим токеном бота, але через пряме з'єднання з Telegram.
-Потрібні TELEGRAM_API_ID і TELEGRAM_API_HASH (my.telegram.org → API development tools) — ті самі, що й для ньюзруму.
+Потрібні TELEGRAM_API_ID і TELEGRAM_API_HASH (my.telegram.org → API development tools) — ті самі, що й для новинарні.
 Сесія бота зберігається в теці плагіна, щоб не входити щоразу заново.
 """
 from __future__ import annotations

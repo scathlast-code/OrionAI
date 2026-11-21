@@ -330,12 +330,12 @@ class ObservancesUI:
                         status.append(f"{dl.split('/')[2]}: ✅ завантажено, тем {sum(len(v) for v in merged.values()) - n0}")
                         self.store.set("cplan_sheets", rep[-40:])
                         self.store.set("cplan_cells", {"id": CP.file_id(url), "cells": cells})
-                        log.warning("контент-план, аркуші: %s", " | ".join(rep))
+                        log.info("контент-план, аркуші: %s", " | ".join(rep))
                         break
                     except Exception as exc:  # noqa: BLE001
                         log.warning("контент-план: не вдалось завантажити %s", dl, exc_info=True)
                         status.append(f"{dl.split('/')[2]}: {type(exc).__name__}: {str(exc)[:80]}")
-        log.warning("контент-план: %d днів, %d тем", len(merged), sum(len(v) for v in merged.values()))
+        log.info("контент-план: %d днів, %d тем", len(merged), sum(len(v) for v in merged.values()))
         prev = self.store.get("cplan_data") or {}
         if merged:
             ch = self.cplan_diff(prev, merged) if prev else []

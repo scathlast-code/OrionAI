@@ -1,4 +1,4 @@
-"""🧭 Редакційний пульт ньюзруму: наші ресурси, історії (кластери), пошук в інтернеті, оцінка,
+"""🧭 Редакційний пульт новинарні: наші ресурси, історії (кластери), пошук в інтернеті, оцінка,
 теги, тематичні кнопки, блокування, антиспам, біг ньюз за шаблонами, Word UA+RU."""
 from __future__ import annotations
 
@@ -336,7 +336,7 @@ def article_blocks(d, lang_label, sources_title="Джерела"):
     if d.get("sources"):
         blocks.append(("h2", sources_title))
         blocks += [("p", "• " + s) for s in d["sources"]]
-    blocks.append(("small", f"{lang_label} · підготовлено ньюзрумом OrionAI · {time.strftime('%d.%m.%Y %H:%M')} · потребує редакторської перевірки"))
+    blocks.append(("small", f"{lang_label} · підготовлено новинарнею OrionAI · {time.strftime('%d.%m.%Y %H:%M')} · потребує редакторської перевірки"))
     return blocks
 
 

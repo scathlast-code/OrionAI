@@ -2629,7 +2629,8 @@ DEFAULT_LAYOUT = [
 ]
 
 L = Layout(ITEMS, DEFAULT_LAYOUT, DEFAULT_GROUPS, lambda c: prefs(c), lambda c, k, v: set_pref(c, k, v),
-           locked={"md"}, admin_items={"acc", "backup", "svc", "comm", "runmode", "links", "ollama", "news", "hubm"}, is_admin=lambda c: is_admin_id(c), use_kb=False)
+           locked={"md"}, admin_items={"acc", "backup", "svc", "comm", "runmode", "links", "ollama", "news", "hubm"}, is_admin=lambda c: is_admin_id(c), use_kb=False,
+           screen_groups={"g:settings"})
 
 
 def _migrate_compact_menu(chat_id):
@@ -2803,7 +2804,7 @@ def _migrate_compact_menu_inner(chat_id):
         set_pref(chat_id, "accordion_menu_v4", True)
         p = prefs(chat_id)
     if not p.get("plugins_menu_v5"):
-        # Нова головна категорія «🔌 Плагіни» (Ньюзрум, Стікери) — додаємо, не чіпаючи власних налаштувань меню.
+        # Нова головна категорія «🔌 Плагіни» (Новинарня, Стікери) — додаємо, не чіпаючи власних налаштувань меню.
         groups = dict(p.get("groups") or DEFAULT_GROUPS)
         groups.setdefault("plugins", DEFAULT_GROUPS.get("plugins", "📰 Медіа"))
         set_pref(chat_id, "groups", groups)
@@ -3196,6 +3197,22 @@ def home_greeting_html(g):
             + (f"У вас <b>{g['total']}</b> {g['word']}" + (f" (на сьогодні — {g['today']})" if g['today'] else "") + ".\n"
                "Перегляньте їх у «🌅 Сьогодні» чи «📓 Записнику»." if g['total'] else
                "Відкритих завдань немає. Що нового — у «🌅 Сьогодні»."))
+
+
+def scr_group(chat_id, gid):
+    """Тека-кнопка (⚙️ Налаштування): усе, що в ній, — окремим екраном."""
+    import explain
+    g = f"g:{gid}"
+    title = L.label(chat_id, g)
+    about = (explain.E.get(g) or {}).get("what", "") if isinstance(explain.E.get(g), dict) else ""
+    lines = [f"<b>{esc(title)}</b>"] + ([esc(about)] if about else [])
+    for i in L.in_place(chat_id, g):
+        if not i.startswith("g:") and i not in ("menu",):
+            h = explain.short(i)
+            if h:
+                lines.append(f"• {esc(L.label(chat_id, i))} — {esc(h)}")
+    rows = L.accordion_rows(chat_id, place=g)
+    return "\n".join(lines), rows
 
 
 def scr_home(chat_id, open_group=None):
@@ -4279,7 +4296,7 @@ def scr_access():
     rows += [[(f"👤 {m['name'] or 'ID ' + str(m['user_id'])}", f"m:mem:{m['user_id']}")] for m in approved]
     rows += [[(f"🚫 Скасувати запрошення …{inv['code'][-4:]}", f"m:invx:{inv['code']}")] for inv in invites]
     full = members_full()
-    lines.append("\n" + ("🔓 Учасники мають усі права, як власник: налаштування, ньюзрум, плагіни, схвалення інших."
+    lines.append("\n" + ("🔓 Учасники мають усі права, як власник: налаштування, новинарня, плагіни, схвалення інших."
                           if full else "🔒 Керувати ботом і схвалювати інших може лише власник."))
     rows.append([("🔒 Права лише власнику" if full else "🔓 Усім учасникам — усе", "m:accfull")])
     rows.append([("ℹ️", "help:g:access"), HOME])
@@ -8062,6 +8079,8 @@ def is_view(data):
         return CM.is_view(parts)
     if len(parts) > 1 and parts[1] == "pl":
         return PLUGINS.is_view(parts[2:])
+    if len(parts) > 2 and parts[1] == "grp":
+        return f"g:{parts[2]}" in L.screen_groups
     return len(parts) > 1 and parts[1] in VIEW_ACTIONS
 
 
@@ -8093,11 +8112,9 @@ HUBS = {
         ("⬇️ Завантажити", "m:pl:med", 2, "open"),
         ("🖼 Мої медіа", "m:lib", 1, "open"),
     ]),
-    "nr": ("📰 Новинарня", "Уся робота з новинами в одному місці: редакція (чати, завдання, люди, звіт), публікації й чернетки, "
-                          "контент-план, UTM-мітки та збір текстів.", [
+    "nr": ("📰 Новинарня", "Уся робота з новинами в одному місці: завдання, новини й чернетки, обговорення й рішення, "
+                          "редакційні чати, люди, контент-план і звіт, а також UTM-мітки та збір текстів.", [
         ("🗞 Редакція", "m:pl:red", 6, "all"),
-        ("✍️ Публікації", "m:pl:news", 0, "open"),
-        ("📋 Контент-план", "m:pl:news:obcp", 0, "open"),
         ("🔗 UTM-мітки", "m:utm", 0, "open"),
         ("📥 Збір текстів", "m:col", 0, "open"),
     ]),
@@ -9509,6 +9526,8 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         await ctx.bot.send_message(chat_id, "🏭 Скинуто: " + ", ".join(done) + ".\nПовернути все можна, надіславши боту файл копії вище.")
         L.visit(chat_id, "m:home")
         return await show(update, *scr_home(chat_id), edit=False)
+    elif a == "grp" and f"g:{arg}" in L.screen_groups:
+        screen = scr_group(chat_id, arg)  # ⚙️ Налаштування — окремий екран, як звичайна кнопка
     elif a == "grp":
         # Акордеон: група розгортається прямо всередині головного меню.
         screen = scr_home(chat_id, arg)
@@ -10681,7 +10700,7 @@ async def cmd_scenarios(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def on_file_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not allowed(update): return await deny(update)
-    if await PLUGINS.on_document(update, ctx):  # 🔌 напр. файл зі списком каналів для ньюзруму
+    if await PLUGINS.on_document(update, ctx):  # 🔌 напр. файл зі списком каналів для новинарні
         return
     doc=update.message.document; chat=update.effective_chat.id
     if doc.file_size and doc.file_size>filework.MAX_INPUT:
@@ -10959,7 +10978,7 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         req = translate_mod.parse_request(msg.text, (r0.text or r0.caption) if r0 else None)
         if req:
             return await do_translate(update, ctx, *req)
-    if await PLUGINS.intercept(update, ctx):  # 🔌 режим прийому ньюзруму, посилання на стікери тощо
+    if await PLUGINS.intercept(update, ctx):  # 🔌 режим прийому новинарні, посилання на стікери тощо
         return
     if not msg.text and not msg.photo:
         return
@@ -11894,7 +11913,7 @@ async def main():
             return PlainTextResponse("ok")
 
         app.router.routes.append(Route(HOOK_PATH, tg_webhook, methods=["POST"]))
-    for _route in reversed(PLUGINS.routes(MCP_SECRET)):  # 🔌 вебхуки плагінів (ньюзрум: n8n, WhatsApp)
+    for _route in reversed(PLUGINS.routes(MCP_SECRET)):  # 🔌 вебхуки плагінів (новинарня: n8n, WhatsApp)
         app.router.routes.insert(0, _route)
     from starlette.routing import Route as _Route
     from starlette.responses import HTMLResponse as _HTML, Response as _Resp

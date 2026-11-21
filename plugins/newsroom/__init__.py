@@ -1,4 +1,4 @@
-"""📰 Ньюзрум GreenPost — ШІ-редакція новин усередині Оріона.
+"""📰 Новинарня GreenPost — ШІ-редакція новин усередині Оріона.
 
 Що робить:
 - приймає новини: текст, посилання, переслані дописи, фото (у режимі прийому або /news), дописи каналів,
@@ -146,10 +146,10 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
         self._hour: list = []
         self._migrate_tg_sources()
         self.commands = [
-            ("news", self.cmd_news, "Ньюзрум: надіслати новину"),
-            ("digest", self.cmd_digest, "Ньюзрум: зведення (шаблони й збір)"),
-            ("collect", self.cmd_collect, "Ньюзрум: увімкнути/вимкнути збір для зведення"),
-            ("drafts", self.cmd_drafts, "Ньюзрум: чернетки"),
+            ("news", self.cmd_news, "Новинарня: надіслати новину"),
+            ("digest", self.cmd_digest, "Новинарня: зведення (шаблони й збір)"),
+            ("collect", self.cmd_collect, "Новинарня: увімкнути/вимкнути збір для зведення"),
+            ("drafts", self.cmd_drafts, "Новинарня: чернетки"),
         ]
 
     # ================================================================ ШІ
@@ -226,7 +226,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
                 self._enqueue(iid, delay=60 * (item["attempts"] + 1))
             else:
                 self.store.set_item(iid, status="error", error=str(exc)[:500], photo="")
-                await self._tell(item, f"⚠️ <b>Ньюзрум</b>: матеріал #{iid} не оброблено після 3 спроб.\n{esc(str(exc))[:400]}",
+                await self._tell(item, f"⚠️ <b>Новинарня</b>: матеріал #{iid} не оброблено після 3 спроб.\n{esc(str(exc))[:400]}",
                                  [[("🔁 Ще раз", self.cb("retry", iid)), ("🧾 Черга", self.cb("q"))]])
             return
         if data["skip"]:
@@ -392,7 +392,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
             if d:
                 rows[0].insert(0, ("👀 Оригінал", self.cb("d", d)))
             return await self.host.notify(msg.chat_id, f"♻️ Це повтор матеріалу #{dup}. Не обробляю, щоб не дублювати.", rows)
-        await self.host.notify(msg.chat_id, f"📥 Узяв у ньюзрум #{iid}. Чернетка прийде окремим повідомленням.",
+        await self.host.notify(msg.chat_id, f"📥 Узяв у новинарню #{iid}. Чернетка прийде окремим повідомленням.",
                                [[("💬 Ні, це питання до ШІ", self.cb("toai", iid))]])
 
     async def intercept(self, update, ctx):
@@ -405,10 +405,10 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
             o = getattr(msg, "forward_origin", None)
             ch = getattr(o, "chat", None)
             if ch is None or ch.type != "channel":
-                await msg.reply_text("Це не пересланий допис каналу. Підключення скасовано — спробуйте ще раз: ⚙️ Налаштування ньюзруму → 📤 Публікація.")
+                await msg.reply_text("Це не пересланий допис каналу. Підключення скасовано — спробуйте ще раз: ⚙️ Налаштування новинарні → 📤 Публікація.")
                 return True
             try:
-                test = await ctx.bot.send_message(ch.id, "✅ Ньюзрум Оріона підключено для публікацій.")
+                test = await ctx.bot.send_message(ch.id, "✅ Новинарня Оріона підключено для публікацій.")
                 await ctx.bot.delete_message(ch.id, test.message_id)
             except Exception as exc:  # noqa: BLE001
                 await msg.reply_text(f"⚠️ Не можу писати в «{ch.title}»: {exc}\nДодайте бота адміністратором із правом публікації.")
@@ -449,7 +449,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
                                               ch.id, ch.title or ch.username or str(ch.id), ctype, enabled=0)
             if new:
                 await self.host.notify_admins(
-                    f"📡 <b>Ньюзрум</b>: бот бачить {'канал' if ctype == 'channel' else 'групу'} «{esc(ch.title or ch.username)}». "
+                    f"📡 <b>Новинарня</b>: бот бачить {'канал' if ctype == 'channel' else 'групу'} «{esc(ch.title or ch.username)}». "
                     "Брати звідти новини автоматично?",
                     [[("✅ Моніторити", self.cb("Etog", eid)), ("📋 Список", self.cb("Lo", lid))]])
             return
@@ -480,7 +480,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
             self.store.del_source(s["id"])
 
     async def _take_source(self, entries, msg_id, text, photo, url, title, via, fwd="", key=None, metrics=None, at=None, platform="tg"):
-        """Один допис з одного чату (може бути в кількох списках) -> не більше одного матеріалу в ньюзрум."""
+        """Один допис з одного чату (може бути в кількох списках) -> не більше одного матеріалу в новинарню."""
         active = [e for e in entries if e["enabled"] and e.get("list_on", 1)]
         if not active:
             return False
@@ -708,7 +708,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
                 gone += 1
         self.store.set("account_synced", time.time())
         if new and not chat:
-            await self.host.notify_admins(f"📲 <b>Ньюзрум</b>: нових підписок акаунта: {new} — "
+            await self.host.notify_admins(f"📲 <b>Новинарня</b>: нових підписок акаунта: {new} — "
                                           + ("вже моніторю." if on else "додано вимкненими, увімкніть потрібні."),
                                           [[("📋 Підписки", self.cb("Lo", lid))]])
         return new, gone
@@ -828,13 +828,13 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
         if s["queued"]:
             line.append(f"в обробці {s['queued']}")
         ban = self.banner(chat)
-        text = ((ban + "\n\n" if ban else "") + "📰 <b>Ньюзрум</b>\n" + " · ".join(line) + "\n"
-                + (f"Публікую в: {esc(pub)}" if pub else "Канал для публікацій ще не підключено (⚙️ Налаштування ньюзруму → Публікація).")
+        text = ((ban + "\n\n" if ban else "") + "📰 <b>Новини · чернетки й публікації</b>\n" + " · ".join(line) + "\n"
+                + (f"Публікую в: {esc(pub)}" if pub else "Канал для публікацій ще не підключено (⚙️ Налаштування новинарні → Публікація).")
                 + "\n\nПерешліть сюди будь-який допис — він стане чернеткою.")
         rows = [
             [(f"📥 Нові чернетки · {s['new']}", self.cb("ls", "new"))],
             [("🔎 Знайти й написати", self.cb("D"))],
-            [("📡 Джерела", self.cb("H1")), ("⚙️ Налаштування ньюзруму", self.cb("H2"))],
+            [("📡 Джерела", self.cb("H1")), ("⚙️ Налаштування новинарні", self.cb("H2"))],
             [("🗂 Архів", self.cb("H5")), ("ℹ️ Довідка", self.cb("help"))],
         ]
         return text, rows
@@ -894,7 +894,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
         mine = [l for l in lists if not l["auto"]]
         acc = next((l for l in lists if l["auto"] == "account"), None)
         ours = sum(l["n"] for l in lists if l["auto"] == "ours")
-        text = ("📡 <b>Джерела</b> — звідки ньюзрум бере новини\n\n"
+        text = ("📡 <b>Джерела</b> — звідки новинарня бере новини\n\n"
                 f"📋 Мої списки: {len(mine)} ({sum(l['n'] for l in mine)} каналів і чатів)\n"
                 f"📲 Підписки акаунта: {('🟢 ' + str(acc['n'])) if acc and self.mt.ready else '⚪️ не підключено'}\n"
                 f"🏠 Наші ресурси (не беремо, лише звіряємо): {ours} каналів · {self.desk.ours_count()} публікацій\n"
@@ -906,23 +906,23 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
                 [("🌐 Соцмережі", self.cb("SN")), ("🏷 Теги", self.cb("Tg"))],
                 [("📶 RSS і вебхуки", self.cb("so"))],
                 [("✍️ Додати новину вручну", self.cb("in"))],
-                [("« Ньюзрум", self.cb())]]
+                [("« Новинарня", self.cb())]]
         return text, rows
 
     def hub_H2(self, chat):
         st = self.store
-        text = ("⚙️ <b>Налаштування ньюзруму</b>\n\n"
+        text = ("⚙️ <b>Налаштування новинарні</b>\n\n"
                 f"📤 Публікація: {esc(st.get('publish_title') or 'канал не підключено')}\n"
                 f"✍️ Як писати: довжина {int(st.get('target') or 0) or 'вільна'}, {'свої правила' if st.get('rules') else 'базові правила'}, "
                 f"Word UA+RU {'так' if st.get('word_bilingual') else 'ні'}\n"
                 f"🛡 Фільтри: блокувань {len(self.desk.blocks())}, антиспам {st.get('spam_level') or 'soft'}\n"
-                f"↪️ Переслане — у ньюзрум: {'так' if st.get('forward_auto') else 'ні'}\n"
+                f"↪️ Переслане — у новинарню: {'так' if st.get('forward_auto') else 'ні'}\n"
                 f"🔔 Сповіщення про автоматичні чернетки: {'так' if st.get('notify') else 'ні'}")
         rows = [[("📤 Публікація", self.cb("set")), ("✍️ Як писати", self.cb("H3"))],
                 [("🧩 Кнопки під новиною", self.cb("acs")), ("🛡 Фільтри", self.cb("H4"))],
-                [(("↪️ Переслане → ньюзрум: так" if st.get("forward_auto") else "↪️ Переслане → ньюзрум: ні"), self.cb("Hfwd"))],
+                [(("↪️ Переслане → новинарня: так" if st.get("forward_auto") else "↪️ Переслане → новинарня: ні"), self.cb("Hfwd"))],
                 [(("🔔 Сповіщення: так" if st.get("notify") else "🔕 Сповіщення: ні"), self.cb("tg", "notify"))],
-                [("« Ньюзрум", self.cb())]]
+                [("« Новинарня", self.cb())]]
         return text, rows
 
     def hub_H3(self, chat):
@@ -936,7 +936,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
                 [("📐 Шаблони", self.cb("Wt")), ("🗂 Теми пошуку", self.cb("Tp"))],
                 [("🗺 Тематика медіа", self.cb("Dst"))],
                 [(("📄 Word UA+RU: так" if st.get("word_bilingual") else "📄 Word UA+RU: ні"), self.cb("Dwb"))],
-                [("« Налаштування ньюзруму", self.cb("H2"))]]
+                [("« Налаштування новинарні", self.cb("H2"))]]
         return text, rows
 
     def hub_H4(self, chat):
@@ -945,15 +945,15 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
         text = ("🛡 <b>Фільтри</b>\n\n"
                 f"🚫 Блокування тем, людей, джерел і сайтів: {len(self.desk.blocks())}\n"
                 f"🧹 Антиспам: {lvl} · відсіяно {n}\n\nВідсіяне не потрапляє в чернетки й не витрачає ліміти моделей.")
-        rows = [[("🚫 Блокування", self.cb("Bk")), ("🧹 Антиспам", self.cb("Sp"))], [("« Налаштування ньюзруму", self.cb("H2"))]]
+        rows = [[("🚫 Блокування", self.cb("Bk")), ("🧹 Антиспам", self.cb("Sp"))], [("« Налаштування новинарні", self.cb("H2"))]]
         return text, rows
 
     def hub_H5(self, chat):
-        text = "🗂 <b>Архів</b>\n\nУсе, що вже пройшло через ньюзрум."
+        text = "🗂 <b>Архів</b>\n\nУсе, що вже пройшло через новинарня."
         rows = [[("🗂 Усі чернетки", self.cb("ls", "ok")), ("📚 Історії", self.cb("Sl"))],
                 [("⭐ Обране й папки", self.cb("Fo")), ("🧾 Зведення", self.cb("dg"))],
                 [("📁 Теки й архів новин", self.cb("flds")), ("⏳ Черга й помилки", self.cb("q"))],
-                [("« Ньюзрум", self.cb())]]
+                [("« Новинарня", self.cb())]]
         return text, rows
 
     def desk_settings(self):
@@ -975,14 +975,14 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
             nav.append(("➡️", self.cb("ls", f[0], offset + PAGE)))
         if nav:
             rows.append(nav)
-        rows.append([("« Ньюзрум", self.cb())])
+        rows.append([("« Новинарня", self.cb())])
         empty = "" if ds else "\n\nТут поки порожньо."
         return f"📰 <b>{f[1]}</b>" + empty, rows
 
     def card(self, did):
         d = self.store.draft(did)
         if not d:
-            return "Чернетку не знайдено.", [[("« Ньюзрум", self.cb())]]
+            return "Чернетку не знайдено.", [[("« Новинарня", self.cb())]]
         n = length_of(d["body"])
         head = f"{URGENCY.get(d['urgency'], '')}{'🧾 Зведення' if d['kind'] == 'digest' else '📰 Новина'} #{d['id']} · {STATUS.get(d['status'], d['status'])} · v{d['version']}"
         meta = " · ".join(x for x in [d["region"], d["category"]] if x)
@@ -1056,7 +1056,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
         day = time.time() - 86400
         n = len([d for d in self.store.drafts(("draft", "approved", "published"), since=day, limit=200) if d["kind"] == "news"])
         rows = [[(f"🧾 {x}", self.cb("dgo", x)) for x in (2000, 2100, 2200)], [("✍️ Інша довжина", self.cb("dgask"))],
-                [("« Ньюзрум", self.cb())]]
+                [("« Новинарня", self.cb())]]
         return ("🧾 <b>Зведення за добу</b>\n\n"
                 f"Матеріалів за 24 години: {n} (чернетки, схвалені й опубліковані; відхилені не беруться).\n"
                 "Групування за областями, Київ першим, без подвійного підрахунку загиблих і поранених. "
@@ -1084,7 +1084,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
         secret = self.host.extra.get("secret", "")
         ingest = f"{base}/{secret[:4]}…/newsroom/ingest" if base else "/‹MCP_SECRET›/newsroom/ingest"
         wa = "🟢 налаштовано" if os.getenv("WHATSAPP_APP_SECRET") and os.getenv("WHATSAPP_VERIFY_TOKEN") else "⚪️ не налаштовано"
-        text = ("🌐 <b>Зовнішні входи ньюзруму</b>\n\n"
+        text = ("🌐 <b>Зовнішні входи новинарні</b>\n\n"
                 f"<b>Вебхук для n8n / Make / Zapier</b>\nPOST {esc(ingest)}\n"
                 "Тіло JSON: <code>{\"text\": \"…\", \"url\": \"…\", \"source\": \"назва\"}</code>\n"
                 "Повна адреса — PUBLIC_URL/MCP_SECRET/newsroom/ingest (секрет у самій адресі, не публікуйте її).\n\n"
@@ -1112,7 +1112,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
             [(("🚀 Одразу: так" if st.get("publish_on_approve") else "🚀 Одразу: ні"), self.cb("tg", "publish_on_approve")),
              (("🔗 Джерела: так" if st.get("show_sources") else "🔗 Джерела: ні"), self.cb("tg", "show_sources"))],
             [("✒️ Підпис", self.cb("sig"))],
-            [("« Налаштування ньюзруму", self.cb("H2"))],
+            [("« Налаштування новинарні", self.cb("H2"))],
         ]
         return text, rows
 
@@ -1147,14 +1147,14 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
                 rows.append([(f"🔁 #{r['id']} ще раз", self.cb("retry", r["id"]))])
         if not rows_db:
             lines.append("Порожньо — усе оброблено.")
-        rows.append([("🔄 Оновити", self.cb("q")), ("« Ньюзрум", self.cb())])
+        rows.append([("🔄 Оновити", self.cb("q")), ("« Новинарня", self.cb())])
         return "\n".join(lines)[:4000], rows
 
     def help_screen(self):
-        text = ("ℹ️ <b>Ньюзрум: як користуватися</b>\n\n"
+        text = ("ℹ️ <b>Новинарня: як користуватися</b>\n\n"
                 "<b>1. Віддати новину</b>\n• «📥 Надіслати новину» і вставте текст або посилання;\n"
                 "• /news текст — або відповідайте /news на будь-яке повідомлення;\n"
-                "• «Прийом: увімк.» — усе, що пересилаєте боту (дописи, фото з підписом), іде в ньюзрум.\n\n"
+                "• «Прийом: увімк.» — усе, що пересилаєте боту (дописи, фото з підписом), іде в новинарню.\n\n"
                 "<b>2. Автоматично</b>\n• канали, де бот адміністратор (бот сам запропонує моніторинг);\n"
                 "• RSS-стрічки (перше читання лише запам'ятовує старі пости);\n• WhatsApp Business і вебхук n8n — «📡 Джерела» → «🌐».\n\n"
                 "<b>3. Чернетка</b> приходить із кнопками: ✅ схвалити, 🔁 інша версія, ✍️ правка своїми словами, "
@@ -1162,7 +1162,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
                 "<b>4. Публікація</b> — лише схваленого і лише в підключений канал. Автопублікація без людини неможлива.\n\n"
                 "<b>5. Зведення</b> — /digest 2000 (або 2100, 2200, будь-яке 300–3800).\n\n"
                 "Повтори (той самий або майже той самий текст за 72 год) відсіюються; схожі матеріали позначаються як можливе оновлення події.")
-        return text, [[("« Ньюзрум", self.cb())]]
+        return text, [[("« Новинарня", self.cb())]]
 
     # ================================================================ дії
     async def route(self, update, ctx, chat, args):
@@ -1317,7 +1317,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
             return await self.digest_route(chat, a, x, y)
         if a == "dgo":
             self._bg(self._make_digest(chat, int(x)))
-            return "🧾 Складаю…", ("🧾 <b>Складаю зведення</b> — прийде окремим повідомленням.", [[("« Ньюзрум", self.cb())]])
+            return "🧾 Складаю…", ("🧾 <b>Складаю зведення</b> — прийде окремим повідомленням.", [[("« Новинарня", self.cb())]])
         if a == "dgask":
             self.ask(chat, "dg")
             return None, ("🧾 Скільки символів має бути у зведенні? (300–3800)", [[("✖️ Скасувати", "m:cancel")]])
@@ -1381,7 +1381,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
         if a == "force":
             st.set_item(int(x), status="queued", attempts=0, dup_of=None, requested_by=chat)
             self._enqueue(int(x))
-            return "📝 Оформлюю", ("📝 Беру в роботу — чернетка прийде окремим повідомленням.", [[("« Ньюзрум", self.cb())]])
+            return "📝 Оформлюю", ("📝 Беру в роботу — чернетка прийде окремим повідомленням.", [[("« Новинарня", self.cb())]])
         if a == "help":
             return None, self.help_screen()
         return None, self.home(chat)
@@ -1408,7 +1408,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
             iid, s, dup = self.ingest("manual", text, requested_by=chat)
             if s == "duplicate":
                 return f"♻️ Повтор матеріалу #{dup}", self.home(chat)
-            return f"📥 Прийнято #{iid}", ("📥 Прийнято. Чернетка прийде окремим повідомленням.", [[("📥 Ще новина", self.cb("in")), ("« Ньюзрум", self.cb())]])
+            return f"📥 Прийнято #{iid}", ("📥 Прийнято. Чернетка прийде окремим повідомленням.", [[("📥 Ще новина", self.cb("in")), ("« Новинарня", self.cb())]])
         if key == "ed":
             self._bg(self._revise(chat, int(data), text))
             return "✍️ Виконую правку…", ("✍️ <b>Виконую правку</b> — нова версія прийде окремим повідомленням.", [[("« Чернетка", self.cb("d", data))]])
@@ -1422,7 +1422,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
             if not text.strip().isdigit() or not 300 <= int(text) <= 3800:
                 return "Потрібне число 300–3800", self.digest_screen()
             self._bg(self._make_digest(chat, int(text)))
-            return "🧾 Складаю…", ("🧾 Складаю зведення — прийде окремим повідомленням.", [[("« Ньюзрум", self.cb())]])
+            return "🧾 Складаю…", ("🧾 Складаю зведення — прийде окремим повідомленням.", [[("« Новинарня", self.cb())]])
         if key == "rss":
             url = text.strip().split()[0]
             if not url.startswith("https://") or not await public_https(url):

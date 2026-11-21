@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS links (name TEXT PRIMARY KEY, uid INTEGER, username T
 CREATE TABLE IF NOT EXISTS accounts (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, uid INTEGER, username TEXT DEFAULT '', at REAL);
 """
 KINDS = {"news": "📰 Новини", "task": "✅ Завдання", "decision": "📌 Рішення", "talk": "💬 Обговорення"}
+TALK = "💬 Обговорення й рішення"  # рішення й обговорення — один список (рішення позначені 📌)
 TASK_RE = re.compile(r"(?i)\b(?:треба|потрібно|необхідно|зробити|напиши|напишіть|підготу\w*|завдання|дедлайн|до (?:завтра|понеділка|вівторка|"
                      r"середи|четверга|п.ятниці|суботи|неділі|\d{1,2}[.:]\d{2})|хто (?:візьме|напише|зробить)|візьм\w*|беру|прошу)\b")
 DECISION_RE = re.compile(r"(?i)\b(?:вирішили|домовились|домовилися|рішення|затвердж\w*|погоджено|погодили|ухвалили|остаточно)\b")
@@ -220,36 +221,59 @@ class Plugin(Base):
             nobody = con.execute("SELECT COUNT(*) FROM items WHERE kind='task' AND hidden=0 AND done=0 AND who=''").fetchone()[0]
         text = ("🗞 <b>Редакція</b>\n\n"
                 f"Редакційних чатів: {on}" + ("" if on else " — додайте бота в редакційні чати, і він запитає вас тут, чи збирати з них") + "\n"
-                + "\n".join(f"{KINDS[k]}: {c[k]}" for k in KINDS) + (f"\n◽ Без відповідального: {nobody}" if nobody else "")
+                + f"{KINDS['task']}: {c['task']}\n📰 Новини з чатів: {c['news']}\n{TALK}: {c['decision'] + c['talk']}" + (f"\n◽ Без відповідального: {nobody}" if nobody else "")
                 + "\n\n<i>У редакційні чати бот сам нічого не пише — лише те й тоді, що ви скажете. Списки й відповідальних може правити будь-хто.</i>")
-        rows = [[(f"{KINDS['task']} · {c['task']}", self.cb("l", "task")), (f"{KINDS['news']} · {c['news']}", self.cb("l", "news"))],
-                [(f"{KINDS['decision']} · {c['decision']}", self.cb("l", "decision")), (f"{KINDS['talk']} · {c['talk']}", self.cb("l", "talk"))],
+        drafts = self.drafts_new()
+        rows = [[(f"{KINDS['task']} · {c['task']}", self.cb("l", "task")), (f"📰 Новини · {c['news'] + drafts}", self.cb("l", "news"))],
+                [(f"{TALK} · {c['decision'] + c['talk']}", self.cb("l", "talk"))],
                 [("💬 Редакційні чати", self.cb("ch")), ("👥 Люди", self.cb("pp"))],
-                [("📤 Що й коли писати в чати", self.cb("po"))],
                 [("📋 Контент-план", "m:pl:news:obcp"), ("📊 Звіт", self.cb("rep"))]]
         return text, rows
 
+    def news_plugin(self):
+        return self.host.extra.get("plugin", lambda pid: None)("news")
+
+    def drafts_new(self):
+        news = self.news_plugin()
+        try:
+            return int(news.store.stats()["new"]) if news else 0
+        except Exception:  # noqa: BLE001
+            return 0
+
     def list_screen(self, chat, kind, page=0, mode="open"):
         cond = "hidden=0 AND done=0" if mode == "open" else "hidden=0"
+        if kind == "decision":
+            kind = "talk"
+        kinds = ("decision", "talk") if kind == "talk" else (kind,)
         with closing(self.db()) as con:
-            rs = [dict(r) for r in con.execute(f"SELECT * FROM items WHERE kind=? AND {cond} ORDER BY CASE WHEN day='' THEN 1 ELSE 0 END, day, at DESC",
-                                               (kind,))]
+            rs = [dict(r) for r in con.execute(f"SELECT * FROM items WHERE kind IN ({','.join('?' * len(kinds))}) AND {cond} "
+                                               "ORDER BY CASE WHEN day='' THEN 1 ELSE 0 END, day, at DESC", kinds)]
         mine = set(self.my_names(chat))
         rs.sort(key=lambda r: r.get("who") not in mine)  # свої — першими, але видно всі
         per = 8
         page = max(0, min(int(page or 0), max(0, (len(rs) - 1) // per)))
         chunk = rs[page * per:(page + 1) * per]
-        lines = [f"<b>{KINDS[kind]} · {len(rs)}</b>", ""]
+        title = TALK if kind == "talk" else KINDS[kind]
+        lines = [f"<b>{title} · {len(rs)}</b>", ""]
+        if kind == "news":  # 📰 Новини: і з редакційних чатів, і вся робота з новинами (чернетки, пошук, джерела, архів)
+            lines = [f"📰 <b>Новини</b>", "", f"📥 Нових чернеток: <b>{self.drafts_new()}</b> — перешліть сюди будь-який допис, і він стане чернеткою.",
+                     "", f"<b>З редакційних чатів · {len(rs)}</b>"]
         for n, r in enumerate(chunk, page * per + 1):
-            lines.append(f"{n}. {self.line(r)}")
+            lines.append(f"{n}. {'📌 ' if r['kind'] == 'decision' and kind == 'talk' else ''}{self.line(r)}")
         if not rs:
-            lines.append("Поки порожньо.")
+            lines.append("Поки порожньо." if kind != "news" else "Поки нічого — з'являться, щойно в редакційних чатах напишуть новину.")
         nums = [(str(page * per + k + 1), self.cb("i", r["id"])) for k, r in enumerate(chunk)]
         rows = [nums[i:i + 4] for i in range(0, len(nums), 4)]
         nav = ([("◀️", self.cb("l", kind, page - 1, mode))] if page else []) + ([("▶️", self.cb("l", kind, page + 1, mode))] if (page + 1) * per < len(rs) else [])
         if nav:
             rows.append(nav)
         rows.append([("👁 Усі, з виконаними" if mode == "open" else "👁 Лише відкриті", self.cb("l", kind, 0, "all" if mode == "open" else "open"))])
+        news = self.news_plugin() if kind == "news" else None
+        if news:
+            try:
+                rows += news.home(chat)[1]  # чернетки, пошук, джерела, налаштування, архів, довідка
+            except Exception:  # noqa: BLE001
+                pass
         rows.append([("« Редакція", self.cb())])
         from footnotes import html_cut
         return html_cut("\n".join(lines), 4000), rows
@@ -272,10 +296,10 @@ class Plugin(Base):
         if not r:
             return self.home(chat)
         r = dict(r)
-        text = f"<b>{KINDS[r['kind']]}</b>\n\n{self.line(r)}" + (f"\n\n{note}" if note else "")
+        text = f"<b>{KINDS[r['kind']]}</b>" + (f" · {TALK}" if r["kind"] in ("decision", "talk") else "") + f"\n\n{self.line(r)}" + (f"\n\n{note}" if note else "")
         rows = [[("👤 Відповідальний", self.cb("who", iid)), (("↩️ Не виконано" if r["done"] else "✅ Виконано"), self.cb("done", iid))],
                 [("✏️ Текст", self.cb("ed", iid)), ("🔀 Тип", self.cb("kd", iid)), ("🗑 Прибрати", self.cb("hide", iid))],
-                [("« До списку", self.cb("l", r["kind"]))]]
+                [("« До списку", self.cb("l", "talk" if r["kind"] == "decision" else r["kind"]))]]
         return text, rows
 
     def who_screen(self, chat, iid):
@@ -302,13 +326,17 @@ class Plugin(Base):
         with closing(self.db()) as con:
             rs = [dict(r) for r in con.execute("SELECT * FROM chats ORDER BY on_ DESC, title")]
         lines = ["💬 <b>Редакційні чати</b>", "", "Увімкнені — бот тихо збирає звідти новини, завдання, рішення й обговорення. "
-                 "Писати в них він не буде нічого, доки ви не скажете що й коли.", ""]
+                 "Писати в них він не буде нічого, доки ви не задасте що й коли — кнопкою «📤 Що й коли писати» нижче.", ""]
         rows = []
         for r in rs:
             lines.append(f"{'✅' if r['on_'] else '▫️'} {esc(r['title'] or str(r['id']))}")
             rows.append([(("✅ " if r["on_"] else "▫️ ") + (r["title"] or str(r["id"]))[:30], self.cb("chon" if not r["on_"] else "choff", r["id"]))])
         if not rs:
             lines.append("Поки жодного: додайте бота в редакційний чат — він з'явиться тут, а вам прийде питання в особисті.")
+        with closing(self.db()) as con:
+            planned = con.execute("SELECT COUNT(*) FROM posts WHERE on_=1").fetchone()[0]
+        lines += ["", f"📤 Що й коли писати в ці чати: {'заплановано ' + str(planned) if planned else 'нічого не заплановано'}."]
+        rows.append([(f"📤 Що й коли писати · {planned}", self.cb("po"))])
         rows.append([("« Редакція", self.cb())])
         return "\n".join(lines)[:4000], rows
 
@@ -373,7 +401,7 @@ class Plugin(Base):
             rows.append([(f"{'⏸' if p['on_'] else '▶️'} {p['text'][:20]}", self.cb("poon", p["id"])), ("🗑", self.cb("podel", p["id"]))])
         if not ps:
             lines.append("Поки нічого не заплановано.")
-        rows += [[("➕ Нове повідомлення", self.cb("ponew"))], [("« Редакція", self.cb())]]
+        rows += [[("➕ Нове повідомлення", self.cb("ponew"))], [("« Редакційні чати", self.cb("ch"))]]
         return "\n".join(lines)[:4000], rows
 
     def draft_screen(self, chat):

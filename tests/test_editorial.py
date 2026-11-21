@@ -85,3 +85,20 @@ def test_parse_pptx():
         z.writestr("ppt/slides/slide2.xml", "<p:sld><a:p><a:r><a:t>Підсумки</a:t></a:r></a:p></p:sld>")
         z.writestr("ppt/slides/slide1.xml", "<p:sld><a:p><a:r><a:t>Звіт </a:t></a:r><a:r><a:t>за листопад</a:t></a:r></a:p><a:p><a:r><a:t>12 публікацій</a:t></a:r></a:p></p:sld>")
     assert Plugin.parse_pptx(b.getvalue()) == [["Звіт за листопад", "12 публікацій"], ["Підсумки"]]
+
+
+def test_talk_merges_decisions_and_posts_live_in_chats(tmp_path):
+    from plugins import Host as H
+    from plugins.editorial import Plugin
+    h = H(data_dir=str(tmp_path), admins=lambda: [1], is_admin=lambda u: True)
+    p = Plugin(h)
+    t, rows = p.home(1)
+    labels = [b[0] for r in rows for b in r]
+    assert not any("Рішення" == l.split(" ·")[0][2:] for l in labels)
+    assert any(l.startswith("💬 Обговорення й рішення") for l in labels)
+    assert not any("Що й коли" in l for l in labels)
+    assert sum("Контент-план" in l for l in labels) == 1
+    t, rows = p.chats_screen(1)
+    assert any("Що й коли" in b[0] for r in rows for b in r)
+    t, rows = p.list_screen(1, "decision")
+    assert "Обговорення й рішення" in t

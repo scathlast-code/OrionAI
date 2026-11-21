@@ -114,7 +114,7 @@ const TG = window.Telegram && Telegram.WebApp;
 const init = TG && TG.initData;
 const API = new URL('app/api', location.href.replace(/app\/?(#.*)?$/, '')).href;
 const MENU_TAB = ['menu','☰','Меню','menu'];
-let TABS = [['chat','💬','Розмова','chat'],['m:pl:news','📰','Ньюзрум','news'],['m:pl:inb','📮','Скринька','inbox'],['m:pl:stk','🧷','Стікери','stk']];
+let TABS = [['chat','💬','Розмова','chat'],['m:pl:news','📰','Новинарня','news'],['m:pl:inb','📮','Скринька','inbox'],['m:pl:stk','🧷','Стікери','stk']];
 try{const t=JSON.parse(localStorage.getItem('orion_tabs')||'null');if(Array.isArray(t))TABS=t}catch(_){}
 let editTabs = null;
 function setTabs(list){if(!Array.isArray(list))return;TABS=list.map(t=>{const sp=split(t.label);return [t.data,sp.icon||'•',sp.rest,t.key]});
@@ -270,7 +270,7 @@ async function say(){const ta=document.querySelector('#composer textarea');const
     el.textContent=liveText(p)},1000);
   const res=await call('say','chat',{text:t,user:userInfo()});clearInterval(tick);if(!res)return;showResult(res)}
 function showResult(res){
-  if(res.text){hist.push('chat');cur=null;render(res);return}   // плагін показав екран (ньюзрум, стікери, імпорт…)
+  if(res.text){hist.push('chat');cur=null;render(res);return}   // плагін показав екран (новинарня, стікери, імпорт…)
   for(const n of res.notes||[]) if(!(res.replies||[]).length) toast(n);
   openChat(false);
 }
@@ -482,7 +482,7 @@ function renderMenu(res){
   s.oninput=()=>{draw();fitAll()}; draw(); tabs(); fitAll();
 }
 function back(){if(!hist.length)return;const h=hist.pop();curTitle='';h==='chat'?openChat(false):h==='menu'?openMenu(false):h==='feed'?openFeed(false):open_(h,false)}
-async function openFeed(push=true){ // 🔔 усе, що бот надіслав сам: результати фонових завдань, ньюзрум, скринька, нагадування
+async function openFeed(push=true){ // 🔔 усе, що бот надіслав сам: результати фонових завдань, новинарня, скринька, нагадування
   const my=++seq; if(push&&cur&&cur!=='feed') hist.push(cur); cur='feed'; curView=true; curTitle='🔔 Події'; syncBack(); tabs(); loading();
   const res=await call('feed','feed'); if(my!==seq||!res) return;
   const main=document.getElementById('main'); main.innerHTML=''; main.style.paddingBottom='';
@@ -490,7 +490,7 @@ async function openFeed(push=true){ // 🔔 усе, що бот надіслав
   const top=document.createElement('div');top.className='top';top.innerHTML='<h1>🔔 Події</h1>';
   const clr=document.createElement('button');clr.className='ic pill';clr.textContent='🧹';clr.title='Очистити';
   clr.onclick=async()=>{haptic();await call('feed','feed',{clear:1});openFeed(false)};top.appendChild(clr);main.appendChild(top);
-  const sub=document.createElement('div');sub.className='sub';sub.textContent='Що бот надіслав вам сам — результати відкладених відповідей, ньюзрум, скринька, нагадування. Те саме лежить і в чаті з ботом.';main.appendChild(sub);
+  const sub=document.createElement('div');sub.className='sub';sub.textContent='Що бот надіслав вам сам — результати відкладених відповідей, новинарня, скринька, нагадування. Те саме лежить і в чаті з ботом.';main.appendChild(sub);
   if(!(res.items||[]).length){const e=document.createElement('div');e.className='empty';e.textContent='Поки подій немає';main.appendChild(e);return}
   for(const it of res.items){const c=document.createElement('div');c.className='feedcard'+(it.seen?'':' new');
     const t=document.createElement('small');t.textContent=new Date(it.ts*1000).toLocaleString('uk-UA',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})+(it.file?' · '+it.file:'');c.appendChild(t);

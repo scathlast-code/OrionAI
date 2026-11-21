@@ -330,7 +330,10 @@ def menu(B, uid):
     def items(place, path):
         own, subs = [], []
         for i in L.in_place(uid, place):
-            if i.startswith("g:"):
+            if i.startswith("g:") and i in getattr(L, "screen_groups", ()):  # тека-кнопка (⚙️ Налаштування) — плиткою, як у чаті
+                own.append({"key": i, "label": L.label(uid, i), "data": f"m:grp:{i[2:]}", "hint": explain.short(i) or "Усі налаштування", "hs": 0,
+                            "why": f"m:why:{i}" if i in explain.E else ""})
+            elif i.startswith("g:"):
                 subs += items(i, path + [L.label(uid, i)])
             elif i not in ("menu", "app"):
                 o = (B.prefs(uid).get("hint_over") or {}).get(__import__("button_hints").norm_label(L.label(uid, i))) or {}
@@ -368,7 +371,7 @@ def tabs(B, uid):
         elif k == "feed":
             out.append({"key": "feed", "label": "🔔 Події", "data": "feed"})
         elif k in getattr(B.L, "admin_items", set()) and not B.is_admin_id(uid):
-            continue  # розділи лише для власника (📰 Ньюзрум тощо) учаснику не показуємо
+            continue  # розділи лише для власника (📰 Новинарня тощо) учаснику не показуємо
         elif k in B.ITEMS and k not in ("menu", "app") and B.ITEMS[k][1].startswith(("m:", "help:")):
             out.append({"key": k, "label": B.L.label(uid, k), "data": B.ITEMS[k][1]})
     return out[:TABS_MAX]
@@ -424,7 +427,7 @@ async def run(bot_module, uid, op, data=None, text=None, user=None, file=None):
     try:
         B.CHAT.set(uid)
         if op in ("say", "file"):
-            # Повідомлення з застосунку проходить той самий шлях, що й повідомлення в чаті: ньюзрум, стікери, ШІ…
+            # Повідомлення з застосунку проходить той самий шлях, що й повідомлення в чаті: новинарня, стікери, ШІ…
             upd = _Update(uid, sink, capbot, text=text or "", user=user)
             ctx = _Ctx(capbot)
             if op == "file":

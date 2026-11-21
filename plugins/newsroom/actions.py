@@ -162,7 +162,7 @@ class ActionsUI:
             lines.append(f"{n + 1}. {esc(a['label'])} — {what}" + (f": {esc(tgt)}" if tgt else ""))
             rows.append([(f"✏️ {a['label'][:22]}", self.cb("ace", a["id"])), ("⬆️", self.cb("acm", a["id"], "up")), ("🗑", self.cb("acd", a["id"]))])
         rows.append([("➕ Нова кнопка", self.cb("acn")), ("↩️ Типовий набір", self.cb("acr"))])
-        rows.append([("« Налаштування ньюзруму", self.cb("H2"))])
+        rows.append([("« Налаштування новинарні", self.cb("H2"))])
         return "\n".join(lines)[:4000], rows
 
     def target_name(self, a):
