@@ -134,8 +134,14 @@ class Store:
                 con.execute("ALTER TABLE drafts ADD COLUMN folder TEXT DEFAULT ''")
 
     def db(self):
-        con = sqlite3.connect(self.path, timeout=15)
+        con = sqlite3.connect(self.path, timeout=30)
         con.row_factory = sqlite3.Row
+        if not getattr(self, "_wal", False):  # WAL: читання не чекає на довгий запис (завантаження року днів) — без «database is locked»
+            try:
+                con.execute("PRAGMA journal_mode=WAL")
+                self._wal = True
+            except sqlite3.Error:
+                pass
         return con
 
     # ----------------------------------------------------------- налаштування

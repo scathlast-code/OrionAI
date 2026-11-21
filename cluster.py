@@ -682,7 +682,9 @@ def oracle_route(node, a, arg):
 def oracle_rows(node, need=False):
     on = oracle_on(node, need)
     every = int(node.get("oracle_every") or 14)
-    return [[((("● " if on and every == d else "") + f"🔔 Oracle: {d} дн"), f"m:orset:{d}") for d in (7, 14, 21)] + [(("● " if not on else "") + "🔕", "m:orset:off")]]
+    # підпис коротко, щоб чотири кнопки в ряду не обрізались до «🔔 Oracl…»; що це — у заголовку ряду
+    return [[("🔔 Нагадувати зайти в Oracle:", "m:noop")],
+            [(("● " if on and every == d else "") + f"{d} дн", f"m:orset:{d}") for d in (7, 14, 21)] + [(("● " if not on else "") + "🔕 Ні", "m:orset:off")]]
 
 
 def oracle_line(node, tz, need=False):
