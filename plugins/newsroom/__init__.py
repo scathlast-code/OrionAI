@@ -1310,7 +1310,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
             t, r = ts(f"{d['headline']}\n\n{d['body']}", f"🌐 <b>Переклад новини #{d['id']}</b> — оберіть мову:")
             return None, (t, r + [[("« Чернетка", self.cb("d", x))]])
         if a in ("obh", "obt", "obc", "obd", "ob", "obw", "obz", "obx", "obu", "obm", "oba", "obi", "obl", "obs", "obup", "obws", "obwt",
-                 "obf", "obv", "obr", "obp", "obe", "oby", "obn", "obg", "obj", "obq", "obcp", "obcpr", "obcps", "obsec"):
+                 "obf", "obv", "obr", "obp", "obe", "oby", "obn", "obg", "obj", "obq", "obcp", "obcpr", "obcps", "obsec", "obce", "obcd", "obca", "obcw", "obcx"):
             return await self.obs_route(chat, a, x, y)
         if a in ("dg", "cgo", "cls", "cpop", "cclr", "cday", "cmk", "ctp", "cte", "ctd", "ctn", "ctx", "ctc", "ctl", "cti", "ctz",
                  "csg", "csp", "csl", "csd", "csn", "cse", "cdt"):
@@ -1396,7 +1396,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
         if key == "ecb":
             st.set("brands", text.strip()[:500])
             return "Збережено", self.echo_screen()
-        if key in ("obm", "oba", "obe", "oby", "obn"):
+        if key in ("obm", "oba", "obe", "oby", "obn", "obce"):
             return await self.obs_text(chat, key, data, text)
         if key in ("ctl", "cti", "ctz", "csp", "csn", "cse"):
             return await self.digest_text(chat, key, data, text)

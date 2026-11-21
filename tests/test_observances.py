@@ -110,7 +110,7 @@ def test_content_plan_merged_into_day(tmp_path):
     ws.append(["Сайт", None, None, None, "Як варити борщ"])
     b = io.BytesIO(); wb.save(b)
     plan = CP.parse(b.getvalue())
-    assert {"title": "День павича", "author": "Валентин", "where": ""} in plan["2026-11-06"]
+    assert any(i["title"] == "День павича" and i["author"] == "Валентин" and not i["where"] for i in plan["2026-11-06"])
     p, _sent = news(tmp_path)
     p.today = lambda: dt.date(2026, 11, 6)
     p.cplan_bg = lambda: None
@@ -230,3 +230,28 @@ def test_list_lines_emoji_quote_and_no_cjk(tmp_path):
     line = p.db_line({"id": 1, "cat": "died", "text": "1282 — Нітірен (яп. 日蓮), японський буддистський монах", "url": "https://uk.wikipedia.org/wiki/x", "owner": 0}, Notes())
     assert "日" not in line and line.startswith("⛪")
     assert not DB.IMPORTANT_RE.search("у Вільнюсі вийшов перший номер газети")
+
+
+def test_cplan_edit_flow_writes_only_after_confirm(tmp_path, monkeypatch):
+    from plugins.newsroom import gsheets as G
+    p, _sent = news(tmp_path)
+    p.host.is_admin = lambda c: True
+    p.ensure_cplan = lambda force=False: asyncio.sleep(0)
+    p.store.set("cplan_data", {"2026-11-21": [{"title": "День ТБ", "author": "Валентин", "where": "", "cell": ["Листопад 2026", 5, 6],
+                                               "orig": "День ТБ - Валентин"}]})
+    p.store.set("cplan_cells", {"id": "SHEET", "cells": {"2026-11-21": {"topics": ["Листопад 2026", 5, 6]}}})
+    sheet = {("Листопад 2026", 5, 6): "День ТБ - Валентин\nДень привітань - Лариса"}
+    monkeypatch.setattr(G, "creds", lambda: {"client_email": "bot@x.iam.gserviceaccount.com"})
+
+    async def get(sid, *c):
+        return sheet[c]
+
+    async def put(sid, *a):
+        sheet[a[:3]] = a[3]
+    monkeypatch.setattr(G, "get_cell", get)
+    monkeypatch.setattr(G, "set_cell", put)
+    asyncio.run(p.obs_route(1, "obce", "20261121.0", None))
+    _t, (text, _rows) = asyncio.run(p.obs_text(1, "obce", {"op": "edit", "ymd": "20261121", "k": 0}, "День телебачення - Лариса"))
+    assert "Було" in text and sheet[("Листопад 2026", 5, 6)].startswith("День ТБ")  # ще не записано
+    asyncio.run(p.obs_route(1, "obcw", None, None))
+    assert sheet[("Листопад 2026", 5, 6)] == "День телебачення - Лариса\nДень привітань - Лариса"
