@@ -254,6 +254,60 @@ class ObservancesUI:
         except RuntimeError:
             pass
 
+    # ----- 🗓 контент-план (лише читаємо таблицю — ШІ в неї нічого не пише)
+    CPLAN_DEFAULT = "https://docs.google.com/spreadsheets/d/1yni79g_IYhe1czePtvZgivrU8iSh2C9U/edit"
+
+    def cplan_urls(self):
+        v = self.store.get("cplan_urls")
+        return v if isinstance(v, list) else [self.CPLAN_DEFAULT]
+
+    async def ensure_cplan(self, force=False):
+        """Завантажуємо .xlsx кожного плану (не частіше ніж раз на 3 год) і зберігаємо {дата: [теми]}."""
+        from . import contentplan as CP
+        if not force and time.time() - (self.store.get("cplan_t") or 0) < 3 * 3600:
+            return self.store.get("cplan_data") or {}
+        merged = {}
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0 OrionAI"}) as cl:
+            for url in self.cplan_urls():
+                for dl in CP.download_urls(url):
+                    try:
+                        r = await cl.get(dl)
+                        if r.status_code != 200 or not r.content.startswith(b"PK"):
+                            continue
+                        for day, items in CP.parse(r.content).items():
+                            for it in items:
+                                it["src"] = url
+                            merged.setdefault(day, []).extend(items)
+                        break
+                    except Exception:  # noqa: BLE001
+                        log.info("контент-план: не вдалось завантажити %s", dl, exc_info=True)
+        if merged or not self.store.get("cplan_data"):
+            self.store.set("cplan_data", merged)
+        self.store.set("cplan_t", time.time())
+        return merged
+
+    def cplan_bg(self):
+        t = getattr(self, "_cplan_task", None)
+        if t and not t.done():
+            return
+
+        async def go():
+            try:
+                await self.ensure_cplan()
+            except Exception:  # noqa: BLE001
+                log.info("контент-план: збій", exc_info=True)
+        try:
+            self._cplan_task = asyncio.get_running_loop().create_task(go())
+        except RuntimeError:
+            pass
+
+    def cplan_on(self, d):
+        return (self.store.get("cplan_data") or {}).get(d.isoformat(), [])
+
+    @staticmethod
+    def _tkey(t):
+        return re.sub(r"[^a-zа-яіїєґ0-9]+", " ", clean_title(t).lower()).strip()
+
     def holidays_bg(self):
         """Звірка рухомих свят — у фоні (пошук займає час), не частіше ніж раз на 6 год."""
         if time.time() - (getattr(self, "_hol_t", 0) or 0) < 6 * 3600:
@@ -531,16 +585,34 @@ class ObservancesUI:
                 self.verify_bg(d)
         days = [r for r in rs if r["kind"] == "day"]
         ongoing = [r for r in rs if r["kind"] != "day"]
-        lines = [self.obs_line(r, link=with_links, notes=notes) for r in days[:25]]
-        if ongoing:
-            lines += ["", "<b>Триває:</b>"] + [self.obs_line(r, link=with_links, notes=notes) for r in ongoing[:12]]
-        if notes is not None and unsrc:
-            lines.append(f"<i>🔎 Ще {len(unsrc)} — шукаю джерела, з'являться після перевірки</i>")
+        plan = self.cplan_on(d) if notes is not None else []
+        by_t = {}
+        for it in plan:
+            by_t.setdefault(self._tkey(it["title"]), []).append(it)
+        used = set()
+
+        def who(r):  # день уже є в плані — дописуємо, хто й де пише (без дубля в розділі плану)
+            k = self._tkey(r["title"])
+            hit = by_t.get(k) or next((v for kk, v in by_t.items() if len(kk) > 8 and (kk in k or k in kk)), None)
+            if not hit:
+                return ""
+            used.update(id(i) for i in hit)
+            return " · ✍️ " + ", ".join(esc((i["author"] or "") + (f" ({i['where']})" if i["where"] else "")).strip() or "у плані" for i in hit)
+        lines = [self.obs_line(r, link=with_links, notes=notes) + (who(r) if plan else "") for r in days[:25]]
+        if ongoing:  # скільки триває — лише в підзаголовку «Триває», не в загальному рядку
+            lines += (["", f"<b>⏳ Триває · {len(ongoing)}</b>"] if days else []) + [self.obs_line(r, link=with_links, notes=notes) for r in ongoing[:12]]
         if notes is not None and lines:
             if any(self.verified(r["id"]) for r in days[:25] + ongoing[:12]):
                 lines.append("<i>✅N — скільки незалежних ресурсів підтверджують (посилання — одразу після рядка) · ⚠️1 — лише одне джерело, звіряйте</i>")
         if lines:
-            out.append(("days", f"📌 Дні · {len(days)}" + (f" · триває {len(ongoing)}" if ongoing else ""), lines))
+            out.append(("days", f"📌 Дні · {len(days)}" if days else f"⏳ Триває · {len(ongoing)}", lines))
+        rest = [i for i in plan if id(i) not in used]
+        if rest:  # 🗓 теми з контент-плану, яких немає серед днів; джерело — сама таблиця
+            pl = []
+            for i in rest[:15]:
+                tail = " · ".join(x for x in ((f"✍️ {esc(i['author'])}" if i["author"] else ""), (f"📍 {i['where']}" if i["where"] else "")) if x)
+                pl.append(f"• {esc(i['title'])}" + (f" · {tail}" if tail else "") + f' · <a href="{esc(i["src"])}">контент-план</a>')
+            out.append(("cplan", f"🗓 Контент-план · {len(rest)}", pl))
         for cat in DB.LIST_CATS:
             items = self.db_items(md, cat, chat)
             if items:
@@ -624,6 +696,7 @@ class ObservancesUI:
         except Exception:  # noqa: BLE001
             log.info("очищення назв не вдалося", exc_info=True)
         self.holidays_bg()
+        self.cplan_bg()
         notes = Notes()
         head = f"📅 <b>Теми дня · {d.day} {MONTHS_GEN[d.month - 1]}, {WD[d.weekday()]}</b>\n"
         secs = self.sections(d, chat, notes=notes)
@@ -637,10 +710,8 @@ class ObservancesUI:
                     parts.append(weather)
             else:
                 parts.append(f"<b>{title}</b>\n<blockquote expandable>" + "\n".join(lines) + "</blockquote>")
-        if not any(k == "days" for k, _t, _l in secs):
-            parts.insert(0, "Сьогоднішніх днів у базі немає — «🔄 Оновити з інтернету».")
-            if weather:
-                parts.insert(1, weather)
+        if not any(k == "days" for k, _t, _l in secs) and weather:  # днів немає — просто не показуємо розділ
+            parts.insert(0, weather)
         up = self.upcoming(chat, 30)
         tail = ""
         if up:

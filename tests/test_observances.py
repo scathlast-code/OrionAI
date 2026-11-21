@@ -97,3 +97,28 @@ def test_lists_edit_shadow_personal(tmp_path):
     assert p.obs_on(dt.date(2026, 11, 20), 1)[0]["fav"]
     up = p.upcoming(1, 3)
     assert isinstance(up, list)
+
+
+def test_content_plan_merged_into_day(tmp_path):
+    import io
+    import openpyxl
+    from plugins.newsroom import contentplan as CP
+    wb = openpyxl.Workbook(); ws = wb.active; ws.title = "Листопад 2026"
+    ws.append([2026]); ws.append(["листопад"]); ws.append(["пн", "вт", "ср", "чт", "пт", "сб", "нд"])
+    ws.append([2, 3, 4, 5, 6, 7, 8])
+    ws.append([None, None, None, None, "День супу - Лариса\nДень павича - Валентин"])
+    ws.append(["Сайт", None, None, None, "Як варити борщ"])
+    b = io.BytesIO(); wb.save(b)
+    plan = CP.parse(b.getvalue())
+    assert {"title": "День павича", "author": "Валентин", "where": ""} in plan["2026-11-06"]
+    p, _sent = news(tmp_path)
+    p.today = lambda: dt.date(2026, 11, 6)
+    p.cplan_bg = lambda: None
+    p.obs_add("День супу", "day", "11-06", "11-06", 1, "ваш запис", "https://uk.wikipedia.org/wiki/6_листопада")
+    for items in plan.values():
+        for it in items:
+            it["src"] = "https://docs.google.com/x"
+    p.store.set("cplan_data", plan)
+    t, _rows = p.obs_home()
+    assert "✍️ Лариса" in t and "🗓 Контент-план · 2" in t and "День павича" in t and "Як варити борщ" in t
+    assert "шукаю джерела" not in t and "триває" not in t.split("📌 Дні")[1].split("\n")[0]
