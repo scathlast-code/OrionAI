@@ -23,6 +23,13 @@ class Spaces:
             CREATE TABLE IF NOT EXISTS space_items (id INTEGER PRIMARY KEY AUTOINCREMENT, space INTEGER NOT NULL, kind TEXT NOT NULL,
                 text TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0, author INTEGER NOT NULL, ts REAL NOT NULL);
             """)
+            cols = [r[1] for r in con.execute("PRAGMA table_info(space_items)")]
+            if "assignee" not in cols:  # 👤 кому доручено завдання
+                con.execute("ALTER TABLE space_items ADD COLUMN assignee INTEGER")
+
+    def assign(self, iid, uid):
+        with closing(self.db()) as con, con:
+            con.execute("UPDATE space_items SET assignee=? WHERE id=?", (int(uid) if uid else None, int(iid)))
 
     def db(self):
         con = sqlite3.connect(self.path, timeout=10)

@@ -2122,10 +2122,40 @@ def is_allowed_id(user_id):
     return user_id in ALLOWED_USERS or grant == 'granted' or member_status(user_id) == "approved"
 
 
+NAMES = {}  # ID -> (ім'я, нікнейм): щоб у просторах і «✉️ Зв'язку» показувати імена, а не ID
+
+
+def remember_name(user):
+    if not user:
+        return
+    cur = (user.full_name or "", user.username or "")
+    if NAMES.get(user.id) == cur:
+        return
+    NAMES[user.id] = cur
+    try:
+        d = json.loads(kv_get("names") or "{}")
+        d[str(user.id)] = list(cur)
+        kv_set("names", json.dumps(d))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def known_name(uid):
+    if uid not in NAMES:
+        try:
+            v = json.loads(kv_get("names") or "{}").get(str(uid))
+            if v:
+                NAMES[uid] = tuple(v)
+        except Exception:  # noqa: BLE001
+            pass
+    return NAMES.get(uid, ("", ""))
+
+
 def allowed(update: Update) -> bool:
     ok = update.effective_user is not None and is_allowed_id(update.effective_user.id)
     if ok and update.effective_chat:
         CHAT.set(update.effective_chat.id)
+        remember_name(update.effective_user)
     return ok
 
 
@@ -3532,8 +3562,12 @@ LENGTH_OPTS = [("short", "Коротко"), ("normal", "Звичайно"), ("lo
 
 
 def sp_who(uid):
+    """Ім'я й нікнейм людини — без ID і посилань на профіль (адмін у просторах — звичайний учасник)."""
     m = member_get(uid) or {}
-    return m.get("name") or ("власник" if uid in ALLOWED_USERS else f"ID {uid}")
+    name, nick = known_name(uid)
+    name = m.get("name") or name or "учасник"
+    nick = m.get("username") or nick
+    return name + (f" (@{nick})" if nick else "")
 
 
 def sp_link(space):
@@ -3561,7 +3595,8 @@ def scr_space(chat_id, sid):
     lines = [f"🤝 <b>{esc(sp['name'])}</b>", f"👥 {len(mem)}: " + esc(", ".join(sp_who(u) for u in mem[:12])), ""]
     if open_t or tasks:
         lines += [f"✅ <b>Завдання</b> · відкритих {len(open_t)} з {len(tasks)}", "<blockquote expandable>" + "\n".join(
-            f"{'☑️' if t['done'] else '▫️'} {esc(t['text'][:120])} — {esc(sp_who(t['author']))}" for t in tasks[:25]) + "</blockquote>"]
+            f"{'☑️' if t['done'] else '▫️'} {esc(t['text'][:120])} — {esc(sp_who(t['author']))}"
+            + (f" → 👤 <b>{esc(sp_who(t['assignee']))}</b>" if t.get("assignee") else "") for t in tasks[:25]) + "</blockquote>"]
     if notes:
         lines += [f"📝 <b>Нотатки</b> · {len(notes)}", "<blockquote expandable>" + "\n\n".join(
             f"{esc(n['text'][:400])}\n<i>— {esc(sp_who(n['author']))}, {datetime.fromtimestamp(n['ts'], TZ):%d.%m %H:%M}</i>" for n in notes[-10:]) + "</blockquote>"]
@@ -3571,11 +3606,33 @@ def scr_space(chat_id, sid):
             [("➕ Завдання", f"m:sp:t:{sid}"), ("➕ Нотатка", f"m:sp:n:{sid}")]]
     if tasks or notes:
         rows.append([("✏️ Позначити / прибрати", f"m:sp:ed:{sid}")])
-    rows.append([("🔗 Запросити", f"m:sp:inv:{sid}"), ("🚪 Вийти", f"m:sp:lv:{sid}")])
+    rows.append([("✉️ Написати учаснику", f"m:ct:sp:{sid}"), ("🔗 Запросити", f"m:sp:inv:{sid}")])
+    rows.append([("🚪 Вийти", f"m:sp:lv:{sid}")])
     if sp["owner"] == chat_id:
         rows.append([("✏️ Перейменувати", f"m:sp:ren:{sid}"), ("🗑 Видалити простір", f"m:sp:del:{sid}")])
     rows.append([("« Простори", "m:sp")])
     return "\n".join(lines)[:4000], rows
+
+
+def contact_label(uid):
+    return ("👑 Адміністратор · " if uid == owner_id() else "") + sp_who(uid)
+
+
+def scr_contact(chat_id, args):
+    """✉️ Кому написати: адміністратор і користувачі бота (або учасники простору). Видно ім'я й нікнейм — не ID і не профіль."""
+    if args and args[0] == "sp" and len(args) > 1 and args[1].isdigit() and SPACES.is_member(args[1], chat_id):
+        people = [u for u in SPACES.members(args[1]) if u != chat_id]
+        back = [("« Простір", f"m:sp:o:{args[1]}")]
+        title = "✉️ <b>Написати учаснику простору</b>"
+    else:
+        people = ([owner_id()] if owner_id() and owner_id() != chat_id else []) + [
+            m["user_id"] for m in members_list("approved") if m["user_id"] not in (chat_id, owner_id())]
+        back = [("« Поведінка", "m:st")]
+        title = "✉️ <b>Зв'язок з адміністратором і користувачами</b>"
+    btns = [(contact_label(u)[:40], f"m:cto:{u}") for u in people[:40]]
+    text = (title + "\n\nОберіть, кому написати, — бот передасть повідомлення, а людина зможе відповісти. "
+            "ID і сторінки не показуються нікому: лише імена й нікнейми." + ("" if btns else "\n\nПоки немає кому написати."))
+    return text, [[b] for b in btns] + [back]
 
 
 def scr_space_edit(chat_id, sid):
@@ -3588,6 +3645,7 @@ def scr_space_edit(chat_id, sid):
         row = [(f"➕ {n}", f"m:xs:s:{it['id']}"), (f"🗑 {n}", f"m:sp:d:{sid}:{it['id']}")]  # ➕ — собі в завдання/нотатки/сьогодні
         if it["kind"] == "task":
             row.insert(0, (f"{'↩️' if it['done'] else '✅'} {n}", f"m:sp:x:{sid}:{it['id']}"))
+            row.append((f"👤 {n}", f"m:sp:as:{sid}:{it['id']}"))
         rows.append(row)
     rows.append([("« Простір", f"m:sp:o:{sid}")])
     return "\n".join(lines)[:4000], rows
@@ -3650,6 +3708,7 @@ def scr_settings(chat_id):
             (("🧾 " if p["footer"] else "▫️ ") + "Підпис моделі", "m:set:footer:toggle"),
         ],
         [("⭐ Telegram Premium: " + premium.status_line(chat_id, TZ), "m:prem")],
+        [("✉️ Зв'язок з адміном і користувачами", "m:ct")],
         [("🏭 Скинути", "m:fr"), ("ℹ️", "help:g:settings")],
     ]
     return text, rows
@@ -8320,6 +8379,11 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
             return
         else:
             screen = tr_screen(tok)
+    elif a == "ct":  # ✉️ зв'язок з адміном та іншими користувачами (ID й профілі не показуємо)
+        screen = scr_contact(chat_id, parts[2:] if len(parts) > 2 else [])
+    elif a == "cto" and arg.isdigit():
+        ask_input(chat_id, "ctmsg", int(arg))
+        screen = (f"✉️ Повідомлення для <b>{esc(contact_label(int(arg)))}</b> — напишіть текст, я передам.", [[("✖️ Скасувати", "m:cancel")]])
     elif a == "sp":  # 🤝 спільні простори
         sid = parts[3] if len(parts) > 3 else ""
         sp = SPACES.get(sid) if sid.isdigit() else None
@@ -8340,6 +8404,24 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
             if it and str(it["space"]) == sid:
                 (SPACES.toggle if arg == "x" else SPACES.remove)(it["id"])
             screen = scr_space_edit(chat_id, sid)
+        elif arg == "as" and member and len(parts) > 4:  # 👤 доручити завдання учаснику
+            it = SPACES.item(parts[4])
+            if it and str(it["space"]) == sid:
+                if len(parts) > 5:
+                    uid = int(parts[5]) if parts[5].isdigit() else None
+                    SPACES.assign(it["id"], uid)
+                    if uid and uid != chat_id:
+                        try:
+                            await ctx.bot.send_message(uid, f"🤝 <b>{esc(sp['name'])}</b> · {esc(sp_who(chat_id))} доручає вам завдання:\n{esc(it['text'][:1500])}",
+                                                       parse_mode=ParseMode.HTML, reply_markup=kb([[(f"🤝 {sp['name'][:30]}", f"m:sp:o:{sid}")]]))
+                        except Exception:  # noqa: BLE001
+                            log.info("доручення не надіслано")
+                    toast = "👤 Доручено" if uid else "Без виконавця"
+                    screen = scr_space(chat_id, sid)
+                else:
+                    btns = [(sp_who(u)[:30], f"m:sp:as:{sid}:{it['id']}:{u}") for u in SPACES.members(sid)]
+                    screen = (f"👤 <b>Кому доручити?</b>\n{esc(it['text'][:200])}",
+                              [btns[i:i + 2] for i in range(0, len(btns), 2)] + [[("◽ Нікому", f"m:sp:as:{sid}:{it['id']}:0")], [("« Простір", f"m:sp:o:{sid}")]])
         elif arg == "inv" and member:
             link = sp_link(sp)
             screen = (f"🔗 <b>Запрошення в «{esc(sp['name'])}»</b>\n\nНадішліть це посилання колегам:\n<code>{esc(link)}</code>\n\n"
@@ -9400,6 +9482,14 @@ async def handle_awaited(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text):
     if act in ("spnew", "spn", "spt", "spm", "spai", "spren"):
         AWAIT.pop(chat_id, None)
         return await sp_text(update, ctx, act, data, text)
+    if act == "ctmsg":  # ✉️ передати повідомлення іншій людині — від імені й нікнейму, без ID
+        AWAIT.pop(chat_id, None)
+        try:
+            await ctx.bot.send_message(int(data), f"✉️ <b>{esc(contact_label(chat_id))}</b> пише вам:\n\n{esc(text[:3800])}",
+                                       parse_mode=ParseMode.HTML, reply_markup=kb([[("↩️ Відповісти", f"m:cto:{chat_id}")]]))
+            return await update.message.reply_text(f"✉️ Передано: {contact_label(int(data))}")
+        except Exception:  # noqa: BLE001
+            return await update.message.reply_text("Не вдалося передати — можливо, людина зупинила бота.")
     if act in ("lren", "bgnew", "brl"):
         AWAIT.pop(chat_id, None)
         screen, tip = handle_editor_text(L, chat_id, act, data, text)
