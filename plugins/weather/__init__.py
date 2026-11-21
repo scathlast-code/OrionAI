@@ -14,11 +14,14 @@ import time
 import httpx
 
 from plugins import Plugin, esc
+from footnotes import Notes  # 📎 джерела — зносками в кінці кожної частини
 
 log = logging.getLogger("orion.weather")
 
 API = "https://api.open-meteo.com/v1/forecast"
 GEO = "https://geocoding-api.open-meteo.com/v1/search"
+WD_API, WD_SPARQL = "https://www.wikidata.org/w/api.php", "https://query.wikidata.org/sparql"
+WD_UA = {"User-Agent": "OrionAI-Weather/1.0 (https://github.com/scathlast-code/OrionAI)", "Accept": "application/json"}
 
 # Обласні центри (крім тимчасово окупованих), згруповані за частинами країни.
 REGIONS = {
@@ -58,9 +61,20 @@ def t(v):
 
 
 def src_rows():
-    """Мінікнопки джерел — спільні для всього екрана."""
-    b = [(f"🔗 {n}", "url:" + u) for n, u in SOURCES]
-    return [b[:3], b[3:]]
+    """Джерела тепер — зносками в тексті (див. verify_line), а не окремими кнопками."""
+    return []
+
+
+def om_url(lat, lon):
+    """Сторінка Open-Meteo з графіком прогнозу саме для цієї точки — щоб звірити дані зведення."""
+    return f"https://open-meteo.com/en/docs?latitude={lat}&longitude={lon}"
+
+
+def verify_line(notes=None):
+    """📎 Наприкінці тексту: зноски-джерела цього зведення + де звірити прогноз."""
+    head = notes.legend() if notes else ""
+    others = " · ".join(f'<a href="{u}">{n}</a>' for n, u in SOURCES[1:])
+    return head + f"\n🔎 Звірити: {others}"
 
 
 def wet(code):
@@ -73,7 +87,7 @@ class WeatherPlugin(Plugin):
     title = "Погода"
     version = "1.2"
     summary = "Погода в Україні загалом і у ваших містах; щоранку — разом із темами дня."
-    VIEWS = {"", "ua", "d3", "my", "set"}
+    VIEWS = {"", "ua", "d3", "my", "set", "co"}
 
     def __init__(self, host):
         super().__init__(host)
@@ -124,17 +138,18 @@ class WeatherPlugin(Plugin):
         return list(dict.fromkeys(list(self.host.admins()) + ids))
 
     # ------------------------------------------------------------ дані
-    async def fetch(self, points):
-        """points: [(lat, lon)] → список прогнозів Open-Meteo (поточна погода + 4 дні). Кеш 20 хв."""
-        key = tuple((round(a, 2), round(b, 2)) for a, b in points)
+    async def fetch(self, points, tz="Europe/Kyiv"):
+        """points: [(lat, lon)] → список прогнозів Open-Meteo (поточна погода + 7 днів). Кеш 20 хв."""
+        key = tuple((round(a, 2), round(b, 2)) for a, b in points) + ((tz,) if tz != "Europe/Kyiv" else ())
+        pts = [k for k in key if isinstance(k, tuple)]
         hit = self._cache.get(key)
         if hit and time.time() - hit[0] < 1200:
             return hit[1]
         params = {
-            "latitude": ",".join(str(a) for a, _ in key), "longitude": ",".join(str(b) for _, b in key),
+            "latitude": ",".join(str(a) for a, _ in pts), "longitude": ",".join(str(b) for _, b in pts),
             "current": "temperature_2m,apparent_temperature,weather_code,wind_speed_10m,relative_humidity_2m",
             "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,wind_speed_10m_max",
-            "timezone": "Europe/Kyiv", "forecast_days": 7, "wind_speed_unit": "ms",
+            "timezone": tz, "forecast_days": 7, "wind_speed_unit": "ms",
         }
         async with httpx.AsyncClient(timeout=25, trust_env=False) as client:
             r = await client.get(API, params=params)
@@ -150,6 +165,108 @@ class WeatherPlugin(Plugin):
             r.raise_for_status()
         return [x for x in (r.json().get("results") or []) if "latitude" in x]
 
+    # ------------------------------------------------------------ 🌍 інші країни
+    def countries(self, chat) -> list:
+        return (self.cfg().get("countries") or {}).get(str(chat), [])
+
+    def set_countries(self, chat, items):
+        c = self.cfg()
+        c.setdefault("countries", {})[str(chat)] = items[:10]
+        self.save(c)
+
+    async def find_country(self, name):
+        """Назва будь-якою мовою → [{qid, name}] держав (Вікідані: має ISO-код країни)."""
+        async with httpx.AsyncClient(timeout=25, headers=WD_UA) as c:
+            r = await c.get(WD_API, params={"action": "wbsearchentities", "search": name, "language": "uk", "uselang": "uk",
+                                            "type": "item", "limit": 10, "format": "json"})
+            r.raise_for_status()
+            ids = [x["id"] for x in r.json().get("search") or []]
+            if not ids:
+                return []
+            q = ("SELECT ?c ?cLabel WHERE { VALUES ?c { " + " ".join("wd:" + i for i in ids) + " } ?c wdt:P297 ?iso . "
+                 'SERVICE wikibase:label { bd:serviceParam wikibase:language "uk,en". } }')
+            r = await c.get(WD_SPARQL, params={"query": q, "format": "json"})
+            r.raise_for_status()
+        got = {b["c"]["value"].rsplit("/", 1)[-1]: b["cLabel"]["value"] for b in r.json()["results"]["bindings"]}
+        return [{"qid": i, "name": got[i]} for i in ids if i in got]
+
+    async def country_points(self, qid, limit=10):
+        """Найбільші міста країни (Вікідані) — щоб зведення охоплювало всю країну, а не одне місто."""
+        q = ("SELECT ?city ?cityLabel ?coord (MAX(?p) AS ?pop) WHERE { ?city wdt:P17 wd:" + qid + " ; wdt:P625 ?coord ; wdt:P1082 ?p ; "
+             "wdt:P31 ?t . VALUES ?t { wd:Q515 wd:Q1549591 wd:Q5119 wd:Q1637706 wd:Q200250 wd:Q22865 } "
+             'SERVICE wikibase:label { bd:serviceParam wikibase:language "uk,en". } } '
+             "GROUP BY ?city ?cityLabel ?coord ORDER BY DESC(?pop) LIMIT 40")
+        async with httpx.AsyncClient(timeout=40, headers=WD_UA) as c:
+            r = await c.get(WD_SPARQL, params={"query": q, "format": "json"})
+            r.raise_for_status()
+        out, seen = [], set()
+        for b in r.json()["results"]["bindings"]:
+            m = re.match(r"Point\(([-\d.]+) ([-\d.]+)\)", b["coord"]["value"])
+            name = b["cityLabel"]["value"]
+            if not m or name in seen or re.fullmatch(r"Q\d+", name):
+                continue
+            seen.add(name)
+            out.append([name, round(float(m.group(2)), 3), round(float(m.group(1)), 3)])
+            if len(out) >= limit:
+                break
+        return out
+
+    def summary(self, points, data, i):
+        """Підсумок дня по країні без поділу на частини: діапазон, де опади, сніг, гроза, вітер."""
+        rows = []
+        for (name, _la, _lo), f in zip(points, data):
+            d = f.get("daily") or {}
+            try:
+                rows.append(dict(name=name, lo=d["temperature_2m_min"][i], hi=d["temperature_2m_max"][i], code=int(d["weather_code"][i]),
+                                 pp=(d.get("precipitation_probability_max") or [0] * 7)[i] or 0, wind=(d.get("wind_speed_10m_max") or [0] * 7)[i] or 0))
+            except (KeyError, IndexError, TypeError):
+                continue
+        if not rows:
+            return ""
+        lo, hi = min(rows, key=lambda r: r["lo"]), max(rows, key=lambda r: r["hi"])
+        codes = [r["code"] for r in rows]
+        e, what = wmo(max(set(codes), key=lambda c: (codes.count(c), c)))
+        lines = [f"🌡 Температура: від {t(lo['lo'])} (найхолодніше — {esc(lo['name'])}) до {t(hi['hi'])} (найтепліше — {esc(hi['name'])})",
+                 f"{e} Переважно: {what}"]
+        storm = [r["name"] for r in rows if r["code"] >= 95]
+        snow = [r["name"] for r in rows if 71 <= r["code"] <= 86 and r["code"] not in (80, 81, 82)]
+        rain = [r["name"] for r in rows if wet(r["code"]) and r["pp"] >= 50 and r["name"] not in snow + storm]
+        windy = [r["name"] for r in rows if r["wind"] >= 12]
+        for icon, label, names in (("⛈", "Гроза", storm), ("❄️", "Сніг", snow), ("☔", "Опади", rain), ("💨", "Сильний вітер (12+ м/с)", windy)):
+            if names:
+                lines.append(f"{icon} {label}: " + ("майже по всій країні" if len(names) >= len(rows) * 0.7 else esc(", ".join(names))))
+        return "\n".join(lines)
+
+    async def countries_text(self, chat, days=1, notes=None):
+        """🌍 Те саме зведення, що для України, — по кожній обраній людиною країні."""
+        parts = []
+        for co in self.countries(chat):
+            pts = co.get("points") or []
+            if not pts:
+                continue
+            try:
+                data = await self.fetch([(la, lo) for _n, la, lo in pts], tz="auto")
+            except Exception:  # noqa: BLE001
+                parts.append(f"🌍 <b>{esc(co['name'])}</b>: прогноз зараз недоступний")
+                continue
+            times = (data[0].get("daily") or {}).get("time") or []
+            body = "\n\n".join(f"<b>{self.day_title(times[i], i)}</b>\n" + self.summary(pts, data, i)
+                                for i in range(min(days, len(times))) if self.summary(pts, data, i))
+            if body:
+                mark = notes.mark(om_url(pts[0][1], pts[0][2]), f"Open-Meteo · {co['name']}") if notes is not None else ""
+                parts.append(f"🌍 <b>Погода · {esc(co['name'])}</b> · {len(pts)} найбільших міст{mark}\n<blockquote expandable>{body}</blockquote>")
+        return "\n".join(parts)
+
+    def countries_screen(self, chat):
+        items = self.countries(chat)
+        lines = ["🌍 <b>Зведення по інших країнах</b>", "",
+                 "Додайте будь-яку країну — у ранковому звіті, «🌅 Сьогодні» й на екрані погоди з'явиться таке саме зведення, як для України: "
+                 "діапазон температур, де опади, сніг, гроза й сильний вітер. Дані — найбільші міста країни (Вікідані) і прогноз Open-Meteo.", ""]
+        lines += [f"• {esc(c['name'])} · міст: {len(c.get('points') or [])}" for c in items] or ["Поки жодної країни."]
+        rows = [[(f"🗑 {c['name'][:24]}", self.cb("crm", i))] for i, c in enumerate(items)]
+        rows.append([("➕ Додати країну", self.cb("cadd")), ("« Погода", self.cb())])
+        return "\n".join(lines), rows
+
     # ------------------------------------------------------------ тексти
     @staticmethod
     def day_title(iso, i):
@@ -157,7 +274,7 @@ class WeatherPlugin(Plugin):
         head = ("Сьогодні", "Завтра")[i] if i < 2 else WD[d.weekday()].capitalize()  # noqa: E501
         return f"{head}, {d.day} {MONTHS[d.month - 1]}"
 
-    def ua_day(self, data, i):
+    def ua_day(self, data, i, notes=None):
         """Підсумок дня по Україні: діапазон температур, найтепліше/найхолодніше, де опади й сильний вітер."""
         rows = []
         for (name, _la, _lo, region), f in zip(UA_POINTS, data):
@@ -171,30 +288,35 @@ class WeatherPlugin(Plugin):
         if not rows:
             return ""
         lo, hi = min(rows, key=lambda r: r["lo"]), max(rows, key=lambda r: r["hi"])
-        lines = [f"🌡 від {t(lo['lo'])} ({lo['name']}) до {t(hi['hi'])} ({hi['name']})"]
+        lines = [f"🌡 Температура: від {t(lo['lo'])} (найхолодніше — {lo['name']}) до {t(hi['hi'])} (найтепліше — {hi['name']})"]
         for region in REGIONS:
             part = [r for r in rows if r["region"] == region]
             if not part:
                 continue
             codes = [int(r["code"]) for r in part]
-            e, _ = wmo(max(set(codes), key=lambda c: (codes.count(c), c)))  # найчастіша погода в цій частині країни
+            e, what = wmo(max(set(codes), key=lambda c: (codes.count(c), c)))  # найчастіша погода в цій частині країни
             rlo, rhi = min(r["lo"] for r in part), max(r["hi"] for r in part)
-            lines.append(f"{e} <b>{region}</b>: {t(rlo)}…{t(rhi)}")
+            pp, wind = max(r["pp"] for r in part), max(r["wind"] for r in part)
+            ref = next((c for c in REGIONS[region]), None)
+            mark = notes.mark(om_url(ref[1], ref[2]), f"Open-Meteo · {region} ({ref[0]})") if notes is not None and ref else ""
+            lines.append(f"{e} <b>{region}</b>: {t(rlo)}…{t(rhi)}, {what}" + (f" · ☂️ до {round(pp)}%" if pp >= 30 else "")
+                         + (f" · 💨 до {round(wind)} м/с" if wind >= 8 else "") + mark)
         rain = [r["name"] for r in rows if wet(r["code"]) and r["pp"] >= 50]
         snow = [r["name"] for r in rows if 71 <= int(r["code"]) <= 86 and int(r["code"]) not in (80, 81, 82)]
         storm = [r["name"] for r in rows if int(r["code"]) >= 95]
         windy = [r["name"] for r in rows if r["wind"] >= 12]
+        most = lambda names: "майже по всій країні" if len(names) >= len(rows) * 0.7 else ", ".join(names)  # noqa: E731
         if storm:
-            lines.append("⛈ Гроза: " + ", ".join(storm))
+            lines.append("⛈ Гроза: " + most(storm))
         if snow:
-            lines.append("❄️ Сніг: " + ", ".join(snow))
+            lines.append("❄️ Сніг: " + most(snow))
         rain = [n for n in rain if n not in snow and n not in storm]
         if rain:
             lines.append("☔ Опади: " + (", ".join(rain) if len(rain) < len(rows) * 0.7 else "майже по всій країні"))
         elif not snow and not storm:
             lines.append("🌂 Без істотних опадів")
         if windy:
-            lines.append("💨 Сильний вітер (12+ м/с): " + ", ".join(windy))
+            lines.append("💨 Сильний вітер (12+ м/с): " + most(windy))
         return "\n".join(lines)
 
     def ua_compact(self, data, i):
@@ -239,12 +361,12 @@ class WeatherPlugin(Plugin):
                     break
         return out
 
-    async def ua_text(self, days=1, start=0):
+    async def ua_text(self, days=1, start=0, notes=None):
         data = await self.fetch([(la, lo) for _n, la, lo, _r in UA_POINTS])
         times = (data[0].get("daily") or {}).get("time") or []
         parts = []
         for i in range(start, min(days, len(times))):
-            body = self.ua_day(data, i)
+            body = self.ua_day(data, i, notes)
             if body:
                 parts.append(f"<b>{self.day_title(times[i], i)}</b>\n{body}")
         return "\n\n".join(parts)
@@ -262,20 +384,22 @@ class WeatherPlugin(Plugin):
         data = await self.fetch([(c["lat"], c["lon"]) for c in items])
         return "\n".join(self.city_line(c["name"], f, full) for c, f in zip(items, data))
 
-    async def forecast_text(self, chat=None, today_only=False):
+    async def forecast_text(self, chat=None, today_only=False, notes=None):
         """3 дні докладно; 5 і 7 днів — згорнуто (розгортаються торканням)."""
         data = await self.fetch([(la, lo) for _n, la, lo, _r in UA_POINTS])
         n = len((data[0].get("daily") or {}).get("time") or [])
-        text = await self.ua_text(1 if today_only else 3)
+        text = await self.ua_text(1 if today_only else 3, notes=notes)
         if today_only:
             mine = await self.my_text(chat) if chat else ""
             if mine:
                 text += "\n\n📍 <b>Ваші міста</b>\n" + mine
-            nxt = await self.ua_text(3, start=1)
+            nxt = await self.ua_text(3, start=1, notes=notes)
             if nxt:
                 text += "\n\n📅 <b>3 дні</b>\n<blockquote expandable>" + nxt + "</blockquote>"
-        d5 = "\n".join(x for x in (self.ua_compact(data, i) for i in range(3, min(5, n))) if x)
-        d7 = "\n".join(x for x in (self.ua_compact(data, i) for i in range(5, min(7, n))) if x)
+        times = (data[0].get("daily") or {}).get("time") or []
+        full = lambda i: (f"<b>{self.day_title(times[i], i)}</b>\n" + self.ua_day(data, i, notes)) if i < len(times) and self.ua_day(data, i) else ""  # noqa: E731
+        d5 = "\n\n".join(x for x in (full(i) for i in range(3, min(5, n))) if x)
+        d7 = "\n\n".join(x for x in (full(i) for i in range(5, min(7, n))) if x)
         if d5:
             text += "\n🗓 <b>5 днів</b>\n<blockquote expandable>" + d5 + "</blockquote>"
         if d7:
@@ -284,7 +408,14 @@ class WeatherPlugin(Plugin):
 
     async def morning_text(self, chat):
         """Ранковий звіт: сьогодні докладно й ваші міста; 3, 5 і 7 днів — згорнуто."""
-        return ("🌤 <b>Погода в Україні</b>\n\n" + await self.forecast_text(chat, today_only=True))[:4000]
+        notes, co = Notes(), ""
+        body = await self.forecast_text(chat, today_only=True, notes=notes)
+        try:
+            co = await self.countries_text(chat, notes=notes)
+        except Exception:  # noqa: BLE001
+            pass
+        tail = verify_line(notes)
+        return ("🌤 <b>Погода по всій Україні</b>\n\n" + body + (("\n\n" + co) if co else ""))[:4000 - len(tail)] + tail
 
     async def send_morning(self, only=None):
         """Ранковий звіт кожному, хто його хоче, — у його час (only — список, кому саме зараз)."""
@@ -332,18 +463,26 @@ class WeatherPlugin(Plugin):
 
     # ------------------------------------------------------------ екрани
     async def home(self, chat):
+        notes = Notes()
         try:
-            body = await self.forecast_text()
+            body = await self.forecast_text(notes=notes)
             mine = await self.my_text(chat)
         except Exception as exc:  # noqa: BLE001
             return (f"🌤 <b>Погода</b>\n\n⚠️ Не вдалося отримати прогноз: {esc(type(exc).__name__)}. Спробуйте за хвилину.",
                     [[("🔄 Оновити прогноз", self.cb())]] + src_rows())
-        text = "🌤 <b>Погода · Україна · 3 дні</b>\n\n" + body
+        text = "🌤 <b>Погода по всій Україні · 3 дні</b>\n\n" + body
         text += ("\n\n📍 <b>Ваші міста</b>\n" + mine) if mine else "\n\n📍 Додайте свої міста — «➕ Місто»."
+        try:
+            co = await self.countries_text(chat, days=3, notes=notes)
+        except Exception:  # noqa: BLE001
+            co = ""
+        if co:
+            text += "\n\n" + co
         rows = [[("📜 Прикмети дня", self.cb("lore")), ("📅 Тиждень", self.cb("d3"))],
-                [("📍 Мої міста", self.cb("my")), ("➕ Місто", self.cb("add"))],
+                [("📍 Мої міста", self.cb("my")), ("➕ Місто", self.cb("add")), ("🌍 Країни", self.cb("co"))],
                 [(self.morning_label(chat), self.cb("mt")), ("🔄 Оновити прогноз", self.cb())]] + src_rows()
-        return text[:3900] + "\n\n<i>Дані: Open-Meteo · температура в °C</i>", rows
+        tail = verify_line(notes) + "\n<i>Температура в °C</i>"
+        return text[:4000 - len(tail)] + tail, rows
 
     async def lore(self, day=None):
         """📜 Народний календар дня: назва дня в народі, прикмети про погоду, звичаї й заборони. Кеш на дату (ММ-ДД)."""
@@ -376,11 +515,13 @@ class WeatherPlugin(Plugin):
         if a in ("", "ua"):
             return None, await self.home(chat)
         if a == "d3":
+            notes = Notes()
             try:
-                text = await self.ua_text(7)
+                text = await self.ua_text(7, notes=notes)
             except Exception as exc:  # noqa: BLE001
                 return f"⚠️ {type(exc).__name__}", await self.home(chat)
-            return None, (("📅 <b>Погода в Україні на тиждень</b>\n\n" + text)[:4000], [[("« Погода", self.cb())]] + src_rows())
+            tail = verify_line(notes)
+            return None, (("📅 <b>Погода по всій Україні на тиждень</b>\n\n" + text)[:4000 - len(tail)] + tail, [[("« Погода", self.cb())]])
         if a == "lore":
             now = dt.datetime.now(self.host.tz) if getattr(self.host, "tz", None) else dt.datetime.now()
             try:
@@ -404,6 +545,34 @@ class WeatherPlugin(Plugin):
             rows = [[(f"🗑 {c['name'][:20]}", self.cb("rm", i))] for i, c in enumerate(items)]
             rows += [[("➕ Місто", self.cb("add")), ("« Погода", self.cb())]]
             return None, (("📍 <b>Мої міста</b>\n\n" + text)[:4000], rows)
+        if a == "co":
+            return None, self.countries_screen(chat)
+        if a == "cadd":
+            self.ask(chat, "country")
+            return None, ("🌍 Напишіть назву країни будь-якою мовою (напр. «Польща», «Japan», «Канада»).", [[("✖️ Скасувати", "m:cancel")]])
+        if a == "cpick":
+            pend = (self.cfg().get("cpending") or {}).get(str(chat)) or []
+            try:
+                c = pend[int(x)]
+            except (ValueError, IndexError):
+                return "Застаріло", self.countries_screen(chat)
+            try:
+                pts = await self.country_points(c["qid"])
+            except Exception as exc:  # noqa: BLE001
+                return f"⚠️ Вікідані не відповіли ({type(exc).__name__}) — спробуйте ще раз", self.countries_screen(chat)
+            if not pts:
+                return "Не знайшов міст цієї країни", self.countries_screen(chat)
+            items = [i for i in self.countries(chat) if i.get("qid") != c["qid"]] + [{**c, "points": pts}]
+            self.set_countries(chat, items)
+            return f"✅ Додано: {c['name']}", self.countries_screen(chat)
+        if a == "crm":
+            items = self.countries(chat)
+            try:
+                gone = items.pop(int(x))
+            except (ValueError, IndexError):
+                gone = None
+            self.set_countries(chat, items)
+            return (f"🗑 {gone['name']}" if gone else None), self.countries_screen(chat)
         if a == "add":
             self.ask(chat, "city")
             return None, ("✍️ Напишіть назву міста чи села (можна будь-якої країни).", [[("✖️ Скасувати", "m:cancel")]])
@@ -456,6 +625,20 @@ class WeatherPlugin(Plugin):
             hm = f"{int(m[1]):02d}:{m[2]}"
             self.set_morning(chat, hm)
             return f"🌅 Щодня о {hm}", await self.home(chat)
+        if key == "country":
+            try:
+                found = await self.find_country(text.strip()[:60])
+            except Exception as exc:  # noqa: BLE001
+                return f"⚠️ Вікідані не відповіли ({type(exc).__name__})", self.countries_screen(chat)
+            if not found:
+                self.ask(chat, "country")
+                return None, (f"🔎 Країну «{esc(text[:40])}» не знайдено. Спробуйте інакше.", [[("✖️ Скасувати", "m:cancel")]])
+            c = self.cfg()
+            c.setdefault("cpending", {})[str(chat)] = found[:5]
+            self.save(c)
+            if len(found) == 1:
+                return await self.route(update, ctx, chat, ["cpick", "0"])
+            return None, ("Яка саме?", [[(f"🌍 {f['name'][:40]}", self.cb("cpick", i))] for i, f in enumerate(found[:5])] + [[("✖️ Скасувати", self.cb("co"))]])
         if key != "city":
             return None, None
         try:
