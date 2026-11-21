@@ -122,7 +122,7 @@ def test_content_plan_merged_into_day(tmp_path):
     assert p.cplan_sync(plan) == 1  # «День павича» — новий день у календарі; «День супу» вже є; стаття без назви дня — не день
     assert any(r["title"] == "День павича" and r["source"] == "Контент-план" for r in p.obs_on(dt.date(2026, 11, 6)))
     t, _rows = p.obs_home()
-    assert "✍️ Лариса" in t and "📌 Сьогодні відзначається · 2" in t and "Ще в контент-плані" not in t
+    assert "ЛАРИСА" in t and "📌 Сьогодні відзначається · 2" in t and "Ще в контент-плані" not in t
     assert "🗓 Контент-план" not in t
     assert "шукаю джерела" not in t and "триває" not in t.split("📌 Сьогодні відзначається")[1].split("\n")[0]
 

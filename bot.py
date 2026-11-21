@@ -2739,7 +2739,7 @@ PLUGINS = orion_plugins.Registry(orion_plugins.Host(
     cancel_input=lambda chat: AWAIT.pop(chat, None),
     bot=lambda: _plugin_bot(),
     tz=TZ,
-    extra={"kb": lambda rows: kb(rows), "secret": MCP_SECRET, "sticker_select": _plugin_sticker_select,
+    extra={"kb": lambda rows: kb(rows), "user_name": lambda c: sp_who(c), "secret": MCP_SECRET, "sticker_select": _plugin_sticker_select,
            "chat_answer": lambda chat, text: _plugin_chat_answer(chat, text),
            "real_bot": lambda: tg_app.bot if tg_app else None, "hubclient": hub,
            "miniapp_url": miniapp_url(),
@@ -3040,6 +3040,15 @@ def scr_tasks(chat_id):
                  "Торкніться, щоб повторити чи скасувати; непотрібні приберіть кнопкою нижче — або вони зникнуть самі за 12 год.</i>")
     mode = sort_mode(chat_id, "tasks")
     rows = [sort_row(chat_id, "tasks"), [("➕ Нове відкладене завдання", "m:tnew"), ("ℹ️", "help:g:tasks")]]
+    red = PLUGINS.get("red")
+    if red and hasattr(red, "my_open"):  # 🗞 редакційні завдання (контент-план, чати) — тут же, окремим рядком
+        try:
+            n_all, n_me = red.my_open(chat_id)
+            if n_all:
+                text += f"\n🗞 Редакційні: <b>{n_all}</b>" + (f" (ваші — {n_me})" if n_me else "")
+                rows.insert(1, [(f"🗞 Редакційні завдання · {n_all}", "m:pl:red:l:task")])
+        except Exception:  # noqa: BLE001
+            log.info("редакційні завдання не прочитано", exc_info=True)
     if groups["choice"]:
         rows.insert(1, [(f"🧹 Прибрати ❓ без відповіді · {len(groups['choice'])}", "m:tclr")])
     head = None

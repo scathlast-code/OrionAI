@@ -387,7 +387,7 @@ class ObservancesUI:
             items = data.get(sel.isoformat(), [])
             lines.append(f"<b>{'Сьогодні' if sel == today else f'{sel.day} {MONTHS_GEN[sel.month - 1]}'}, {WD[sel.weekday()]} · {len(items)}</b>")
             for k, it in enumerate(items, 1):
-                lines.append(f"{k}. {esc(it['title'])}" + (f" · ✍️ {esc(it['author'])}" if it.get("author") else "")
+                lines.append(f"{k}. {esc(it['title'])}" + (f" · ✍️ {DB.person(it['author'])}" if it.get("author") else "")
                              + (f" · 📍 {it['where']}" if it.get("where") else ""))
             if not items:
                 lines.append("На цей день у плані порожньо.")
@@ -894,15 +894,27 @@ class ObservancesUI:
             by_t.setdefault(self._tkey(it["title"]), []).append(it)
         used = set()
 
+        red = self.host.extra.get("plugin", lambda pid: None)("red")
+        try:
+            extra_who = red.assigned(d.isoformat()) if red and plan else {}
+        except Exception:  # noqa: BLE001
+            extra_who = {}
+        for title, pairs in extra_who.items():  # призначені в «🗞 Редакції» — як автори з плану
+            for w, where in pairs:
+                by_t.setdefault(self._tkey(title), []).append({"title": title, "author": w, "where": where})
+
         def who(r):  # день уже є в плані — дописуємо, хто й де пише (без дубля в розділі плану)
             k = self._tkey(r["title"])
             hit = by_t.get(k) or next((v for kk, v in by_t.items() if len(kk) > 8 and (kk in k or k in kk)), None)
             if not hit:
                 return ""
             used.update(id(i) for i in hit)
+            hit = [i for i in hit if i.get("author")] or hit
+            seen_ = set()
+            hit = [i for i in hit if not ((i.get("author"), i.get("where")) in seen_ or seen_.add((i.get("author"), i.get("where"))))]
             if not any(i.get("author") for i in hit):  # ◽ сірий — за день ніхто не відповідає (призначити — у «🗞 Редакція»)
                 return " · ◽" + ("" if r.get("source") == "Контент-план" else " · " + self.cplan_ref(d))
-            return (" · ✍️ " + ", ".join(esc((i["author"] or "") + (f" ({i['where']})" if i["where"] else "")).strip() or "у плані" for i in hit)
+            return (" · ✍️ " + ", ".join((DB.person(i["author"]) if i.get("author") else "у плані") + (f" ({esc(i['where'])})" if i.get("where") else "") for i in hit)
                     + ("" if r.get("source") == "Контент-план" else " · " + self.cplan_ref(d)))
         lines = [self.obs_line(r, link=with_links, notes=notes) + (who(r) if plan else "") for r in days[:25]]
         if ongoing:  # скільки триває — лише в підзаголовку «Триває», не в загальному рядку
