@@ -24,7 +24,11 @@ CREATE TABLE IF NOT EXISTS posts (id INTEGER PRIMARY KEY AUTOINCREMENT, chats TE
     last REAL DEFAULT 0, on_ INTEGER DEFAULT 1, by INTEGER, created REAL);
 CREATE TABLE IF NOT EXISTS links (name TEXT PRIMARY KEY, uid INTEGER, username TEXT, at REAL);
 CREATE TABLE IF NOT EXISTS accounts (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, uid INTEGER, username TEXT DEFAULT '', at REAL);
+CREATE TABLE IF NOT EXISTS uprefs (uid INTEGER PRIMARY KEY, data TEXT NOT NULL DEFAULT '{}');
 """
+# ⚙️ Особисте в «Редакції» — у кожного своє: порядок і фільтр списків, сповіщення, нагадування
+UDEF = {"mine_first": True, "only_mine": False, "notify_assigned": True, "notify_new": "off", "remind": "", "show_done": False}
+NEW_MODES = {"off": "вимкнено", "tasks": "лише нові завдання", "all": "усе нове з чатів"}
 KINDS = {"news": "📰 Новини", "task": "✅ Завдання", "decision": "📌 Рішення", "talk": "💬 Обговорення"}
 TALK = "💬 Обговорення й рішення"  # рішення й обговорення — один список (рішення позначені 📌)
 TASK_RE = re.compile(r"(?i)\b(?:треба|потрібно|необхідно|зробити|напиши|напишіть|підготу\w*|завдання|дедлайн|до (?:завтра|понеділка|вівторка|"
@@ -42,7 +46,7 @@ class Plugin(Base):
     admin_only = False
     summary = ("Новини, завдання, рішення й обговорення з редакційних чатів — списками з посиланнями на повідомлення й відповідальними; "
                "завдання з контент-плану з виконавцями. У чати бот сам нічого не пише.")
-    VIEWS = {"", "l", "i", "ch", "pp", "pc", "rep", "who", "po"}
+    VIEWS = {"", "l", "i", "ch", "pp", "pc", "rep", "who", "po", "me"}
     REPORT_URL = "https://docs.google.com/presentation/d/1akz9pZoUv576-nLXmIJ-4nQBHTElNLcP/edit"
 
     def __init__(self, host):
@@ -124,6 +128,10 @@ class Plugin(Base):
             un = getattr(post.from_user, "username", None) if post.from_user else None
             if un:  # нікнейм, указаний для імені з плану, — тепер знаємо й ID людини
                 con.execute("UPDATE accounts SET uid=? WHERE lower(username)=lower(?) AND uid IS NULL", (post.from_user.id, un))
+        try:
+            await self.notify_new(kind, text, self.msg_url(ch, post.message_id), ch.title or "")
+        except Exception:  # noqa: BLE001
+            pass
         return None
 
     # ---------------------------------------------------------------- 📋 завдання з контент-плану
@@ -147,6 +155,80 @@ class Plugin(Base):
                     con.execute("INSERT OR IGNORE INTO items(chat,msg,kind,text,author,who,url,at,day,reason,where_,key) "
                                 "VALUES(0,0,'task',?,?,?,?,?,?,?,?,?)",
                                 (i["title"], "контент-план", i.get("author") or "", i.get("src") or "", time.time(), day, reason, where, key))
+
+    def up(self, uid):
+        with closing(self.db()) as con:
+            r = con.execute("SELECT data FROM uprefs WHERE uid=?", (int(uid),)).fetchone()
+        try:
+            d = json.loads(r[0]) if r else {}
+        except ValueError:
+            d = {}
+        return {**UDEF, **d}
+
+    def set_up(self, uid, **kw):
+        d = self.up(uid)
+        d.update(kw)
+        with closing(self.db()) as con, con:
+            con.execute("INSERT INTO uprefs(uid, data) VALUES(?,?) ON CONFLICT(uid) DO UPDATE SET data=excluded.data",
+                        (int(uid), json.dumps({k: d[k] for k in UDEF}, ensure_ascii=False)))
+        return d
+
+    def users_with(self, pred):
+        with closing(self.db()) as con:
+            uids = [r[0] for r in con.execute("SELECT uid FROM uprefs")]
+        return [u for u in uids if pred(self.up(u))]
+
+    def uids_of(self, name):
+        """Акаунти Telegram, прив'язані до імені виконавця (може бути кілька)."""
+        return sorted({a["uid"] for a in self.accounts(name) if a.get("uid")})
+
+    def me_screen(self, chat):
+        u = self.up(chat)
+        names = self.my_names(chat)
+        yn = lambda v: "так" if v else "ні"  # noqa: E731
+        text = ("⚙️ <b>Мої налаштування редакції</b>\n<i>Лише для вас — інші бачать своє.</i>\n\n"
+                f"🙋 Я в контент-плані й чатах: {', '.join(f'<code>{esc(n.upper())}</code>' for n in names) if names else 'ще не вказано — «👥 Люди» → своє ім’я → «🙋 Це я»'}\n"
+                f"⬆️ Мої завдання першими: {yn(u['mine_first'])}\n"
+                f"👤 Показувати лише мої: {yn(u['only_mine'])}\n"
+                f"✅ Показувати й виконані: {yn(u['show_done'])}\n"
+                f"🔔 Мене призначили виконавцем — сповіщати: {yn(u['notify_assigned'])}\n"
+                f"📥 Нове з редакційних чатів — сповіщати: {NEW_MODES[u['notify_new']]}\n"
+                f"⏰ Щоденне нагадування про мої завдання: {u['remind'] or 'вимкнено'}")
+        nxt = {"off": "tasks", "tasks": "all", "all": "off"}[u["notify_new"]]
+        rows = [[("⬆️ Мої першими: " + yn(u["mine_first"]), self.cb("mef", "mine_first")), ("👤 Лише мої: " + yn(u["only_mine"]), self.cb("mef", "only_mine"))],
+                [("✅ Виконані: " + yn(u["show_done"]), self.cb("mef", "show_done")), ("🔔 Призначення: " + yn(u["notify_assigned"]), self.cb("mef", "notify_assigned"))],
+                [("📥 Нове з чатів: " + NEW_MODES[u["notify_new"]], self.cb("men", nxt))],
+                [("⏰ Нагадування: " + (u["remind"] or "вимк."), self.cb("met")), ("🙋 Хто я", self.cb("pp"))],
+                [("« Редакція", self.cb())]]
+        return text, rows
+
+    async def notify_new(self, kind, text, url, chat_title):
+        """📥 Сповіщення тим, хто сам цього захотів (у налаштуваннях) — лише в особисті, у редакційні чати нічого."""
+        for uid in self.users_with(lambda u: u["notify_new"] == "all" or (u["notify_new"] == "tasks" and kind == "task")):
+            await self.host.notify(uid, f"📥 <b>{KINDS.get(kind, kind)}</b> · {esc(chat_title)}\n{esc(text[:300])}"
+                                   + (f'\n<a href="{esc(url)}">повідомлення</a>' if url else ""), [[("🗞 Редакція", self.cb())]])
+
+    async def notify_assigned(self, iid, name, by=None):
+        with closing(self.db()) as con:
+            r = con.execute("SELECT * FROM items WHERE id=?", (int(iid),)).fetchone()
+        if not r:
+            return
+        for uid in self.uids_of(name):
+            if uid == by or not self.up(uid)["notify_assigned"]:
+                continue
+            await self.host.notify(uid, f"🔔 Вас призначено виконавцем: {esc(self.task_line(dict(r)))}", [[("✍️ Відкрити", self.cb("i", iid))]])
+
+    async def remind_due(self, now):
+        hm = now.strftime("%H:%M")
+        for uid in self.users_with(lambda u: u["remind"] == hm):
+            key = f"{uid}:{now.date()}"
+            if key in getattr(self, "_reminded", set()):
+                continue
+            self._reminded = getattr(self, "_reminded", set()) | {key}
+            rs = self.my_tasks(uid, None, now.date().isoformat(), 15)
+            if rs:
+                await self.host.notify(uid, f"⏰ <b>Ваші редакційні завдання</b> на сьогодні й прострочені · {len(rs)}\n\n"
+                                       + "\n".join(f"• {esc(self.task_line(r))}" for r in rs), [[("✅ Завдання", self.cb("l", "task"))]])
 
     def my_open(self, chat):
         """(усі відкриті завдання, з них — на цю людину за іменем у Telegram)."""
@@ -227,7 +309,8 @@ class Plugin(Base):
         rows = [[(f"{KINDS['task']} · {c['task']}", self.cb("l", "task")), (f"📰 Новини · {c['news'] + drafts}", self.cb("l", "news"))],
                 [(f"{TALK} · {c['decision'] + c['talk']}", self.cb("l", "talk"))],
                 [("💬 Редакційні чати", self.cb("ch")), ("👥 Люди", self.cb("pp"))],
-                [("📋 Контент-план", "m:pl:news:obcp"), ("📊 Звіт", self.cb("rep"))]]
+                [("📋 Контент-план", "m:pl:news:obcp"), ("📊 Звіт", self.cb("rep"))],
+                [("⚙️ Мої налаштування", self.cb("me"))]]
         return text, rows
 
     def news_plugin(self):
@@ -240,7 +323,9 @@ class Plugin(Base):
         except Exception:  # noqa: BLE001
             return 0
 
-    def list_screen(self, chat, kind, page=0, mode="open"):
+    def list_screen(self, chat, kind, page=0, mode=None):
+        u = self.up(chat)
+        mode = mode or ("all" if u["show_done"] else "open")
         cond = "hidden=0 AND done=0" if mode == "open" else "hidden=0"
         if kind == "decision":
             kind = "talk"
@@ -249,7 +334,10 @@ class Plugin(Base):
             rs = [dict(r) for r in con.execute(f"SELECT * FROM items WHERE kind IN ({','.join('?' * len(kinds))}) AND {cond} "
                                                "ORDER BY CASE WHEN day='' THEN 1 ELSE 0 END, day, at DESC", kinds)]
         mine = set(self.my_names(chat))
-        rs.sort(key=lambda r: r.get("who") not in mine)  # свої — першими, але видно всі
+        if u["only_mine"] and mine and kind == "task":
+            rs = [r for r in rs if r.get("who") in mine]
+        if u["mine_first"]:
+            rs.sort(key=lambda r: r.get("who") not in mine)  # свої — першими, але видно всі
         per = 8
         page = max(0, min(int(page or 0), max(0, (len(rs) - 1) // per)))
         chunk = rs[page * per:(page + 1) * per]
@@ -440,6 +528,10 @@ class Plugin(Base):
             await asyncio.sleep(30)
             try:
                 now = dt.datetime.now(self.tz())
+                try:
+                    await self.remind_due(now)
+                except Exception:  # noqa: BLE001
+                    pass
                 with closing(self.db()) as con:
                     ps = [dict(r) for r in con.execute("SELECT * FROM posts WHERE on_=1")]
                 for p in ps:
@@ -560,14 +652,29 @@ class Plugin(Base):
         x = args[1] if len(args) > 1 else None
         y = args[2] if len(args) > 2 else None
         if a == "l":
-            return None, self.list_screen(chat, x or "task", y or 0, args[3] if len(args) > 3 else "open")
+            return None, self.list_screen(chat, x or "task", y or 0, args[3] if len(args) > 3 else None)
+        if a == "me":
+            return None, self.me_screen(chat)
+        if a == "mef" and x in UDEF and isinstance(UDEF[x], bool):
+            self.set_up(chat, **{x: not self.up(chat)[x]})
+            return "Збережено", self.me_screen(chat)
+        if a == "men" and x in NEW_MODES:
+            self.set_up(chat, notify_new=x)
+            return "📥 " + NEW_MODES[x], self.me_screen(chat)
+        if a == "met":
+            self.ask(chat, "remind", None)
+            return None, ("⏰ О котрій нагадувати про ваші редакційні завдання? Напишіть час, напр. <code>09:30</code>, "
+                          "або <code>0</code>, щоб вимкнути.", [[("✖️ Скасувати", self.cb("me"))]])
         if a == "i":
             return None, self.item_screen(chat, x)
         if a == "who":
             return None, self.who_screen(chat, x)
         if a == "set":
             name = "" if y == "-" else (self.people()[int(y)] if y and y.isdigit() and int(y) < len(self.people()) else "")
-            return self.set_who(x, name), self.item_screen(chat, x)
+            msg = self.set_who(x, name)
+            if name and not msg.startswith("⚠️"):
+                await self.notify_assigned(x, name, by=chat)
+            return msg, self.item_screen(chat, x)
         if a == "whoask":
             self.ask(chat, "who", int(x))
             return None, ("✏️ Напишіть ім'я відповідального.", [[("« Назад", self.cb("i", x))]])
@@ -679,8 +786,21 @@ class Plugin(Base):
 
     async def on_text(self, update, ctx, chat, key, data, text):
         t = text.strip()
+        if key == "remind":
+            m = re.search(r"(\d{1,2})[:.](\d{2})", t)
+            if t in ("0", "-", "ні", "вимкнути"):
+                self.set_up(chat, remind="")
+                return "⏰ Нагадування вимкнено", self.me_screen(chat)
+            if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+                self.ask(chat, "remind", None)
+                return "Потрібен час, напр. 09:30", None
+            self.set_up(chat, remind=f"{int(m.group(1)):02d}:{m.group(2)}")
+            return "⏰ Збережено", self.me_screen(chat)
         if key == "who":
-            return self.set_who(data, t[:60]), self.item_screen(chat, data)
+            msg = self.set_who(data, t[:60])
+            if not msg.startswith("⚠️"):
+                await self.notify_assigned(data, t[:60], by=chat)
+            return msg, self.item_screen(chat, data)
         if key == "ed":
             with closing(self.db()) as con, con:
                 con.execute("UPDATE items SET text=? WHERE id=?", (t[:2000], int(data)))
