@@ -8396,7 +8396,6 @@ async def scr_hub(chat_id, key):
     try:
         for head, data, nlines, mode in parts:
             if mode == "open" and not nlines:  # лише перехід — екран не будуємо (швидко, без зайвих запитів)
-                titles.append(head)
                 blocks.append(f"<b>{head}</b>")
                 if rows and len(rows[-1]) == 1 and rows[-1][0][0].endswith(" ›") and rows._open_tail:
                     rows[-1].append((f"{head} ›", data))
@@ -8412,7 +8411,8 @@ async def scr_hub(chat_id, key):
                 r = {"text": head, "rows": []}
                 mode = "open"
             text = r.get("text") or ""
-            titles.append(_title_key(text))
+            if mode != "open":  # «› перехід» відкриває окремий екран — його не підміняємо об'єднаним розділом
+                titles.append(_title_key(text))
             body = "\n".join(text.split("\n")[1:]).strip()
             seen.add(data.replace(":show", ""))
             short = _cut_html(body, nlines) if body and nlines else ""
@@ -8510,6 +8510,8 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         return await open_data(update, ctx, target, edit=edit, record=False)
     if record and is_view(data):
         L.visit(chat_id, data)
+    if is_view(data) and chat_id in AWAIT:  # перейшли в інший розділ — старе «напишіть…» більше не чекаємо (і не перехоплюємо розмову)
+        AWAIT.pop(chat_id, None)
     if a == "cancel":
         AWAIT.pop(chat_id, None)
         screen = scr_home(chat_id)

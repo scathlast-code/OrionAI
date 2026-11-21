@@ -420,6 +420,7 @@ async def run(bot_module, uid, op, data=None, text=None, user=None, file=None):
     except Exception:  # noqa: BLE001
         pass
     sink = _Sink()
+    prev_wait = B.AWAIT.get(uid)  # поле вводу — лише коли саме ця дія попросила текст, а не через старе очікування
     token = CAPTURE.set(sink)
     tbot = B.tg_app.bot if B.tg_app else None
     capbot = _CaptureBot(tbot, uid, sink) if tbot else None
@@ -471,7 +472,8 @@ async def run(bot_module, uid, op, data=None, text=None, user=None, file=None):
     media = (getattr(B, "APP_MEDIA", {}).pop(uid, None) or []) + sink.media or None
     if sink.media:
         sink.notes.append("📲 Те саме є й у чаті з ботом")
-    return {"media": media, "poll": poll, "cards": cards, "text": text_out, "rows": rows, "hints": button_hints.apply_over(rows, button_hints.for_rows(rows), B.prefs(uid).get("hint_over")), "sections": secs or None, "toast": sink.toast, "notes": sink.notes[-5:], "awaiting": uid in B.AWAIT,
+    return {"media": media, "poll": poll, "cards": cards, "text": text_out, "rows": rows, "hints": button_hints.apply_over(rows, button_hints.for_rows(rows), B.prefs(uid).get("hint_over")), "sections": secs or None, "toast": sink.toast, "notes": sink.notes[-5:],
+            "awaiting": uid in B.AWAIT and (op != "screen" or B.AWAIT.get(uid) is not prev_wait),
             "view": bool(op == "screen" and data and B.is_view(data)),
             "replies": [re.sub(r"<[^>]+>", "", t)[:6000] for t in replies[-5:]]}
 
