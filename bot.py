@@ -9720,6 +9720,10 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await show(update, *scr_space(update.effective_chat.id, sp["id"]), edit=False)
     if not allowed(update):
         return await deny(update)
+    m_obl = re.fullmatch(r"obl_([a-z]+)_(\d{8})", ctx.args[0]) if ctx.args else None
+    news_ = PLUGINS.get("news")
+    if m_obl and news_ and hasattr(news_, "obs_list"):  # 📝 «… ще N — відкрити повний список» із зведення дня
+        return await show(update, *news_.obs_list(update.effective_chat.id, m_obl.group(1), m_obl.group(2)), edit=False)
     chat_id = update.effective_chat.id
     current_dialog(chat_id)
     await update.message.reply_text(

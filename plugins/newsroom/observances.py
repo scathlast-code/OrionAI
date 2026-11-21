@@ -629,7 +629,7 @@ class ObservancesUI:
                     body.append(self.db_line(it, notes))
 
                 if len(items) > cap:
-                    body.append(f"… ще {len(items) - cap} — у «📝 Списки»")
+                    body.append(self.more_line(cat, len(items) - cap, d))
                 out.append((cat, DB.CATS[cat][0], [x for x in body if x]))
         x = self.store.get(f"dayx:{d.isoformat()}") or {}
         if notes is not None and x.get("trad"):  # 🪔 традиції з джерел (якщо в списку дня їх ще немає)
@@ -669,14 +669,32 @@ class ObservancesUI:
                                         + notes.mark(it["url"], it["host"]) for it in x["astrol"][:8]] + astrol[-1:]
         if astrol:
             out.append(("astrol", DB.CATS["astrol"][0], astrol))
-        g = (self.store.get("garden_cache") or {}).get(self.garden_key(d))
+        g = (self.store.get("garden_cache2") or {}).get(self.garden_key(d))
         if g:
             body = []
             for it in (g if isinstance(g, list) else [])[:3 if compact else None]:
-                body.append("• " + esc(it["text"]) + (notes.mark(it["url"], it["url"].split("/")[2]) if notes is not None else ""))
+                body.append("• " + (f"<b>{esc(it['head'])}</b> — " if it.get("head") else "") + esc(it["text"])
+                            + (notes.mark(it["url"], it["url"].split("/")[2].removeprefix("www.")) if notes is not None else ""))
             if body:
                 out.append(("garden", DB.CATS["garden"][0], body))
         return out
+
+    NOUNS = {"lore": ("прикмета", "прикмети", "прикмет"), "trad": ("традиція", "традиції", "традицій"),
+             "names": ("ім'я", "імені", "імен"), "born": ("людина", "людини", "людей"), "died": ("людина", "людини", "людей"),
+             "history": ("подія", "події", "подій"), "discover": ("відкриття", "відкриття", "відкриттів")}
+
+    @staticmethod
+    def plural(n, forms):
+        return forms[0] if n % 10 == 1 and n % 100 != 11 else forms[1] if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else forms[2]
+
+    def more_line(self, cat, n, d):
+        """«… ще 11 прикмет — відкрити список «📜 Прикмети»» з гіперпосиланням просто на цей список."""
+        what = f"{n} {self.plural(n, self.NOUNS.get(cat, ('пункт', 'пункти', 'пунктів')))}"
+        try:
+            url = f"https://t.me/{self.host.bot().username}?start=obl_{cat}_{d:%Y%m%d}"
+        except Exception:  # noqa: BLE001 — бот ще не ініціалізований (тести)
+            return f"… ще {what} — у «📝 Списки дня»"
+        return f'… ще {what} — <a href="{url}">відкрити повний список «{esc(DB.CATS[cat][0])}»</a>'
 
     @staticmethod
     def garden_key(d):
@@ -716,7 +734,7 @@ class ObservancesUI:
         self.cplan_bg()
         notes = Notes()
         head = f"📅 <b>Теми дня · {d.day} {MONTHS_GEN[d.month - 1]}, {WD[d.weekday()]}</b>\n"
-        secs = self.sections(d, chat, notes=notes, compact=True)
+        secs = [x for x in self.sections(d, chat, notes=notes, compact=True) if x[0] != "names"]  # іменини — лише в «📝 Списки дня»
         if callable(weather):  # погода сама додає свою зноску (Open-Meteo) у спільний список
             weather = weather(notes)
         order = ["days", "wx", "lore", "garden", "astro", "astrol", "trad", "cplan"]  # дні → погода → прикмети, городникам, небо, традиції
@@ -881,35 +899,74 @@ class ObservancesUI:
             if isinstance(it, dict) and str(it.get("url", "")).startswith("http"):
                 self.db_add(md, "lore", it["text"], it["url"])
 
+    @staticmethod
+    def clean_snip(text, limit=420):
+        """Уривок зі сторінки → охайний текст: без Markdown, «[…]», «Пов'язані теми», обірваних речень."""
+        t = re.sub(r"#+\s*|\*\*|__|\[\s*(?:\.\.\.|…)\s*\]|\[[^\]]*\]\([^)]*\)", " ", text or "")
+        t = re.split(r"(?i)пов['’]язані теми|читайте також|джерело:|фото:", t)[0]
+        t = re.sub(r"\s+", " ", t).strip(" –—-")
+        sents = re.findall(r"[^.!?…]+[.!?]", t)
+        out = ""
+        for x in sents:
+            if len(out) + len(x) > limit:
+                break
+            out += x
+        return out.strip() or ""
+
     async def ensure_garden(self, d, force=False):
-        """🌱 Поради саду, городу, господарству й тваринам на цю пору — лише з українських джерел, дослівними уривками
-        з посиланням на кожен (ШІ нічого не вигадує). [{text, url, title}], кеш на декаду."""
+        """🌱 Поради саду, городу, господарству й тваринам на цю пору — з українських джерел, GreenPost — першим (але не лише він).
+        Уривки скорочуємо й пояснюємо (що робити, навіщо, коли) — лише фактами з уривка; посилання — після кожного пункту."""
         key = self.garden_key(d)
-        cache = self.store.get("garden_cache") or {}
+        cache = self.store.get("garden_cache2") or {}
         got = cache.get(key)
         if isinstance(got, list) and got and not force:
             return got
         part = ("на початку", "в середині", "наприкінці")[int(key[-1]) - 1]
-        items = []
+        mon = MONTHS_NOM[d.month - 1]
+        green, other = [], []
         try:
             import websearch
-            for q in (f"що робити в саду і на городі {part} {MONTHS_NOM[d.month - 1]}",
-                      f"роботи на присадибній ділянці {MONTHS_NOM[d.month - 1]} поради"):
+            for q in (f"site:greenpost.ua город сад {mon}", f"greenpost.ua що робити на городі {mon}",
+                      f"що робити в саду і на городі {part} {mon}", f"роботи на присадибній ділянці {mon} поради"):
                 for r in await websearch.search_items(q):
-                    snip = re.sub(r"\s+", " ", r.get("snippet") or "").strip()
-                    if len(re.findall(r"[іїєґ]", snip, re.I)) < 3 or any(r["url"] == x["url"] for x in items):
+                    snip = self.clean_snip(r.get("snippet") or "")
+                    url = r.get("url") or ""
+                    if len(snip) < 60 or len(re.findall(r"[іїєґ]", snip, re.I)) < 3 or any(url == x["url"] for x in green + other):
                         continue
-                    items.append({"text": snip[:300] + ("…" if len(snip) > 300 else ""), "url": r["url"], "title": (r.get("title") or "")[:80]})
-                    if len(items) >= 4:
-                        break
-                if len(items) >= 4:
-                    break
+                    (green if "greenpost.ua" in url else other).append({"text": snip, "url": url, "title": (r.get("title") or "")[:80]})
         except Exception:  # noqa: BLE001
             log.info("поради саду: пошук не вдався", exc_info=True)
+        items = green[:2] + other[: 4 - min(2, len(green))]  # GreenPost — першим, але завжди є й інші джерела
         if items:
+            items = await self.adapt_tips(items, mon)
             cache[key] = items
-            self.store.set("garden_cache", cache)
+            self.store.set("garden_cache2", cache)
         return items
+
+    async def adapt_tips(self, items, mon):
+        """ШІ скорочує й пояснює кожен уривок: «Що робити — навіщо, коли». Лише факти з уривка; не вдалося — охайний уривок."""
+        src = "\n".join(f"{i}. {it['text']}" for i, it in enumerate(items, 1))
+        prompt = ("Ось уривки з українських сайтів про роботи в саду й на городі (" + mon + "). Для КОЖНОГО уривку напиши один рядок "
+                  "у форматі «N. Коротка назва дії — пояснення: що саме зробити, навіщо й коли (якщо це є в уривку)». "
+                  "До 200 символів, українською, своїми словами, без Markdown. Використовуй ЛИШЕ факти з уривку, нічого не додавай. "
+                  "Якщо в уривку немає корисної поради — напиши «N. —».\n\n" + src)
+        try:
+            ask = getattr(self.host, "ask_ai", None)
+            text, _m = await ask(prompt, label="🌱 Поради городникам") if ask else ("", None)
+        except Exception:  # noqa: BLE001
+            text = ""
+        got = dict(re.findall(r"(?m)^\s*(\d+)[.)]\s*(.+?)\s*$", text or ""))
+        out = []
+        for i, it in enumerate(items, 1):
+            line = re.sub(r"[*_#`]", "", got.get(str(i), "")).strip()
+            if line in ("—", "-"):
+                continue
+            if line and " — " in line:
+                head, _, tail = line.partition(" — ")
+                out.append({**it, "head": head.strip()[:60], "text": tail.strip()[:220]})
+            else:
+                out.append(it)
+        return out[:3]
 
     def obs_list(self, chat, cat, ymd, page=0):
         """📝 Редагований список дня: торкніться пункту — змінити, затінити, зробити особистим."""

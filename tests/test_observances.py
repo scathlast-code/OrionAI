@@ -122,3 +122,15 @@ def test_content_plan_merged_into_day(tmp_path):
     t, _rows = p.obs_home()
     assert "✍️ Лариса" in t and "🗓 Контент-план · 2" in t and "День павича" in t and "Як варити борщ" in t
     assert "шукаю джерела" not in t and "триває" not in t.split("📌 Сьогодні відзначається")[1].split("\n")[0]
+
+
+def test_garden_tips_clean_and_adapt(tmp_path):
+    p, _sent = news(tmp_path)
+    assert p.clean_snip("Роби так. Ще так. #### Пов'язані теми: [...] 17 листопада – перекопайте") == "Роби так. Ще так."
+
+    async def fake(prompt, label=None):
+        return "1. Перекопайте грядки — поки ґрунт не замерз.\n2. —", None
+    p.host.ask_ai = fake
+    got = asyncio.run(p.adapt_tips([{"text": "a", "url": "https://greenpost.ua/x"}, {"text": "b", "url": "https://b.ua"}], "листопад"))
+    assert got == [{"text": "поки ґрунт не замерз.", "url": "https://greenpost.ua/x", "head": "Перекопайте грядки"}]
+    assert "11 прикмет" in p.more_line("lore", 11, dt.date(2026, 11, 21))
