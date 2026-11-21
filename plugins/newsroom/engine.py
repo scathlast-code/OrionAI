@@ -236,11 +236,59 @@ class Engine:
         data, ok, _ = await self.fit_length(data, target, system, "📰 Ньюзрум: зведення")
         return data, model, ok
 
-    async def check(self, draft, search):
-        query = draft["headline"][:200]
-        found, err = await search(query)
-        if not found:
-            return f"⚠️ Пошук не дав результатів: {err or 'невідомо'}"
-        text, model = await self.ask_ai(check_prompt(draft, found), system="Ти — фактчекер. Пиши стисло українською.",
-                                        label="📰 Ньюзрум: звірка")
-        return (text or "").strip()[:1500] + f"\n— звіряв: {model}"
+    async def check(self, draft, search, source_text=""):
+        """🔎 Фактчек чернетки по РІЗНИХ ресурсах + дослівна перевірка цитат + унікальність тексту.
+        Звіт: рядки ✅/⚠️/❌; «❌» або неперевірена цитата блокують схвалення (див. blocking())."""
+        body = draft.get("body") or ""
+        first = re.split(r"(?<=[.!?])\s", body.strip(), maxsplit=1)[0][:200]
+        found_parts, hosts, err = [], set(), ""
+        for q in dict.fromkeys([draft["headline"][:200], first]):
+            if not q:
+                continue
+            f, e = await search(q)
+            if f:
+                found_parts.append(f)
+                hosts |= {h.removeprefix("www.") for h in re.findall(r"URL: https?://([^/\s]+)", f)}
+            err = err or e or ""
+        lines = []
+        if not found_parts:
+            lines.append(f"⚠️ Пошук не дав результатів: {err or 'невідомо'} — факти не звірено")
+        else:
+            text, model = await self.ask_ai(check_prompt(draft, "\n\n".join(found_parts)),
+                                            system="Ти — фактчекер. Пиши стисло українською.", label="📰 Ньюзрум: звірка")
+            lines.append((text or "").strip()[:1500])
+            lines.append(f"🌐 Незалежних ресурсів у звірці: {len(hosts)}" + (" — ⚠️ замало, бажано 2+" if len(hosts) < 2 else "")
+                         + f" · звіряв: {model}")
+        # 💬 цитати — лише дослівно з першоджерела чи знайдених сторінок
+        quotes = [q.strip() for q in re.findall(r"[«“\"]([^«»“”\"]{12,300})[»”\"]", body)]
+        hay = norm(source_text + " " + " ".join(found_parts))
+        for q in quotes[:8]:
+            if norm(q) and norm(q) not in hay:
+                lines.append(f"❌ Цитату не знайдено в першоджерелі: «{q[:120]}» — перевірте дослівно або приберіть")
+        # 📋 унікальність: текст не має бути переписаним першоджерелом
+        if source_text:
+            ov = overlap(body, source_text)
+            if ov > 0.6:
+                lines.append(f"📋 {int(ov * 100)}% тексту збігається з першоджерелом — перепишіть своїми словами")
+        return "\n".join(lines)
+
+
+def norm(t):
+    return re.sub(r"[^\wа-яіїєґ]+", " ", (t or "").lower()).strip()
+
+
+def overlap(a, b, n=5):
+    """Частка 5-слівних фрагментів тексту a, що трапляються в b (0…1)."""
+    wa, wb = norm(a).split(), norm(b).split()
+    sa = {tuple(wa[i:i + n]) for i in range(max(0, len(wa) - n + 1))}
+    sb = {tuple(wb[i:i + n]) for i in range(max(0, len(wb) - n + 1))}
+    return len(sa & sb) / len(sa) if sa else 0.0
+
+
+def blocking(report):
+    """Що в звіті заважає схвалити: суперечності, вигадані цитати, неперевірені факти."""
+    out = []
+    for ln in (report or "").splitlines():
+        if ln.startswith("❌") or "суперечить" in ln.lower() or "факти не звірено" in ln:
+            out.append(ln)
+    return out
