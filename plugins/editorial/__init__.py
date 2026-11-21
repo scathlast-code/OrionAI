@@ -4,7 +4,9 @@
 У редакційні чати бот НІЧОГО не пише сам: ні уточнень, ні звітів, ні помилок. Усе редагують люди — будь-хто й будь-коли."""
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
+import json
 import re
 import sqlite3
 import time
@@ -18,6 +20,8 @@ CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, chat INT
     author TEXT, who TEXT DEFAULT '', url TEXT DEFAULT '', at REAL, done INTEGER DEFAULT 0, hidden INTEGER DEFAULT 0,
     day TEXT DEFAULT '', reason TEXT DEFAULT '', where_ TEXT DEFAULT '', key TEXT UNIQUE);
 CREATE TABLE IF NOT EXISTS people (name TEXT PRIMARY KEY, src TEXT, added REAL);
+CREATE TABLE IF NOT EXISTS posts (id INTEGER PRIMARY KEY AUTOINCREMENT, chats TEXT, text TEXT, mode TEXT, at REAL, hm TEXT,
+    last REAL DEFAULT 0, on_ INTEGER DEFAULT 1, by INTEGER, created REAL);
 CREATE TABLE IF NOT EXISTS links (name TEXT PRIMARY KEY, uid INTEGER, username TEXT, at REAL);
 CREATE TABLE IF NOT EXISTS accounts (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, uid INTEGER, username TEXT DEFAULT '', at REAL);
 """
@@ -37,7 +41,7 @@ class Plugin(Base):
     admin_only = False
     summary = ("Новини, завдання, рішення й обговорення з редакційних чатів — списками з посиланнями на повідомлення й відповідальними; "
                "завдання з контент-плану з виконавцями. У чати бот сам нічого не пише.")
-    VIEWS = {"", "l", "i", "ch", "pp", "pc", "rep", "who"}
+    VIEWS = {"", "l", "i", "ch", "pp", "pc", "rep", "who", "po"}
     REPORT_URL = "https://docs.google.com/presentation/d/1akz9pZoUv576-nLXmIJ-4nQBHTElNLcP/edit"
 
     def __init__(self, host):
@@ -195,6 +199,7 @@ class Plugin(Base):
         rows = [[(f"{KINDS['task']} · {c['task']}", self.cb("l", "task")), (f"{KINDS['news']} · {c['news']}", self.cb("l", "news"))],
                 [(f"{KINDS['decision']} · {c['decision']}", self.cb("l", "decision")), (f"{KINDS['talk']} · {c['talk']}", self.cb("l", "talk"))],
                 [("💬 Редакційні чати", self.cb("ch")), ("👥 Люди", self.cb("pp"))],
+                [("📤 Що й коли писати в чати", self.cb("po"))],
                 [("📋 Контент-план", "m:pl:news:obcp"), ("📊 Звіт", self.cb("rep"))]]
         return text, rows
 
@@ -320,6 +325,84 @@ class Plugin(Base):
             con.execute("INSERT INTO accounts(name,uid,username,at) VALUES(?,?,?,?)", (name, uid, username or "", time.time()))
         return True
 
+    # ---------------------------------------------------------------- 📤 що й коли писати в редакційні чати (лише за вказівкою)
+    def tz(self):
+        return self.host.tz or dt.timezone(dt.timedelta(hours=2))
+
+    def chats_on(self):
+        with closing(self.db()) as con:
+            return [dict(r) for r in con.execute("SELECT * FROM chats WHERE on_=1 ORDER BY title")]
+
+    def posts_screen(self, chat):
+        with closing(self.db()) as con:
+            ps = [dict(r) for r in con.execute("SELECT * FROM posts ORDER BY on_ DESC, id DESC")]
+        names = {c["id"]: c["title"] for c in self.chats_on()}
+        lines = ["📤 <b>Що й коли писати в редакційні чати</b>", "",
+                 "Бот пише в редакційні чати лише те й тоді, що ви тут задали, — і нічого більше (ні уточнень, ні звітів, ні помилок).", ""]
+        rows = []
+        for p in ps[:20]:
+            ch = ", ".join(names.get(c, "чат") for c in json.loads(p["chats"] or "[]"))
+            when = {"daily": f"щодня о {p['hm']}", "once": dt.datetime.fromtimestamp(p["at"] or 0, self.tz()).strftime("%d.%m %H:%M")}.get(p["mode"], "одразу")
+            lines.append(f"{'🟢' if p['on_'] else '⚪'} {esc(when)} → {esc(ch)}: {esc(p['text'][:80])}")
+            rows.append([(f"{'⏸' if p['on_'] else '▶️'} {p['text'][:20]}", self.cb("poon", p["id"])), ("🗑", self.cb("podel", p["id"]))])
+        if not ps:
+            lines.append("Поки нічого не заплановано.")
+        rows += [[("➕ Нове повідомлення", self.cb("ponew"))], [("« Редакція", self.cb())]]
+        return "\n".join(lines)[:4000], rows
+
+    def draft_screen(self, chat):
+        d = self._pd.get(chat) or {}
+        sel = set(d.get("chats", []))
+        chats = self.chats_on()
+        rows = [[(("✅ " if c["id"] in sel else "▫️ ") + (c["title"] or str(c["id"]))[:30], self.cb("pochat", c["id"]))] for c in chats]
+        rows += [[("⚡ Надіслати зараз", self.cb("powhen", "now")), ("🕐 Один раз…", self.cb("powhen", "once"))],
+                 [("🔁 Щодня о…", self.cb("powhen", "daily"))], [("✖️ Скасувати", self.cb("po"))]]
+        text = (f"📤 <b>Нове повідомлення</b>\n\n<blockquote>{esc(d.get('text', ''))[:1500]}</blockquote>\n"
+                "Оберіть чати (✅) і коли надіслати." + ("" if chats else "\n\n⚠️ Немає увімкнених редакційних чатів — увімкніть у «💬 Редакційні чати»."))
+        return text, rows
+
+    def confirm_screen(self, chat):
+        d = self._pd.get(chat) or {}
+        names = {c["id"]: c["title"] for c in self.chats_on()}
+        when = {"now": "одразу", "daily": f"щодня о {d.get('hm')}",
+                "once": dt.datetime.fromtimestamp(d.get("at") or 0, self.tz()).strftime("%d.%m %H:%M")}.get(d.get("mode"), "?")
+        return (f"📤 <b>Перевірте</b>\n\nКуди: {esc(', '.join(names.get(c, 'чат') for c in d.get('chats', [])))}\nКоли: {when}\n\n"
+                f"<blockquote>{esc(d.get('text', ''))[:1500]}</blockquote>"), [[("✅ Підтвердити", self.cb("pook")), ("✖️ Скасувати", self.cb("po"))]]
+
+    async def send_post(self, p):
+        bot = self.host.bot()
+        for c in json.loads(p["chats"] or "[]"):
+            try:
+                await bot.send_message(int(c), p["text"][:4096])
+            except Exception:  # noqa: BLE001 — у чат про помилку НЕ пишемо; лише адмінам у приватні
+                await self.host.notify_admins(f"⚠️ Редакція: не вдалося надіслати заплановане повідомлення в чат {c}.")
+
+    async def posts_loop(self):
+        while True:
+            await asyncio.sleep(30)
+            try:
+                now = dt.datetime.now(self.tz())
+                with closing(self.db()) as con:
+                    ps = [dict(r) for r in con.execute("SELECT * FROM posts WHERE on_=1")]
+                for p in ps:
+                    due = False
+                    if p["mode"] == "once" and p["at"] and p["at"] <= now.timestamp() and not p["last"]:
+                        due = True
+                    elif p["mode"] == "daily" and p["hm"] == now.strftime("%H:%M") and now.timestamp() - (p["last"] or 0) > 3600:
+                        due = True
+                    if due:
+                        await self.send_post(p)
+                        with closing(self.db()) as con, con:
+                            con.execute("UPDATE posts SET last=?, on_=CASE WHEN mode='once' THEN 0 ELSE on_ END WHERE id=?", (now.timestamp(), p["id"]))
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def start(self):
+        self._pd = {}
+        self._loop = asyncio.get_running_loop().create_task(self.posts_loop())
+
     def report_screen(self, chat):
         return ("📊 <b>Звіт</b>\n\nДокумент звіту редакції — за посиланням нижче. Бот у звіт сам нічого не вносить: "
                 "правки — лише людьми й після підтвердження."), [[("📄 Відкрити звіт", "url:" + self.REPORT_URL)], [("« Редакція", self.cb())]]
@@ -394,6 +477,52 @@ class Plugin(Base):
                 return "Відв'язано", self.person_screen(chat, x)
             self.ask(chat, "nick", int(x))
             return None, (f"✏️ Надішліть @нікнейм людини в Telegram для «{esc(n)}».", [[("« Назад", self.cb("pc", x))]])
+        if a == "po":
+            self._pd = getattr(self, "_pd", {})
+            self._pd.pop(chat, None)
+            return None, self.posts_screen(chat)
+        if a == "ponew":
+            if not self.host.is_admin(chat):
+                return "Планувати повідомлення в редакційні чати можуть адміністратори", None
+            self.ask(chat, "potext")
+            return None, ("📤 Напишіть текст повідомлення для редакційних чатів.", [[("✖️ Скасувати", self.cb("po"))]])
+        if a == "pochat":
+            d = getattr(self, "_pd", {}).setdefault(chat, {"chats": []})
+            cid = int(x)
+            d["chats"] = [c for c in d["chats"] if c != cid] if cid in d["chats"] else d["chats"] + [cid]
+            return None, self.draft_screen(chat)
+        if a == "powhen":
+            d = getattr(self, "_pd", {}).get(chat)
+            if not d or not d.get("chats"):
+                return "Спершу оберіть хоча б один чат", self.draft_screen(chat) if d else self.posts_screen(chat)
+            d["mode"] = x
+            if x == "now":
+                return None, self.confirm_screen(chat)
+            self.ask(chat, "powhen", x)
+            return None, (("🕐 Коли надіслати? Напр. «21.11 18:00»." if x == "once" else "🔁 О котрій щодня? Напр. «09:00»."),
+                          [[("✖️ Скасувати", self.cb("po"))]])
+        if a == "pook":
+            d = getattr(self, "_pd", {}).pop(chat, None)
+            if not d:
+                return None, self.posts_screen(chat)
+            with closing(self.db()) as con, con:
+                pid = con.execute("INSERT INTO posts(chats,text,mode,at,hm,on_,by,created) VALUES(?,?,?,?,?,1,?,?)",
+                                  (json.dumps(d["chats"]), d["text"], d["mode"], d.get("at"), d.get("hm"), chat, time.time())).lastrowid
+            if d["mode"] == "now":
+                with closing(self.db()) as con:
+                    p = dict(con.execute("SELECT * FROM posts WHERE id=?", (pid,)).fetchone())
+                await self.send_post(p)
+                with closing(self.db()) as con, con:
+                    con.execute("UPDATE posts SET last=?, on_=0 WHERE id=?", (time.time(), pid))
+                return "📤 Надіслано", self.posts_screen(chat)
+            return "✅ Заплановано", self.posts_screen(chat)
+        if a in ("poon", "podel"):
+            with closing(self.db()) as con, con:
+                if a == "poon":
+                    con.execute("UPDATE posts SET on_=1-on_ WHERE id=?", (int(x),))
+                else:
+                    con.execute("DELETE FROM posts WHERE id=?", (int(x),))
+            return None, self.posts_screen(chat)
         if a == "rep":
             return None, self.report_screen(chat)
         return None, self.home(chat)
@@ -406,6 +535,35 @@ class Plugin(Base):
             with closing(self.db()) as con, con:
                 con.execute("UPDATE items SET text=? WHERE id=?", (t[:2000], int(data)))
             return "Збережено", self.item_screen(chat, data)
+        if key == "potext":
+            self._pd = getattr(self, "_pd", {})
+            self._pd[chat] = {"text": t[:4000], "chats": []}
+            return None, self.draft_screen(chat)
+        if key == "powhen":
+            d = getattr(self, "_pd", {}).get(chat)
+            if not d:
+                return None, self.posts_screen(chat)
+            if data == "daily":
+                m = re.search(r"(\d{1,2})[:.](\d{2})", t)
+                if not m or int(m.group(1)) > 23:
+                    self.ask(chat, "powhen", data)
+                    return "Потрібен час, напр. 09:00", None
+                d["hm"] = f"{int(m.group(1)):02d}:{m.group(2)}"
+            else:
+                m = re.search(r"(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\s+(\d{1,2})[:.](\d{2})", t)
+                if not m:
+                    self.ask(chat, "powhen", data)
+                    return "Потрібні дата й час, напр. 21.11 18:00", None
+                now = dt.datetime.now(self.tz())
+                y = int(m.group(3)) if m.group(3) else now.year
+                y = y + 2000 if y < 100 else y
+                try:
+                    at = dt.datetime(y, int(m.group(2)), int(m.group(1)), int(m.group(4)), int(m.group(5)), tzinfo=self.tz())
+                except ValueError:
+                    self.ask(chat, "powhen", data)
+                    return "Такої дати немає", None
+                d["at"] = at.timestamp()
+            return None, self.confirm_screen(chat)
         if key == "nick":
             ppl = self.people()
             m = re.search(r"@?([A-Za-z][\w]{3,31})", t)
