@@ -1721,6 +1721,8 @@ async def read_stream(r, prog, p):
                 k = tc.get("index", i)
                 cur = calls.setdefault(k, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
                 cur["id"] = tc.get("id") or cur["id"]
+                if tc.get("extra_content"):  # Gemini 3: «підпис думки» треба повернути разом із викликом, інакше HTTP 400
+                    cur["extra_content"] = tc["extra_content"]
                 fn = tc.get("function") or {}
                 cur["function"]["name"] += fn.get("name") or ""
                 cur["function"]["arguments"] += fn.get("arguments") or ""
@@ -1752,6 +1754,10 @@ async def ask_provider(p, messages):
                 msg, finish = await post_chat(client, p, messages, use_tools)
             except ProviderError as e:
                 # 400/422 часто означає «не вмію інструменти» або «не бачу фото» — спрощуємо запит
+                if e.kind == "bad_request" and use_tools and "thought_signature" in (e.detail or ""):
+                    NO_STREAM.add(pid)  # без потоку відповідь приходить цілою, з «підписом думки» — інструменти лишаються
+                    log.info("%s: підпис думки загубився в потоці — далі без потоку", pid)
+                    continue
                 if e.kind == "bad_request" and use_tools:
                     NO_TOOLS.add(pid)
                     log.info("%s: вимикаю інструменти (%s)", pid, e.detail)
@@ -1987,7 +1993,8 @@ async def _ask_llm(history, user_content, preferred=None, fallback=True, exclude
     messages = [{"role": "system", "content": SYSTEM_PROMPT + today_line + ("\n" + hint if hint else "") + ("\n\n" + extra if extra else "")}] + history + [{"role": "user", "content": user_content}]
     # Search happens in the bot, not in the language model. Works even for models
     # that reject OpenAI tool-calling (e.g. some OpenRouter free models).
-    if websearch.wants_search(user_content):
+    own = USER_WORDS.get()  # шукаємо в інтернеті лише за словами людини, а не за описом розділу чи цитатою (інакше шукав зайве)
+    if websearch.wants_search(own if own is not None else user_content):
         progress_stage("🌐 Шукаю актуальні джерела в інтернеті…", 1, 3)
         found, web_error = await websearch.search(user_content)
         if found:
@@ -1997,7 +2004,7 @@ async def _ask_llm(history, user_content, preferred=None, fallback=True, exclude
                 "Цитати — лише дослівно з результатів; факт, якого немає в результатах, не наводь. "
                 "Якщо факт є лише в одному джерелі — так і познач («за даними одного джерела»). "
                 "Якщо уривків недостатньо, прямо скажи про це.\n\n" + found)
-        elif websearch.explicit_search(user_content):
+        elif websearch.explicit_search(own if own is not None else user_content):
             messages[0]["content"] += ("\n\nВебпошук був запитаний, але не вдався: " + web_error +
                 ". Не стверджуй, що перевірив інтернет. Повідом користувача про цю проблему.")
         else:
@@ -6380,6 +6387,7 @@ async def media_mod_transcribe(data, name):
 ALBUM_OK = {}  # media_group_id -> час: на альбом (кілька фото/відео одним репостом) — одне «ок»
 
 
+LAST_LINK = {}  # чат -> (посилання, коли, токен) — щоб «зроби мітку» після посилання стосувалось саме його
 AC_SRC = {}  # токен -> що людина кинула в бот (текст, фото, чи переслане) — чекає, поки людина скаже, що з цим робити
 
 
@@ -6391,14 +6399,17 @@ def ac_offer(chat_id, text, photo=None, fwd=False):
     while len(AC_SRC) > 300:
         AC_SRC.pop(next(iter(AC_SRC)))
     kind = TS.kind_of(text, bool(photo))
+    if kind == "link":
+        LAST_LINK[chat_id] = (TS.URL_RE.search(text).group(0), time.time(), tok)
     tops = TS.classify(text)
     what = {"link": "🔗 Посилання", "task": "✅ Схоже на завдання", "photo": "🖼 Фото", "text": "📄 Текст"}[kind]
     lines = [f"🧭 <b>{what}</b>" + (" · " + ", ".join(TS.label(t) for t in tops[:3]) if tops else ""),
-             "Що з цим зробити? Поки ви не оберете, я нічого не роблю."]
+             "Що з цим зробити? Поки ви не оберете (кнопкою чи словами — «мітку», «рерайт»), я нічого не роблю."]
     if kind == "link":
         url = TS.URL_RE.search(text).group(0).rstrip(").,»")
         lines.append(f"<code>{esc(short_q(url, 120))}</code>")
-        rows = [[("📰 Зчитати новину для рерайту", f"m:ac:{tok}:rw")], [("🔗 Мітка для переходів із соцмереж", f"m:ac:{tok}:utm")]]
+        rows = [[("🔗 UTM-мітка для соцмереж", f"m:ac:{tok}:utm"), ("📰 Рерайт новини", f"m:ac:{tok}:rw")],
+                [("⬇️ Завантажити медіа", f"m:ac:{tok}:dl"), ("📝 Нотаткою", f"m:ac:{tok}:note")]]
     elif kind == "task":
         rows = [[("✅ Записати завданням", f"m:ac:{tok}:task"), ("📝 Нотаткою", f"m:ac:{tok}:note")]]
     elif kind == "photo":
@@ -6409,7 +6420,8 @@ def ac_offer(chat_id, text, photo=None, fwd=False):
     rows.append([(col, f"m:ac:{tok}:col")] + ([("💬 Відповісти", f"m:ac:{tok}:ai")] if kind != "photo" else []))
     if text and kind != "link":
         rows.append([("🌐 Перекласти", f"m:ac:{tok}:tr")])
-    rows.append([("⚙️ Вимкнути автовизначення", "m:col:acoff")])
+    if prefs(chat_id).get("autocat"):
+        rows.append([("⚙️ Вимкнути автовизначення", "m:col:acoff")])
     return "\n".join(lines), rows
 
 
@@ -8999,6 +9011,13 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         elif act == "task":
             create_planned_task(chat_id, src["text"][:1000])
             toast, screen = "✅ Записано в завдання", None
+        elif act == "dl":
+            med = PLUGINS.get("media")
+            url = TS.URL_RE.search(src["text"]).group(0)
+            if med and hasattr(med, "start_quick"):
+                toast, screen = med.start_quick(chat_id, url) or "⬇️ Завантажую — стан і файл прийдуть сюди", None
+            else:
+                toast, screen = "Завантаження вимкнене", None
         elif act == "note":
             add_note_db(src["text"][:4000], "", "autocat", chat_id)
             toast, screen = "📝 Записано в нотатки", None
@@ -9969,6 +9988,8 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
             await q.answer(toast or None)
         except BadRequest:
             pass
+    elif toast and update.message is not None and not screen:  # дію викликали словами («зроби мітку») — підтвердження текстом
+        await update.message.reply_text(toast)
     if screen:
         # Єдине правило: навігація доступна на всіх екранах, у тому числі в акордеонному меню.
         await show(update, screen[0], screen[1], edit=edit, nav=True)
@@ -10663,9 +10684,13 @@ async def cmd_privacy_mode(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
+USER_WORDS = contextvars.ContextVar("user_words", default=None)  # що написала людина — без підказок розділу, цитат і контексту
+
+
 async def answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE, content, history_text, preferred):
     """Відповідь моделі з індикатором роботи й чергою в межах чату."""
     chat_id = update.effective_chat.id
+    USER_WORDS.set(re.sub(r"^↩️ «[^»]*»\n", "", history_text or "") if isinstance(history_text, str) else None)
     mode = orion_modes.get_mode(update.effective_user.id, DB_PATH)
     # Do not let network-capable ask_llm run in restricted modes.
     # A local inference executor and a verified web retrieval pipeline are not yet wired.
@@ -11210,6 +11235,18 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         asyncio.get_running_loop().create_task(col_summarize(ctx.bot, chat_id, kind="news" if cm.group(2).lower() == "новину" else "summary",
                                                              topic=topicsort.find_topic(msg.text)))
         return await msg.reply_text("🧾 Готую — надішлю, щойно буде.")
+    import topicsort as _TS
+    _t = (msg.text or "").strip()
+    _u = _TS.URL_RE.search(_t)
+    if _u and len(_TS.URL_RE.sub("", _t).strip(" \n,.;:-—")) < 25 and chat_id not in AWAIT:
+        # 🔗 просто посилання — нічого не шукаємо й не переписуємо самі: питаємо, що з ним зробити
+        return await show(update, *ac_offer(chat_id, _t), edit=False)
+    lk = LAST_LINK.get(chat_id)
+    if lk and time.time() - lk[1] < 1800 and _t and not _u and len(_t) < 120:
+        act = ("utm" if re.search(r"(?i)\b(?:utm|ютм)|мітк", _t) else "rw" if re.search(r"(?i)рерайт|перепиш|новин[уа] з|зчитай|прочитай", _t)
+               else "note" if re.search(r"(?i)нотатк|збережи|запам", _t) else "task" if re.search(r"(?i)завданн", _t) else None)
+        if act:  # «мітку», «зроби рерайт» після посилання — одразу робимо саме це з тим посиланням
+            return await route(update, ctx, f"m:ac:{lk[2]}:{act}", edit=False)
     if (msg.text or msg.photo) and ac_wanted(chat_id, msg):  # 🧭 автовизначення: лише пропонуємо, нічого не робимо самі
         return await show(update, *ac_offer(chat_id, msg.text or msg.caption or "", msg.photo[-1].file_id if msg.photo else None), edit=False)
     if prefs(chat_id).get("collect") and (msg.text or msg.caption) and not (msg.text or "").startswith("/"):
