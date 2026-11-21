@@ -20,6 +20,36 @@ class _Sink:
         self.screen = None
         self.toast = None
         self.notes = []
+        self.media = []  # 🖼 фото, відео, аудіо, файли, які бот надіслав у чат під час цієї дії — застосунок показує їх і в себе
+
+
+MEDIA_KEEPER = None  # fn(bytes, name) -> {"name","url","size","kind"} — задає бот (тимчасове посилання для застосунку)
+KIND_EXT = {"photo": ".jpg", "video": ".mp4", "audio": ".mp3", "voice": ".ogg", "animation": ".mp4", "document": ""}
+
+
+def _capture_media(sink, kind, payload, kw):
+    """Копія надісланого в чат — для застосунку: байти/файл → тимчасове посилання; https-адреса — як є."""
+    if sink is None:
+        return payload
+    name = kw.get("filename") or getattr(payload, "name", "") or ("файл" + KIND_EXT.get(kind, ""))
+    name = str(name).rsplit("/", 1)[-1] or "файл"
+    try:
+        if hasattr(payload, "read"):
+            payload = payload.read()
+        if isinstance(payload, (bytes, bytearray)) and MEDIA_KEEPER:
+            if not Path(name).suffix and KIND_EXT.get(kind):
+                name += KIND_EXT[kind]
+            item = MEDIA_KEEPER(bytes(payload), name)
+            if item:
+                item["caption"] = re.sub(r"<[^>]+>", "", kw.get("caption") or "")[:600]
+                sink.media.append(item)
+        elif isinstance(payload, str) and payload.startswith("http"):
+            k = "image" if kind == "photo" else "video" if kind in ("video", "animation") else "audio" if kind in ("audio", "voice") else "file"
+            sink.media.append({"name": name, "url": payload, "size": 0, "kind": k,
+                               "caption": re.sub(r"<[^>]+>", "", kw.get("caption") or "")[:600]})
+    except Exception:  # noqa: BLE001 — копія для застосунку не повинна ламати надсилання в чат
+        pass
+    return payload
 
 
 class _Query:
@@ -59,13 +89,13 @@ class _Chat:
         else:
             self.sink.notes.append(re.sub(r"<[^>]+>", "", text)[:2000])
 
-    async def send_document(self, *a, **kw):  # файли (експорт, архіви) ідуть у чат — застосунок про це повідомляє
-        await self.bot.send_document(self.id, *a, **kw)
-        self.sink.notes.append("📎 Файл надіслано в чат із ботом")
+    async def send_document(self, doc, *a, **kw):  # файли йдуть у чат, а застосунок показує їх і в себе
+        doc = _capture_media(self.sink, "document", doc, kw)
+        return await self.bot.send_document(self.id, doc, *a, **kw)
 
-    async def send_photo(self, *a, **kw):
-        await self.bot.send_photo(self.id, *a, **kw)
-        self.sink.notes.append("🖼 Зображення надіслано в чат")
+    async def send_photo(self, photo, *a, **kw):
+        photo = _capture_media(self.sink, "photo", photo, kw)
+        return await self.bot.send_photo(self.id, photo, *a, **kw)
 
 
 class _User:
@@ -156,6 +186,29 @@ class _CaptureBot:
 
     async def send_chat_action(self, *a, **kw):
         return True
+
+    async def _send_media(self, method, kind, chat_id, payload, *a, **kw):
+        if int(chat_id) == self.uid:  # у чат цієї людини — і копія для застосунку
+            payload = _capture_media(self.sink, kind, payload, kw)
+        return await getattr(self.real, method)(chat_id, payload, *a, **kw)
+
+    async def send_photo(self, chat_id, photo, *a, **kw):
+        return await self._send_media("send_photo", "photo", chat_id, photo, *a, **kw)
+
+    async def send_document(self, chat_id, document, *a, **kw):
+        return await self._send_media("send_document", "document", chat_id, document, *a, **kw)
+
+    async def send_video(self, chat_id, video, *a, **kw):
+        return await self._send_media("send_video", "video", chat_id, video, *a, **kw)
+
+    async def send_audio(self, chat_id, audio, *a, **kw):
+        return await self._send_media("send_audio", "audio", chat_id, audio, *a, **kw)
+
+    async def send_voice(self, chat_id, voice, *a, **kw):
+        return await self._send_media("send_voice", "voice", chat_id, voice, *a, **kw)
+
+    async def send_animation(self, chat_id, animation, *a, **kw):
+        return await self._send_media("send_animation", "animation", chat_id, animation, *a, **kw)
 
 
 class _Ctx:
@@ -363,12 +416,12 @@ async def run(bot_module, uid, op, data=None, text=None, user=None, file=None):
         elif op == "text":
             upd = _Update(uid, sink, tbot, text=text, user=user)
             if uid in B.AWAIT:
-                await B.handle_awaited(upd, _Ctx(tbot), text.strip())
+                await B.handle_awaited(upd, _Ctx(capbot or tbot), text.strip())
             else:
                 sink.notes.append("Тут текст не очікувався. Відкрийте розділ і натисніть потрібну дію.")
         else:
             upd = _Update(uid, sink, tbot, data=data, user=user)
-            await (B.open_data if (data or "").startswith("help:") else B.route)(upd, _Ctx(tbot), data or "m:home", edit=True, record=False)
+            await (B.open_data if (data or "").startswith("help:") else B.route)(upd, _Ctx(capbot or tbot), data or "m:home", edit=True, record=False)
     finally:
         CAPTURE.reset(token)
     text_out, rows = sink.screen or ("", [])
@@ -385,7 +438,9 @@ async def run(bot_module, uid, op, data=None, text=None, user=None, file=None):
     if cc:  # посилання — окремими віконцями з «Скопіювати»; текст із тими ж посиланнями вже не потрібен
         cards, text_out = cc["cards"], cc["head"]
     poll = next((d for r in rows for t, d in r if t.startswith("🔄 Оновити стан")), None)  # екран зі станом — застосунок оновлює сам
-    media = getattr(B, "APP_MEDIA", {}).pop(uid, None)
+    media = (getattr(B, "APP_MEDIA", {}).pop(uid, None) or []) + sink.media or None
+    if sink.media:
+        sink.notes.append("📲 Те саме є й у чаті з ботом")
     return {"media": media, "poll": poll, "cards": cards, "text": text_out, "rows": rows, "hints": button_hints.apply_over(rows, button_hints.for_rows(rows), B.prefs(uid).get("hint_over")), "sections": secs or None, "toast": sink.toast, "notes": sink.notes[-5:], "awaiting": uid in B.AWAIT,
             "view": bool(op == "screen" and data and B.is_view(data)),
             "replies": [re.sub(r"<[^>]+>", "", t)[:6000] for t in replies[-5:]]}
