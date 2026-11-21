@@ -74,3 +74,14 @@ def test_posts_only_on_command(tmp_path):
     assert not sent  # ще не підтверджено
     asyncio.run(p.route(None, None, 1, ["pook"]))
     assert sent == [(-100, "Планерка о 10:00")]
+
+
+def test_parse_pptx():
+    import io
+    import zipfile
+    from plugins.editorial import Plugin
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w") as z:
+        z.writestr("ppt/slides/slide2.xml", "<p:sld><a:p><a:r><a:t>Підсумки</a:t></a:r></a:p></p:sld>")
+        z.writestr("ppt/slides/slide1.xml", "<p:sld><a:p><a:r><a:t>Звіт </a:t></a:r><a:r><a:t>за листопад</a:t></a:r></a:p><a:p><a:r><a:t>12 публікацій</a:t></a:r></a:p></p:sld>")
+    assert Plugin.parse_pptx(b.getvalue()) == [["Звіт за листопад", "12 публікацій"], ["Підсумки"]]
