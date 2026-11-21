@@ -1425,7 +1425,8 @@ class ObservancesUI:
             rs_ = self.obs_on(d, chat)
             if any(not self.sourced(r) for r in rs_):
                 self.verify_bg(d)  # без джерела не показуємо — шукаємо його у фоні
-            items = [(r["id"], self.obs_line(r, notes=notes)) for r in rs_ if self.sourced(r)]
+            who = self.plan_who(d)  # ✍️ виконавці з контент-плану й Редакції — і тут
+            items = [(r["id"], self.obs_line(r, notes=notes) + who(r)) for r in rs_ if self.sourced(r)]
             hidden = len(self.obs_on(d, chat, hidden=True))
         else:
             if cat == "trad":  # 🪔 традиції, знайдені для зведення, — і в цьому списку (з джерелом; можна правити)
