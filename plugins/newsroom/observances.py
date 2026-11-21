@@ -331,6 +331,12 @@ class ObservancesUI:
                 self.store.set("cplan_hist", hist)
                 self._cplan_changes = ch
             self.store.set("cplan_data", merged)
+            try:
+                n = self.cplan_sync(merged)
+                if n:
+                    log.warning("контент-план: додано в календар днів: %d", n)
+            except Exception:  # noqa: BLE001
+                log.warning("контент-план: синхронізація з календарем", exc_info=True)
         elif not prev:
             self.store.set("cplan_data", {})
         self.store.set("cplan_t", time.time())
@@ -370,6 +376,30 @@ class ObservancesUI:
                 for i in today]
         return html_cut("\n".join(lines), 4000), [[("📄 Відкрити оригінал", "url:" + self.cplan_urls()[0])],
                                                     [("🔄 Завантажити зараз", self.cb("obcpr"))], [("« Теми дня", self.cb("obh", "m"))]]
+
+    DAYLIKE_RE = re.compile(r"(?i)\b(?:день|дня|тиждень|місяць|місячник|рік|свято|декада|ніч|година)\b")
+
+    def cplan_sync(self, data):
+        """📅 Дні з контент-плану → у календар (від учора на рік уперед), якщо такого дня там ще немає. Джерело — «контент-план»."""
+        self._oinit()
+        t0 = self.today()
+        lo, hi = (t0 - dt.timedelta(days=1)).isoformat(), (t0 + dt.timedelta(days=400)).isoformat()
+        added = 0
+        for day, items in data.items():
+            if not (lo <= day <= hi):
+                continue
+            d = dt.date.fromisoformat(day)
+            have = [self._tkey(r["title"]) for r in self.obs_on(d)]
+            for it in items:
+                if it.get("where") or not self.DAYLIKE_RE.search(it["title"]):
+                    continue  # статті для сайту/SMM — не дні
+                k = self._tkey(it["title"])
+                if any(k == h or (len(k) > 8 and (k in h or h in k)) for h in have):
+                    continue
+                if self.obs_add(it["title"], kind_of(it["title"]), day, day, 0, "Контент-план", it.get("src") or self.cplan_urls()[0]):
+                    added += 1
+                    have.append(k)
+        return added
 
     def cplan_dir(self):
         from pathlib import Path
@@ -696,7 +726,13 @@ class ObservancesUI:
         if notes is not None:  # 📎 джерела — у зносці під списком; ✅/⚠️ — скільки незалежних ресурсів підтверджують
             v = self.verified(r.get("id")) if not r.get("owner") else None
             check = (f" ✅{v['n']}" if v["n"] >= 2 else " ⚠️1") if v and (v.get("urls") or r.get("url")) else ""
-            src = notes.mark(r.get("url"), _src_label(r.get("url"), r.get("source") or ""))
+            if r.get("source") == "Контент-план":
+                try:
+                    src = " · " + self.cplan_ref(dt.date.fromisoformat(r["start"]) if len(r["start"]) == 10 else self.today())
+                except ValueError:
+                    src = " · " + self.cplan_ref(self.today())
+            else:
+                src = notes.mark(r.get("url"), _src_label(r.get("url"), r.get("source") or ""))
             src += "".join(notes.mark(u, host) for u, host in (v.get("urls") or [])[:2]) if v else ""
             return f"{KINDS.get(r['kind'], '•').split()[0]}{marks} {title}{span}{check}{src}"
         if link and str(r.get("url", "")).startswith("http"):
@@ -737,7 +773,7 @@ class ObservancesUI:
                 return ""
             used.update(id(i) for i in hit)
             return (" · ✍️ " + ", ".join(esc((i["author"] or "") + (f" ({i['where']})" if i["where"] else "")).strip() or "у плані" for i in hit)
-                    + " · " + self.cplan_ref(d))
+                    + ("" if r.get("source") == "Контент-план" else " · " + self.cplan_ref(d)))
         lines = [self.obs_line(r, link=with_links, notes=notes) + (who(r) if plan else "") for r in days[:25]]
         if ongoing:  # скільки триває — лише в підзаголовку «Триває», не в загальному рядку
             lines += (["", f"<b>⏳ Триває · {len(ongoing)}</b>"] if days else []) + [self.obs_line(r, link=with_links, notes=notes) for r in ongoing[:12]]
@@ -747,12 +783,11 @@ class ObservancesUI:
         if lines:
             out.append(("days", f"📌 {'Сьогодні відзначається' if d == self.today() else 'Цього дня відзначається'} · {len(days)}" if days else f"⏳ Триває · {len(ongoing)}", lines))
         rest = [i for i in plan if id(i) not in used]
-        if rest:  # 🗓 теми з контент-плану, яких немає серед днів; джерело — сама таблиця
-            pl = []
-            for i in rest[:15]:
-                tail = " · ".join(x for x in ((f"✍️ {esc(i['author'])}" if i["author"] else ""), (f"📍 {i['where']}" if i["where"] else "")) if x)
-                pl.append(f"• {esc(i['title'])}" + (f" · {tail}" if tail else "") + " · " + self.cplan_ref(d))
-            out.append(("cplan", f"🗓 Контент-план · {len(rest)}", pl))
+        if rest and out and out[-1][0] == "days":  # 📝 що ще в плані на цей день (статті для сайту, SMM) — частина «днів»
+            out[-1][2].extend(["", f"<b>📝 Ще в контент-плані · {len(rest)}</b>"] + [
+                f"• {esc(i['title'])}" + "".join(f" · {x}" for x in ((f"✍️ {esc(i['author'])}" if i["author"] else ""),
+                                                                    (f"📍 {i['where']}" if i["where"] else "")) if x) + " · " + self.cplan_ref(d)
+                for i in rest[:12]])
         for cat in DB.LIST_CATS:
             items = self.db_items(md, cat, chat)
             if items:
@@ -827,7 +862,7 @@ class ObservancesUI:
     # ↗️ «відкрити X»: переносить до кнопки X (вона блимає), а вже кнопка відкриває розділ
     JUMP = {  # ключ → (назва в «відкрити …», підпис кнопки)
         "days": ("Дні", "📅 Дні"), "up": ("Дні", "📅 Дні"), "wx": ("Погоду", "🌤 Погода"), "lore": ("Прикмети", "📜 Прикмети"),
-        "garden": ("Сад-город", "🌱 Сад-город"), "astro": ("Астрономію", "🔭 Астрономія"), "astrol": ("Астрологію", "♈ Астрологія"),
+        "garden": ("Сад-город", "🌱 Сад-город"), "astro": ("Астрономію", "🔭 Астрономія дня"), "astrol": ("Астрологію", "♈ Астрологія"),
         "trad": ("Традиції", "🪔 Традиції"), "born": ("Народились", "🎂 Народились"), "died": ("Померли", "🕯 Померли"),
         "history": ("Історію", "🏛 Історія"), "discover": ("Відкриття", "🔬 Відкриття"), "cplan": ("Контент-план", "📋 Контент-план"),
     }
@@ -952,7 +987,7 @@ class ObservancesUI:
         self.cplan_bg()
         notes = Notes()
         head = f"📅 <b>Теми дня · {d.day} {MONTHS_GEN[d.month - 1]}, {WD[d.weekday()]}</b>\n"
-        secs = [x for x in self.sections(d, chat, notes=notes, compact=True) if x[0] != "names"]  # іменини — лише в «📝 Списки дня»
+        secs = [x for x in self.sections(d, chat, notes=notes, compact=True) if x[0] not in ("names", "born", "died")]  # іменини, народились, померли — лише в «📝 Списки дня»
         if callable(weather):  # погода сама додає свою зноску (Open-Meteo) у спільний список
             weather = weather(notes)
         order = ["days", "wx", "lore", "garden", "astro", "astrol", "trad", "cplan"]  # дні → погода → прикмети, городникам, небо, традиції
@@ -998,9 +1033,13 @@ class ObservancesUI:
         rows.append([(f"📝 Списки дня {'▾' if l_open else '▸'}", self.cb("obh", flip("l")))])
         if l_open:
             ymd = d.strftime("%Y%m%d")
-            cats = [("days", "📌 Відзначається")] + [(c, DB.CATS[c][0].split(" ", 1)[0] + " " + DB.CATS[c][0].split(" ", 1)[1].split(" ")[0]) for c in DB.LIST_CATS]
-            btns = [(label, self.cb("obl", f"{c}.{ymd}")) for c, label in cats]
-            rows += [btns[i:i + 3] for i in range(0, len(btns), 3)]
+            btns = [("📌 Відзначається", self.cb("obl", f"days.{ymd}"))]
+            for k in ("wx", "lore", "garden", "astro", "astrol", "trad", "names", "born", "died", "history", "discover", "cplan"):
+                if k == "names":
+                    btns.append(("👤 Іменини", self.cb("obl", f"names.{ymd}")))
+                else:
+                    btns.append(self.jump_target(k, d))
+            rows += [btns[i:i + 2] for i in range(0, len(btns), 2)]  # по 2 — щоб назви вміщались повністю
             rows.append([("⚠️ Важливі попереду", self.cb("obup")), ("🔔 Попередження", self.cb("obws"))])
         rows.append([(f"⚙️ Меню {'▾' if m_open else '▸'}", self.cb("obh", flip("m")))])
         if m_open:
