@@ -168,6 +168,19 @@ class ObservancesUI:
         return dt.datetime.now(tz).date() if tz else dt.date.today()
 
     # ----- база
+    def ensure_holidays(self):
+        """🗓 Рухомі свята з переліку редакції на цей і наступний рік (дати розраховуються, див. holidays.py)."""
+        from . import holidays as H
+        y = self.today().year
+        done = self.store.get("hol_years") or []
+        for yy in (y, y + 1):
+            if yy in done:
+                continue
+            for title, a, b, kind, url, note in H.floating(yy):
+                self.obs_add(title + (f" — {note}" if note else ""), kind, a.isoformat(), b.isoformat(), 0, "Календар (розрахунок)", url)
+            done.append(yy)
+        self.store.set("hol_years", done[-4:])
+
     def clean_db_titles(self):
         """Разово: вичистити вже збережені назви (сутності, пояснення з Вікіпедії, крапки перед роком)."""
         if self.store.get("titles_clean_v") == 1:
@@ -466,8 +479,9 @@ class ObservancesUI:
         d = self.today()
         try:
             self.clean_db_titles()
+            self.ensure_holidays()
         except Exception:  # noqa: BLE001
-            log.info("очищення назв не вдалося", exc_info=True)
+            log.info("очищення назв / свята не вдалося", exc_info=True)
         notes = Notes()
         head = f"📅 <b>Теми дня · {d.day} {MONTHS_GEN[d.month - 1]}, {WD[d.weekday()]}</b>\n"
         secs = self.sections(d, chat, notes=notes)
