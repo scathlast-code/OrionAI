@@ -282,7 +282,7 @@ class ObservancesUI:
         wait = 3 * 3600 if self.store.get("cplan_data") else 600  # не вдалося — пробуємо знову за 10 хв, а не за 3 год
         if not force and time.time() - (self.store.get("cplan_t") or 0) < wait:
             return self.store.get("cplan_data") or {}
-        merged = {}
+        merged, status = {}, []
         async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0 OrionAI"}) as cl:
             for url in self.cplan_urls():
                 for dl in CP.download_urls(url):
@@ -290,19 +290,46 @@ class ObservancesUI:
                         r = await cl.get(dl)
                         if r.status_code != 200 or not r.content.startswith(b"PK"):
                             log.warning("контент-план: %s → HTTP %s, %s", dl, r.status_code, r.headers.get("content-type"))
+                            status.append(f"{dl.split('/')[2]}: HTTP {r.status_code}, {(r.headers.get('content-type') or '?').split(';')[0]}")
                             continue
+                        n0 = sum(len(v) for v in merged.values())
                         for day, items in CP.parse(r.content).items():
                             for it in items:
                                 it["src"] = url
                             merged.setdefault(day, []).extend(items)
+                        status.append(f"{dl.split('/')[2]}: ✅ завантажено, тем {sum(len(v) for v in merged.values()) - n0}")
                         break
-                    except Exception:  # noqa: BLE001
+                    except Exception as exc:  # noqa: BLE001
                         log.warning("контент-план: не вдалось завантажити %s", dl, exc_info=True)
+                        status.append(f"{dl.split('/')[2]}: {type(exc).__name__}: {str(exc)[:80]}")
         log.warning("контент-план: %d днів, %d тем", len(merged), sum(len(v) for v in merged.values()))
         if merged or not self.store.get("cplan_data"):
             self.store.set("cplan_data", merged)
         self.store.set("cplan_t", time.time())
+        self.store.set("cplan_status", status)
         return merged
+
+    def cplan_screen(self, chat):
+        """🗓 Стан контент-плану: чи завантажився, скільки тем, що на сьогодні — щоб було видно, звідки беремо."""
+        data = self.store.get("cplan_data") or {}
+        t = self.store.get("cplan_t")
+        d = self.today()
+        lines = ["🗓 <b>Контент-план</b>", "Лише читаю таблицю — нічого в неї не пишу.", ""]
+        for u in self.cplan_urls():
+            lines.append(f'• <a href="{esc(u)}">таблиця</a>')
+        lines.append("")
+        lines.append(f"Останнє завантаження: {dt.datetime.fromtimestamp(t, self.host.tz).strftime('%d.%m %H:%M') if t else 'ще не було'}")
+        for x in self.store.get("cplan_status") or []:
+            lines.append("  " + esc(x))
+        days = sorted(data)
+        lines.append(f"Розібрано днів: {len(days)}, тем: {sum(len(v) for v in data.values())}"
+                     + (f" ({days[0][8:]}.{days[0][5:7]}.{days[0][:4]} – {days[-1][8:]}.{days[-1][5:7]}.{days[-1][:4]})" if days else ""))
+        today = self.cplan_on(d)
+        if today:
+            lines += ["", f"<b>На сьогодні · {len(today)}</b>"] + [
+                f"• {esc(i['title'])}" + (f" · ✍️ {esc(i['author'])}" if i["author"] else "") + (f" · 📍 {i['where']}" if i["where"] else "")
+                for i in today]
+        return "\n".join(lines)[:4000], [[("🔄 Завантажити зараз", self.cb("obcpr"))], [("« Теми дня", self.cb("obh", "m"))]]
 
     def cplan_bg(self):
         t = getattr(self, "_cplan_task", None)
@@ -806,7 +833,8 @@ class ObservancesUI:
                      [("📆 Місяць", self.cb("obt", "month")), ("🎆 Рік", self.cb("obt", "year"))],
                      [("🗓 Календар", self.cb("obc", d.strftime("%Y%m"))), ("➕ Своя тема", self.cb("oba"))],
                      [("🌱 Поради саду", self.cb("obg")), ("📜 Усі прикмети з джерелами", self.cb("obj"))],
-                     [("🔄 Оновити з інтернету", self.cb("obu")), (("⏰ " + hm) if on else "⏰ вимк.", self.cb("obm"))]]
+                     [("📋 Контент-план", self.cb("obcp")), ("🔄 Оновити з інтернету", self.cb("obu"))],
+                     [(("⏰ " + hm) if on else "⏰ вимк.", self.cb("obm"))]]
         rows.append([("« Знайти й написати", self.cb("D"))])  # джерела — зносками під кожною частиною, не кнопками
         return text, rows
 
@@ -1300,6 +1328,14 @@ class ObservancesUI:
             return None, self.obs_shadow(chat, *self._cy(x))
         if a == "obup":
             return None, self.obs_upcoming(chat)
+        if a == "obcp":
+            return None, self.cplan_screen(chat)
+        if a == "obcpr":
+            try:
+                await self.ensure_cplan(force=True)
+            except Exception as exc:  # noqa: BLE001
+                self.store.set("cplan_status", [f"{type(exc).__name__}: {str(exc)[:120]}"])
+            return None, self.cplan_screen(chat)
         if a == "obws":
             return None, self.obs_warn_screen(chat)
         if a == "obwt":
