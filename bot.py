@@ -6486,7 +6486,11 @@ def ac_wanted(chat_id, msg):
     if msg.photo or getattr(msg, "forward_origin", None) is not None:
         return True
     import topicsort as TS
-    return not (t.endswith("?") and len(t) < 300 and not TS.URL_RE.search(t))
+    return bool(TS.URL_RE.search(t)) or not is_talk(t)
+
+
+
+from topicsort import ASKS_RE, is_talk  # noqa: E402 — 💬 коротка репліка чи питання = розмова з ШІ
 
 
 async def take_forward(update, ctx, text, fwd=True):
@@ -11358,11 +11362,13 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     import topicsort as _TS
     _t = (msg.text or "").strip()
     _u = _TS.URL_RE.search(_t)
-    if _u and len(_TS.URL_RE.sub("", _t).strip(" \n,.;:-—")) < 25 and chat_id not in AWAIT:
+    _rest = _TS.URL_RE.sub("", _t).strip(" \n,.;:-—")
+    if _u and len(_rest) < 25 and chat_id not in AWAIT and not ASKS_RE.search(_rest):
         # 🔗 просто посилання — нічого не шукаємо й не переписуємо самі: питаємо, що з ним зробити
+        # (посилання з питанням чи проханням — «що тут?», «перекажи» — це вже розмова з ШІ)
         return await show(update, *ac_offer(chat_id, _t), edit=False)
-    lk = LAST_LINK.get(chat_id)
-    if lk and time.time() - lk[1] < 1800 and _t and not _u and len(_t) < 120:
+    lk = LAST_LINK.pop(chat_id, None)  # лише наступне повідомлення після посилання; далі — звичайна розмова
+    if lk and time.time() - lk[1] < 600 and _t and not _u and len(_t) < 60 and "?" not in _t:
         act = ("utm" if re.search(r"(?i)\b(?:utm|ютм)|мітк", _t) else "rw" if re.search(r"(?i)рерайт|перепиш|новин[уа] з|зчитай|прочитай", _t)
                else "chk" if re.search(r"(?i)перевір|безпеч|куди веде|розгорн|чист[еу] посил|без стеженн", _t)
                else "qr" if re.search(r"(?i)\bqr\b|кюар|qr-код", _t)
@@ -11371,7 +11377,8 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return await route(update, ctx, f"m:ac:{lk[2]}:{act}", edit=False)
     if (msg.text or msg.photo) and ac_wanted(chat_id, msg):  # 🧭 автовизначення: лише пропонуємо, нічого не робимо самі
         return await show(update, *ac_offer(chat_id, msg.text or msg.caption or "", msg.photo[-1].file_id if msg.photo else None), edit=False)
-    if prefs(chat_id).get("collect") and (msg.text or msg.caption) and not (msg.text or "").startswith("/"):
+    if prefs(chat_id).get("collect") and (msg.text or msg.caption) and not (msg.text or "").startswith("/") \
+            and not is_talk(msg.text or msg.caption):  # 💬 коротке чи питання — розмова з ШІ навіть у режимі збору
         return await take_forward(update, ctx, msg.text or msg.caption, False)  # 📥 режим збору: мовчки складаємо
     choice = get_choice(chat_id)
     preferred = None if choice == "auto" else choice

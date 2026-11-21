@@ -110,3 +110,14 @@ def kind_of(text, photo=False):
     if TASK_RE.search(text or ""):
         return "task"
     return "text"
+
+
+ASKS_RE = re.compile(r"(?i)\?|\b(?:що|про що|перекаж\w*|поясн\w*|розкаж\w*|підсумуй|коротко|переклад\w*|переклади|чи правда|як|чому|навіщо|скільки|хто|де|коли)\b")
+
+
+def is_talk(text):
+    """💬 Звичайна репліка в розмові (коротка або питання) — відповідає ШІ, а не автовизначення чи збір."""
+    t = (text or "").strip()
+    if URL_RE.search(t):
+        return False
+    return len(t) < 200 or (t.endswith("?") and len(t) < 600)
