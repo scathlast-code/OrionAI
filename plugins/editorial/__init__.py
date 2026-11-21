@@ -402,10 +402,99 @@ class Plugin(Base):
     async def start(self):
         self._pd = {}
         self._loop = asyncio.get_running_loop().create_task(self.posts_loop())
+        self._rep = asyncio.get_running_loop().create_task(self.report_watch())
 
-    def report_screen(self, chat):
-        return ("📊 <b>Звіт</b>\n\nДокумент звіту редакції — за посиланням нижче. Бот у звіт сам нічого не вносить: "
-                "правки — лише людьми й після підтвердження."), [[("📄 Відкрити звіт", "url:" + self.REPORT_URL)], [("« Редакція", self.cb())]]
+    # ---------------------------------------------------------------- 📊 звіт (лише читаємо; правки — людьми)
+    def report_file(self):
+        return self.dir / "report.json"
+
+    def report_data(self):
+        try:
+            return json.loads(self.report_file().read_text())
+        except Exception:  # noqa: BLE001
+            return {}
+
+    @staticmethod
+    def parse_pptx(data: bytes):
+        """Презентація → [[рядки слайда 1], [рядки слайда 2], …] (текст з усіх написів)."""
+        import io
+        import zipfile
+        from html import unescape
+        z = zipfile.ZipFile(io.BytesIO(data))
+        names = sorted((n for n in z.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)), key=lambda n: int(re.findall(r"\d+", n)[0]))
+        slides = []
+        for n in names:
+            xml = z.read(n).decode("utf-8", "ignore")
+            paras = []
+            for para in re.findall(r"<a:p>(.*?)</a:p>", xml, re.S):
+                t = "".join(unescape(x) for x in re.findall(r"<a:t>(.*?)</a:t>", para, re.S)).strip()
+                if t:
+                    paras.append(t)
+            slides.append(paras)
+        return slides
+
+    async def report_fetch(self):
+        """Завантажити звіт (файл у Google Диску або Google Презентацію), розібрати й порівняти з попередньою версією."""
+        import httpx
+        fid = re.search(r"/d/([\w-]{20,})", self.REPORT_URL).group(1)
+        urls = [f"https://docs.google.com/presentation/d/{fid}/export/pptx", f"https://drive.google.com/uc?export=download&id={fid}"]
+        status = []
+        async with httpx.AsyncClient(timeout=40, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0 OrionAI"}) as cl:
+            for u in urls:
+                try:
+                    r = await cl.get(u)
+                    if r.status_code == 200 and r.content.startswith(b"PK"):
+                        slides = self.parse_pptx(r.content)
+                        old = self.report_data()
+                        changed = [i + 1 for i in range(max(len(slides), len(old.get("slides", []))))
+                                   if (slides[i] if i < len(slides) else None) != (old.get("slides", [])[i] if i < len(old.get("slides", [])) else None)]
+                        (self.dir / "report.pptx").write_bytes(r.content)  # 💾 власна копія останньої версії
+                        self.report_file().write_text(json.dumps({"slides": slides, "t": time.time(), "status": [f"{u.split('/')[2]}: ✅"]}, ensure_ascii=False))
+                        return changed if old else []
+                    status.append(f"{u.split('/')[2]}: HTTP {r.status_code}")
+                except Exception as exc:  # noqa: BLE001
+                    status.append(f"{u.split('/')[2]}: {type(exc).__name__}")
+        d = self.report_data()
+        d["status"] = status
+        self.report_file().write_text(json.dumps(d, ensure_ascii=False))
+        return []
+
+    async def report_watch(self):
+        await asyncio.sleep(120)
+        while True:
+            try:
+                ch = await self.report_fetch()
+                if ch:
+                    await self.host.notify_admins(f"📊 <b>Звіт змінився</b>: слайди {', '.join(map(str, ch[:20]))}.",
+                                                  [[("📊 Звіт", self.cb("rep"))]])
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                pass
+            await asyncio.sleep(1800)
+
+    def report_screen(self, chat, slide=None):
+        d = self.report_data()
+        slides = d.get("slides") or []
+        rows = []
+        if slide is not None and str(slide).isdigit() and 0 <= int(slide) < len(slides):
+            k = int(slide)
+            text = f"📊 <b>Звіт · слайд {k + 1} з {len(slides)}</b>\n\n" + ("\n".join(esc(x) for x in slides[k]) or "<i>На слайді немає тексту.</i>")
+            rows.append(([("◀️", self.cb("rep", k - 1))] if k else []) + ([("▶️", self.cb("rep", k + 1))] if k + 1 < len(slides) else []))
+            rows.append([("📊 Усі слайди", self.cb("rep"))])
+        else:
+            t = d.get("t")
+            text = ("📊 <b>Звіт</b>\n\nБот лише читає звіт і щопівгодини перевіряє, чи він змінився (копія останньої версії зберігається в боті). "
+                    "Нічого в нього не вносить — правки лише людьми.\n\n"
+                    + (f"Слайдів: {len(slides)} · оновлено {dt.datetime.fromtimestamp(t, self.tz()).strftime('%d.%m %H:%M')}" if t else "Ще не завантажено.")
+                    + ("\n" + "\n".join(esc(x) for x in d.get("status", [])) if d.get("status") and not slides else ""))
+            btns = [(f"{k + 1}. {(sl[0] if sl else '—')[:26]}", self.cb("rep", k)) for k, sl in enumerate(slides[:40])]
+            rows += [btns[i:i + 2] for i in range(0, len(btns), 2)]
+            rows.append([("🔄 Оновити звіт", self.cb("repr"))])
+        rows.append([("📄 Відкрити оригінал", "url:" + self.REPORT_URL)])
+        rows.append([("« Редакція", self.cb())])
+        from footnotes import html_cut
+        return html_cut(text, 4000), [r for r in rows if r]
 
     # ---------------------------------------------------------------- маршрути
     async def route(self, update, ctx, chat, args):
@@ -524,7 +613,10 @@ class Plugin(Base):
                     con.execute("DELETE FROM posts WHERE id=?", (int(x),))
             return None, self.posts_screen(chat)
         if a == "rep":
-            return None, self.report_screen(chat)
+            return None, self.report_screen(chat, x)
+        if a == "repr":
+            ch = await self.report_fetch()
+            return (f"Змінено слайди: {', '.join(map(str, ch))}" if ch else "Оновлено"), self.report_screen(chat)
         return None, self.home(chat)
 
     async def on_text(self, update, ctx, chat, key, data, text):
