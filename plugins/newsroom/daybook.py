@@ -136,7 +136,11 @@ def parse_sections(wt):
                 items.append(txt[:220])
         out[cat] += items
     out["names"] = [n for n in out["names"] if not re.match(r"(?i)див\.|також", n)]
+    out["lore"] = [n for n in out["lore"] if not NOT_LORE_RE.match(n)]  # дні й свята — не прикмети
     return out
+
+
+NOT_LORE_RE = re.compile(r"(?i)^(?:всесвітн|міжнародн|день\b|свято\b|тиждень\b|у\s|в\s)")
 
 
 # ------------------------------------------------------------------ астрономія

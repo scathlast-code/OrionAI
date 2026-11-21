@@ -512,8 +512,8 @@ class WeatherPlugin(Plugin):
         day = day or now.date()
         key = day.strftime("%m-%d")
         c = self.cfg()
-        if c.get("lore_v") != 3:  # старі прикмети (згенеровані ШІ) — більше не показуємо
-            c["lore"], c["lore_v"] = {}, 3
+        if c.get("lore_v") != 4:  # старі прикмети (згенеровані ШІ) — більше не показуємо
+            c["lore"], c["lore_v"] = {}, 4
             self.save(c)
         cached = (c.get("lore") or {}).get(key)
         if isinstance(cached, list) and cached:
@@ -531,25 +531,50 @@ class WeatherPlugin(Plugin):
             rows = await websearch.search_items(f"{day.day} {MONTHS[day.month - 1]} народний календар прикмети звичаї")
         except Exception:  # noqa: BLE001
             rows = []
+        seen = {re.sub(r"\W+", "", it["text"].lower())[:60] for it in items}
         for r in rows:
-            snip = re.sub(r"\s+", " ", r.get("snippet") or "").strip()
-            # лише український текст про цей день (дослівний уривок сторінки, не переказ)
-            if len(re.findall(r"[іїєґ]", snip, re.I)) < 3 or str(day.day) not in snip + (r.get("title") or ""):
+            if str(day.day) not in (r.get("snippet") or "") + (r.get("title") or ""):
                 continue
-            items.append({"text": snip[:350] + ("…" if len(snip) > 350 else ""), "url": r["url"], "title": (r.get("title") or "")[:80]})
-            if len(items) >= 8:
+            for omen in self.omens(r.get("snippet") or ""):  # дослівні повні речення-прикмети, кожне зі своїм джерелом
+                k = re.sub(r"\W+", "", omen.lower())[:60]
+                if k in seen:
+                    continue
+                seen.add(k)
+                items.append({"text": omen, "url": r["url"], "title": (r.get("title") or "")[:80]})
+            if len(items) >= 12:
                 break
         if items:
             c.setdefault("lore", {})[key] = items
             self.save(c)
         return items
 
+    @staticmethod
+    def omens(snippet):
+        """Уривок сторінки → окремі ПОВНІ речення-прикмети (без Markdown, маркерів, обірваних кінців і заголовків)."""
+        t = re.sub(r"#+\s*|\*\*|__|`", " ", snippet or "")
+        t = re.sub(r"(?:^|\s)(?:[-–•·*]|\d+[.)])\s+", "\n", t)
+        out = []
+        for part in t.split("\n"):
+            part = part.strip()
+            sents = re.findall(r"[^.!?;…]+[.!?;]", part)  # лише завершені речення/пункти — обірване відкидаємо
+            for x in sents:
+                x = re.sub(r"\s+", " ", x).strip(" ,:—-")
+                x = x[:-1] + "." if x.endswith(";") else x
+                if not 25 <= len(x) <= 260 or re.match(r"(?i)^(?:народні )?прикмети\b", x):
+                    continue
+                if not re.search(r"(?i)\b(?:якщо|коли|як на|буде|будуть|прийде|стоятим\w*|чекай|віщує|означає|до (?:теплої|холодної|врожаю))\b", x):
+                    continue
+                if re.search(r"[ыэъё]", x, re.I) or not re.search(r"[а-яіїєґ]", x, re.I):  # лише українською
+                    continue
+                out.append(x[0].upper() + x[1:])
+        return out
+
     def lore_html(self, items):
         """Кожна прикмета/уривок — окремо, з джерелом-гіперпосиланням під ним."""
         out = []
         for it in items:
             out.append(f"• {esc(it['text'])} · <a href=\"{esc(it['url'])}\">{esc(it['url'].split('/')[2].removeprefix('www.'))}</a>")
-        return "\n\n".join(out)
+        return "\n".join(out)
 
     async def route(self, update, ctx, chat, args):
         a = args[0] if args else ""
