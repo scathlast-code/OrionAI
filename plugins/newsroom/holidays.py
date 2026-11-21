@@ -1,0 +1,53 @@
+"""🗓 Рухомі свята з переліку редакції — дати РОЗРАХОВУЮТЬСЯ за календарними правилами (нічого не вигадується):
+Великдень (юліанська пасхалія, як у православній і греко-католицькій церквах України), Трійця / Зелена неділя (+49 днів),
+Русальний тиждень (тиждень після Трійці), День матері (2-га неділя травня), День батька (3-тя неділя червня),
+День вишиванки (3-й четвер травня), Ураза-байрам і Курбан-байрам (ісламський місячний календар, орієнтовно ±1 день),
+Рош га-Шана (єврейський календар). Кожне — з посиланням на статтю Вікіпедії про свято."""
+from __future__ import annotations
+
+import datetime as dt
+
+W = "https://uk.wikipedia.org/wiki/"
+
+
+def orthodox_easter(y):
+    """Великдень за юліанською пасхалією → дата за григоріанським календарем."""
+    a, b, c = y % 4, y % 7, y % 19
+    d = (19 * c + 15) % 30
+    e = (2 * a + 4 * b - d + 34) % 7
+    month, day = divmod(d + e + 114, 31)
+    jul = dt.date(y, month, day + 1)
+    return jul + dt.timedelta(days=(y // 100) - (y // 400) - 2)
+
+
+def nth_weekday(y, m, weekday, n):
+    d = dt.date(y, m, 1)
+    d += dt.timedelta(days=(weekday - d.weekday()) % 7)
+    return d + dt.timedelta(weeks=n - 1)
+
+
+def floating(y):
+    """[(назва, дата_початку, дата_кінця, kind, url, примітка)] на рік y."""
+    out = []
+    e = orthodox_easter(y)
+    out.append(("Великдень (Воскресіння Христове)", e, e, "day", W + "Великдень", ""))
+    t = e + dt.timedelta(days=49)
+    out.append(("Трійця (Зелена неділя)", t, t, "day", W + "Трійця_(свято)", ""))
+    out.append(("Русальний тиждень", t + dt.timedelta(days=1), t + dt.timedelta(days=7), "week", W + "Русалії", ""))
+    out.append(("День матері", nth_weekday(y, 5, 6, 2), nth_weekday(y, 5, 6, 2), "day", W + "День_матері", ""))
+    out.append(("День батька", nth_weekday(y, 6, 6, 3), nth_weekday(y, 6, 6, 3), "day", W + "День_батька", ""))
+    out.append(("День вишиванки", nth_weekday(y, 5, 3, 3), nth_weekday(y, 5, 3, 3), "day", W + "День_вишиванки", ""))
+    try:
+        from convertdate import hebrew, islamic
+        for hy in (y + 3760, y + 3761):
+            g = dt.date(*hebrew.to_gregorian(hy, 7, 1))
+            if g.year == y:
+                out.append(("Рош га-Шана (юдейський Новий рік)", g, g + dt.timedelta(days=1), "week", W + "Рош_га-Шана", "орієнтовно"))
+        for iy in range(int((y - 622) * 1.0307) - 1, int((y - 622) * 1.0307) + 3):
+            for (m, dd, name, page) in ((10, 1, "Ураза-байрам (Ід аль-Фітр)", "Ід_аль-Фітр"), (12, 10, "Курбан-байрам (Ід аль-Адха)", "Курбан-байрам")):
+                g = dt.date(*islamic.to_gregorian(iy, m, dd))
+                if g.year == y and not any(o[0] == name for o in out):
+                    out.append((name, g, g, "day", W + page, "орієнтовно ±1 день"))
+    except Exception:  # noqa: BLE001 — без бібліотеки лишаються християнські й державні
+        pass
+    return out
