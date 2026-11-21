@@ -572,7 +572,7 @@ class ObservancesUI:
     def wiki_day_url(self, d):
         return f"https://uk.wikipedia.org/wiki/{d.day}_{MONTHS_GEN[d.month - 1]}"
 
-    def sections(self, d, chat=None, with_links=True, notes=None):
+    def sections(self, d, chat=None, with_links=True, notes=None, compact=False):
         """[(ключ, заголовок, [рядки])] — порожні списки пропускаємо. notes — зноски-джерела [n] до кожної частини."""
         md = d.strftime("%m-%d")
         out = []
@@ -617,6 +617,8 @@ class ObservancesUI:
             items = self.db_items(md, cat, chat)
             if items:
                 cap = {"history": 12, "born": 10, "died": 8, "discover": 10}.get(cat, 15)
+                if compact:  # у зведенні дня — коротко: прикмети й традиції по 3, решта по 5 (повністю — у «📝 Списки»)
+                    cap = 3 if cat in ("lore", "trad") else 5
                 items = sorted(items, key=lambda it: -self.db_imp(it))  # ❗ важливе за нашими темами — першим
                 per_item = notes is not None and len({it.get("url") or "" for it in items[:cap]}) > 1  # різні джерела — зноска під кожним
                 body = []
@@ -630,14 +632,18 @@ class ObservancesUI:
         if notes is not None and x.get("trad"):  # 🪔 традиції з джерел (якщо в списку дня їх ще немає)
             same = x.get("trad_day") == d.isoformat()
             tday = dt.date.fromisoformat(x["trad_day"]) if x.get("trad_day") else d
-            body = [f"• {esc(it['text'])}" + notes.mark(it["url"], it["host"]) for it in x["trad"][:8]]
+            body = [f"• {esc(it['text'])}" + notes.mark(it["url"], it["host"]) for it in x["trad"][:3 if compact else 8]]
             head_ = DB.CATS["trad"][0] + ("" if same else f" · на {tday.day} {MONTHS_GEN[tday.month - 1]} (не на сьогодні)")
             if not any(k == "trad" for k, _t, _l in out):
                 out.insert(1 if out and out[0][0] == "days" else 0, ("trad", head_, body))
         elif notes is not None and not x.get("done") and not any(k == "trad" for k, _t, _l in out):
             self.extras_bg(d)
-        astro = DB.astro_lines(d, self.host.tz)
-        if notes is not None:
+        astro = [] if compact else DB.astro_lines(d, self.host.tz)
+        if compact:  # лише найближчі події (3); немає — розділу немає
+            if notes is not None:
+                astro = [(f"📅 {it['date'][8:10]}.{it['date'][5:7]} · " if it.get("date") else "• ") + esc(it["text"]) + notes.mark(it["url"], it["host"])
+                         for it in (x.get("astro") or [])[:3]]
+        elif notes is not None:
             astro = [ln + notes.mark("https://gml.noaa.gov/grad/solcalc/", "NOAA") for ln in astro]  # розрахунок за формулами NOAA
             if x.get("aurora"):
                 astro.append("🌌 " + esc(x["aurora"]["text"]) + notes.mark(x["aurora"]["url"], x["aurora"]["host"]))
@@ -645,19 +651,25 @@ class ObservancesUI:
                 astro += ["", "<b>Найближчим часом:</b>"] + [
                     (f"📅 {it['date'][8:10]}.{it['date'][5:7]} · " if it.get("date") else "• ") + esc(it["text"]) + notes.mark(it["url"], it["host"])
                     for it in x["astro"][:10]]
-        out.append(("astro", DB.CATS["astro"][0], astro))
-        astrol = DB.astrol_lines(d)
-        if notes is not None:
+        if astro:
+            out.append(("astro", DB.CATS["astro"][0], astro))
+        astrol = [] if compact else DB.astrol_lines(d)
+        if compact:
+            if notes is not None:
+                astrol = [(f"📅 {it['date'][8:10]}.{it['date'][5:7]} · " if it.get("date") else "• ") + esc(it["text"]) + notes.mark(it["url"], it["host"])
+                          for it in (x.get("astrol") or [])[:3]]
+        elif notes is not None:
             srcs = ["https://uk.wikipedia.org/wiki/Знаки_зодіаку", "https://uk.wikipedia.org/wiki/Місячний_календар", ""]
             astrol = [ln + (notes.mark(u, "Вікіпедія") if u else "") for ln, u in zip(astrol, srcs)]
             if x.get("astrol"):
                 astrol = astrol[:-1] + [(f"📅 {it['date'][8:10]}.{it['date'][5:7]} · " if it.get("date") else "• ") + esc(it["text"])
                                         + notes.mark(it["url"], it["host"]) for it in x["astrol"][:8]] + astrol[-1:]
-        out.append(("astrol", DB.CATS["astrol"][0], astrol))
+        if astrol:
+            out.append(("astrol", DB.CATS["astrol"][0], astrol))
         g = (self.store.get("garden_cache") or {}).get(self.garden_key(d))
         if g:
             body = []
-            for it in g if isinstance(g, list) else []:
+            for it in (g if isinstance(g, list) else [])[:3 if compact else None]:
                 body.append("• " + esc(it["text"]) + (notes.mark(it["url"], it["url"].split("/")[2]) if notes is not None else ""))
             if body:
                 out.append(("garden", DB.CATS["garden"][0], body))
@@ -680,10 +692,12 @@ class ObservancesUI:
 
     def fit(self, head, parts, tail, limit=3900):
         """Склеює частини, поки вміщається в одне повідомлення Telegram (HTML не ріжемо посередині)."""
+        import html as _h
+        vis = lambda x: len(_h.unescape(re.sub(r"<[^>]+>", "", x)))  # noqa: E731 — ліміт Telegram рахує видимий текст, не теги
         text = head
         for p in parts:
-            if len(text) + len(p) + len(tail) + 2 > limit:
-                break
+            if vis(text) + vis(p) + vis(tail) + 2 > limit or len(text) + len(p) + len(tail) > 30000:
+                continue  # не вміщається — пропускаємо цю частину, коротші нижче ще можуть увійти
             text += "\n" + p
         return text + tail
 
@@ -699,19 +713,18 @@ class ObservancesUI:
         self.cplan_bg()
         notes = Notes()
         head = f"📅 <b>Теми дня · {d.day} {MONTHS_GEN[d.month - 1]}, {WD[d.weekday()]}</b>\n"
-        secs = self.sections(d, chat, notes=notes)
+        secs = self.sections(d, chat, notes=notes, compact=True)
         if callable(weather):  # погода сама додає свою зноску (Open-Meteo) у спільний список
             weather = weather(notes)
+        order = ["days", "wx", "lore", "garden", "astro", "astrol", "trad", "cplan"]  # дні → погода → прикмети, городникам, небо, традиції
+        secs = sorted(secs + ([("wx", "", [weather])] if weather else []),
+                      key=lambda s_: order.index(s_[0]) if s_[0] in order else len(order))
         parts = []
         for key, title, lines in secs:
-            if key == "days":
-                parts.append(f"<b>{title}</b>\n<blockquote expandable>" + "\n".join(lines) + "</blockquote>")
-                if weather:
-                    parts.append(weather)
+            if key == "wx":
+                parts.append(lines[0])
             else:
                 parts.append(f"<b>{title}</b>\n<blockquote expandable>" + "\n".join(lines) + "</blockquote>")
-        if not any(k == "days" for k, _t, _l in secs) and weather:  # днів немає — просто не показуємо розділ
-            parts.insert(0, weather)
         up = self.upcoming(chat, 30)
         tail = ""
         if up:
@@ -808,9 +821,13 @@ class ObservancesUI:
                 data = await wx.fetch([(la, lo) for _n, la, lo, _r in __import__("plugins.weather", fromlist=["UA_POINTS"]).UA_POINTS])
                 extra = await wx.countries_text(chat) if hasattr(wx, "countries_text") else ""
                 if wx.ua_day(data, 0):
-                    wx_text = lambda notes, data=data, extra=extra: (  # noqa: E731
-                        "<b>🌤 Погода по всій Україні · сьогодні</b>\n<blockquote expandable>" + wx.ua_day(data, 0, notes)
-                        + "</blockquote>" + (("\n" + extra) if extra else ""))
+                    times = (data[0].get("daily") or {}).get("time") or []
+
+                    def wx_text(notes, data=data, extra=extra, times=times):  # 3 дні: сьогодні, завтра, післязавтра
+                        days_ = [f"<b>{wx.day_title(times[i], i)}</b>\n" + wx.ua_day(data, i, notes, flush=False)
+                                 for i in range(min(3, len(times))) if wx.ua_day(data, i)]
+                        return ("<b>🌤 Погода по Україні · 3 дні</b>\n<blockquote expandable>" + "\n\n".join(days_)
+                                + "</blockquote>" + (("\n" + extra) if extra else ""))
             except Exception:  # noqa: BLE001
                 log.info("obs digest: weather failed", exc_info=True)
         await self.ensure_lore(d)
