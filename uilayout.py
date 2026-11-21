@@ -49,6 +49,7 @@ class Layout:
         self.home_data = home_data
         self.settings_back = settings_back
         self._shown = {}
+        self._sub = {}  # (чат, повідомлення) -> підекрани, відкриті кнопками після останнього розділу (для «Назад» по одному)
         self._last = {}  # чат -> ключ історії повідомлення, де людина натискала востаннє
         self.view_title = {}  # (чат, область) -> заголовок останнього розділу з історії
         self.hist = {}  # chat -> [список даних екранів, позиція]; зберігається в налаштуваннях — переживає перезапуск
@@ -426,7 +427,16 @@ class Layout:
     def shown(self, chat, data):
         """Що зараз на екрані (навіть якщо це не «вид», а результат дії) — щоб «Назад» вів на попередній, а не через один."""
         if data and not data.startswith("m:nav"):
-            self._shown[(chat, SCOPE.get())] = data
+            key = (chat, SCOPE.get())
+            self._shown[key] = data
+            sub = self._sub.setdefault(key, [])
+            if data == self.current(chat):
+                sub.clear()  # знову на розділі з історії
+            elif data in sub:
+                del sub[sub.index(data) + 1:]
+            else:
+                sub.append(data)
+                del sub[:-10]
 
     def _h(self, chat):
         scope = SCOPE.get()
@@ -478,6 +488,11 @@ class Layout:
         if pos >= 0 and stack[pos] == data:
             return
         del stack[pos + 1 :]
+        key = (chat, SCOPE.get())
+        cur = self._shown.get(key)
+        if cur and pos >= 0 and cur not in (stack[pos], data, self.home_data) and not cur.startswith("m:nav"):
+            stack.append(cur)  # підекран, з якого відкрили цей розділ, — теж в історію: «Назад» поверне саме на нього
+        self._sub.pop(key, None)
         stack.append(data)
         if len(stack) > HISTORY_MAX:
             del stack[0]
@@ -500,8 +515,14 @@ class Layout:
 
     def back(self, chat):
         stack, pos = self._h(chat)
-        cur = self._shown.get((chat, SCOPE.get()))
-        if 0 <= pos < len(stack) and cur and cur != stack[pos] and stack[pos] != self.home_data:
+        key = (chat, SCOPE.get())
+        cur = self._shown.get(key)
+        sub = self._sub.get(key) or []
+        if cur and sub and sub[-1] == cur and len(sub) > 1:
+            sub.pop()
+            return sub[-1]  # підекран підекрана: «Назад» — на попередній підекран, а не одразу до розділу
+        if 0 <= pos < len(stack) and cur and cur != stack[pos]:
+            sub.clear()
             return stack[pos]  # на екрані — підекран, якого немає в історії: «Назад» — до розділу, з якого його відкрили
         if pos > 0:
             self._h(chat)[1] = pos - 1
