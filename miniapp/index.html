@@ -18,6 +18,7 @@ main{padding:14px 16px calc(92px + env(safe-area-inset-bottom));max-width:720px;
 .ic.on{background:#f5c451;color:#2b2105}.ic.pill{width:auto;padding:0 12px;font-size:14px;font-weight:600}
 .sub{color:var(--hint);font-size:14.5px;margin:-4px 0 14px;white-space:pre-wrap}
 .card{background:var(--card);border-radius:16px;padding:14px 15px;margin:0 0 14px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:15px}
+.card code.person{color:#e0a800;background:color-mix(in srgb,#ffd400 22%,transparent);font-weight:700}
 .card b{font-weight:650}.card code{background:color-mix(in srgb,var(--hint) 18%,transparent);padding:0 5px;border-radius:5px;font-size:13.5px}
 .card a{color:var(--acc)}
 .list{background:var(--card);border-radius:16px;overflow:hidden;margin:0 0 14px}
@@ -133,6 +134,7 @@ function sanitize(html){
   (function walk(n){for(const c of [...n.childNodes]){if(c.nodeType===1){const t=c.tagName.toLowerCase();
     if(!['b','strong','i','em','u','s','code','pre','a','br','details','summary','blockquote'].includes(t)){c.replaceWith(...c.childNodes);continue}
     for(const a of [...c.attributes]) if(!(t==='a'&&a.name==='href'&&/^https?:/.test(a.value))) c.removeAttribute(a.name);
+    if(t==='code'&&/^[А-ЯІЇЄҐA-Z'’ -]{2,40}$/.test(c.textContent.trim()))c.className='person'; // ім'я виконавця — жовтим
     if(t==='a'){c.target='_blank';c.onclick=e=>{e.preventDefault();const ib=c.href.match(/[?&]start=inb_(\d+)/);if(ib){haptic();open_('m:pl:inb:t:'+ib[1]);return}try{TG.openLink(c.href)}catch(_){window.open(c.href)}}}
     walk(c)}}})(d);return d.innerHTML}
 function split(label){
