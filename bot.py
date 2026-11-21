@@ -2749,7 +2749,8 @@ async def show(update: Update, text, rows, edit=True, nav=True):
                 set_pref(chat, "hub_ctx", None)
     # навігація ◀️ Назад · 🏠 Додому · Вперед ▶️ — ПІСЛЯ підміни на об'єднаний розділ, інакше вона губилась
     rows = fold_rows(chat, rows)
-    rows = L.decorate(chat, rows, nav=nav, current=L.current(chat))
+    scr = SCREEN.get() or ""
+    rows = L.decorate(chat, rows, nav=nav, current=("m:home" if scr in ("m:home", "m:nav:home") else (scr or L.current(chat))))
     if SCREEN.get() == "m:btn" and prefs(chat).get("menu_before_v7"):
         rows = [list(r) for r in rows] + [[("↩️ Меню, як було до об'єднання", "m:menuold")]]
     wk = why_key(SCREEN.get())
@@ -3208,6 +3209,77 @@ def scr_mdtest():
 
 AVA_PRESETS = ["🤖", "✨", "🧠", "🦉", "🦊", "🐙", "🔮", "🚀", "🌿", "🐝", "🦄", "🐺", "🌟", "⚡", "🎓", "🛰", "🐱", "🐼", "👾", "🧙"]
 AVA_COLORS = ["#4f7cff", "#277055", "#93D09B", "#e0794e", "#8e5bd8", "#d84b6a", "#2aa3b8", "#555b66"]
+AVA_SWATCH = ["🔵", "🟢", "🍏", "🟠", "🟣", "🔴", "🩵", "⚫"]  # як виглядає кожен колір тла (замість незрозумілих «○ 1…8»)
+AVA_NAMES = ["синій", "зелений", "м'ятний", "помаранчевий", "фіолетовий", "малиновий", "бірюзовий", "графіт"]
+# 🏷 Офіційні картинки моделі: аватар організації на GitHub + значки й банер із власного сайту сервісу (шукаються наживо)
+AVA_OFFICIAL = {
+    "gemini": ("google-gemini", "https://gemini.google.com/"), "openrouter": ("OpenRouterTeam", "https://openrouter.ai/"),
+    "groq": ("groq", "https://groq.com/"), "mistral": ("mistralai", "https://mistral.ai/"), "nvidia": ("NVIDIA", "https://www.nvidia.com/"),
+    "ollama_cloud": ("ollama", "https://ollama.com/"), "ollama_local": ("ollama", "https://ollama.com/"),
+    "cloudflare": ("cloudflare", "https://www.cloudflare.com/"), "cohere": ("cohere-ai", "https://cohere.com/"),
+}
+AVA_FOUND = {}  # pid -> [(назва, data:image)] — знайдені офіційні картинки (кеш на час роботи)
+
+
+async def official_avatars(pid):
+    """🏷 Шукає офіційні картинки сервісу: GitHub-аватар організації, apple-touch-icon / icon / og:image сайту → 128×128."""
+    if pid in AVA_FOUND:
+        return AVA_FOUND[pid]
+    org, site = AVA_OFFICIAL.get(pid, ("", ""))
+    if not site and PROVIDERS.get(pid, {}).get("base_url"):
+        from urllib.parse import urlsplit
+        host = urlsplit(PROVIDERS[pid]["base_url"]).hostname or ""
+        site = "https://" + ".".join(host.split(".")[-2:]) + "/"
+    cands = []
+    if org:
+        cands.append(("GitHub", f"https://github.com/{org}.png?size=256"))
+    async with httpx.AsyncClient(timeout=12, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0 (OrionAI avatar)"}) as c:
+        if site:
+            try:
+                r = await c.get(site)
+                html_ = r.text[:400_000]
+                from urllib.parse import urljoin
+                for label, rx in (("Значок", r'<link[^>]+rel=["\']apple-touch-icon[^"\']*["\'][^>]*href=["\']([^"\']+)'),
+                                  ("Значок", r'<link[^>]+href=["\']([^"\']+)["\'][^>]*rel=["\']apple-touch-icon'),
+                                  ("Сайт", r'<link[^>]+rel=["\'](?:shortcut )?icon["\'][^>]*href=["\']([^"\']+\.(?:png|jpg|jpeg|webp|ico)[^"\']*)'),
+                                  ("Банер", r'<meta[^>]+property=["\']og:image["\'][^>]*content=["\']([^"\']+)')):
+                    m = re.search(rx, html_, re.I)
+                    if m and not any(l == label for l, _ in cands):
+                        cands.append((label, urljoin(str(r.url), m.group(1).replace("&amp;", "&"))))
+                cands.append(("Сайт", urljoin(str(r.url), "/favicon.ico")))
+            except Exception:  # noqa: BLE001
+                log.info("аватарка: сайт %s не відповів", site)
+        out, seen = [], set()
+        for label, url in cands:
+            if url in seen or url.lower().split("?")[0].endswith(".svg"):
+                continue
+            seen.add(url)
+            try:
+                r = await c.get(url)
+                if r.status_code != 200 or len(r.content) < 200:
+                    continue
+                out.append((label, avatar_from_photo(r.content)))
+            except Exception:  # noqa: BLE001
+                continue
+            if len(out) >= 5:
+                break
+    AVA_FOUND[pid] = out
+    return out
+
+
+def ava_collage(items):
+    """Одна картинка з пронумерованими варіантами — щоб побачити їх у чаті перед вибором."""
+    from PIL import Image, ImageDraw
+    tiles = [Image.open(io.BytesIO(base64.b64decode(d.split(",", 1)[1]))).convert("RGB") for _l, d in items]
+    W = 150 * len(tiles)
+    im = Image.new("RGB", (max(W, 150), 175), "white")
+    dr = ImageDraw.Draw(im)
+    for i, t in enumerate(tiles):
+        im.paste(t, (i * 150 + 11, 5))
+        dr.text((i * 150 + 70, 150), str(i + 1), fill="black")
+    out = io.BytesIO()
+    im.save(out, "JPEG", quality=88)
+    return out.getvalue()
 
 
 def avatars(chat_id):
@@ -3239,12 +3311,29 @@ def scr_avatar(chat_id, pid):
     cur = avatars(chat_id).get(pid) or {}
     now = cur.get("e") or ("своя картинка" if cur.get("img") else "стандартна (логотип)")
     text = (f"🎭 <b>Аватарка · {esc(title)}</b>\n\nЯк ця модель виглядає в розмові застосунку. Зараз: <b>{esc(now)}</b>.\n"
-            "Оберіть значок і колір нижче, надішліть свою картинку або поверніть стандартну. Бачите лише ви.")
+            "Оберіть значок і колір тла (" + ", ".join(f"{e} {n}" for e, n in zip(AVA_SWATCH, AVA_NAMES)) + "), "
+            "офіційну картинку моделі (🏷 — логотипи з її сайту й GitHub), свою картинку або поверніть стандартну. Бачите лише ви.\n\n"
+            "🎨 Однакові аватарки (напр. два акаунти однієї моделі) легко розрізнити: знебарвте, зробіть яскравішою, змініть відтінок, "
+            "додайте кольорову обвідку чи символ у кутку (цифру, літеру, емодзі).")
     btn = [(e + (" ✓" if cur.get("e") == e else ""), f"m:ava:{pid}:e{i}") for i, e in enumerate(AVA_PRESETS)]
     rows = [btn[i:i + 5] for i in range(0, len(btn), 5)]
-    rows.append([(("●" if cur.get("c") == c else "○") + f" {i + 1}", f"m:ava:{pid}:c{i}") for i, c in enumerate(AVA_COLORS[:4])])
-    rows.append([(("●" if cur.get("c") == c else "○") + f" {i + 5}", f"m:ava:{pid}:c{i + 4}") for i, c in enumerate(AVA_COLORS[4:])])
+    rows.append([(AVA_SWATCH[i] + ("✓" if cur.get("c") == c else ""), f"m:ava:{pid}:c{i}") for i, c in enumerate(AVA_COLORS)])
+    found = AVA_FOUND.get(pid)
+    if found:
+        rows.append([(f"🏷 {i + 1} · {lbl}"[:22], f"m:ava:{pid}:o{i}") for i, (lbl, _d) in enumerate(found[:2])])
+        if len(found) > 2:
+            rows.append([(f"🏷 {i + 3} · {lbl}"[:22], f"m:ava:{pid}:o{i + 2}") for i, (lbl, _d) in enumerate(found[2:5])])
+    else:
+        rows.append([("🏷 Офіційні картинки моделі", f"m:ava:{pid}:off")])
     rows.append([("📷 Своя картинка", f"m:ava:{pid}:img"), ("↩️ Стандартна", f"m:ava:{pid}:reset")])
+    # 🎨 щоб не плутати однакові аватарки (напр. два акаунти однієї моделі): працює з будь-якою — логотипом, значком, картинкою
+    sat = float(cur.get("s") or 1)
+    rows.append([(("✓ " if cur.get("g") else "") + "⚪ Знебарвити", f"m:ava:{pid}:fg"),
+                 ("🌈 Яскравість: " + {1.0: "звичайна", 1.8: "яскраво", 2.6: "дуже"}.get(sat, "звичайна"), f"m:ava:{pid}:fs")])
+    rows.append([("🎨 Відтінок" + (f": {int(cur['h'])}°" if cur.get("h") else ""), f"m:ava:{pid}:fh"),
+                 ("⭕ Обвідка" + (" " + AVA_SWATCH[AVA_COLORS.index(cur["r"])] if cur.get("r") in AVA_COLORS else ""), f"m:ava:{pid}:fr")])
+    rows.append([("🔤 Символ: " + cur["b"] if cur.get("b") else "🔤 Символ на аватарці", f"m:ava:{pid}:fb")]
+                + ([("✖️ Без символу", f"m:ava:{pid}:fbx")] if cur.get("b") else []))
     rows.append([("« Модель", f"m:minfo:{pid}")])
     return text, rows
 
@@ -7364,7 +7453,7 @@ async def finish_wizard(update, ctx, chat_id):
 
 EDITOR_ACTIONS = {"btn", "bi", "bmv", "bup", "bdn", "bset", "lren", "lunren", "bgnew", "bgdel", "brl", "brldel", "breset"}
 VIEW_ACTIONS = {"appm", "sbx", "imp", "home", "dl", "d", "f", "tl", "t", "md", "lim", "st", "nt", "cr", "canva", "pins", "box", "it", "acc",
-                "mem", "mdl", "mdv", "btn", "bi", "brl", "voice", "cpl", "cp", "bk", "fr", "svc", "sv", "svls", "diag", "jl", "j", "bks", "bkt", "bkls", "bkrs", "bkfmt", "bkscope", "lib", "mi", "note", "bl", "pr", "pri", "backup", "qask", "rm", "rw", "cl", "why", "mdtest", "hub", "today", "prem"}
+                "mem", "mdl", "mdv", "btn", "bi", "brl", "voice", "cpl", "cp", "bk", "fr", "svc", "sv", "svls", "diag", "jl", "j", "bks", "bkt", "bkls", "bkrs", "bkfmt", "bkscope", "lib", "mi", "note", "bl", "pr", "pri", "backup", "qask", "rm", "rw", "cl", "why", "mdtest", "hub", "today", "prem", "ava", "minfo"}
 
 
 def is_view(data):
@@ -7884,19 +7973,57 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         pid = arg or ""
         sub = parts[3] if len(parts) > 3 else ""
         if sub.startswith("e") and sub[1:].isdigit() and int(sub[1:]) < len(AVA_PRESETS):
-            cur = avatars(chat_id).get(pid) or {}
-            set_avatar(chat_id, pid, {"e": AVA_PRESETS[int(sub[1:])], "c": cur.get("c") or AVA_COLORS[0]})
+            cur = dict(avatars(chat_id).get(pid) or {})
+            cur.update(e=AVA_PRESETS[int(sub[1:])], c=cur.get("c") or AVA_COLORS[0], img="")
+            set_avatar(chat_id, pid, cur)
         elif sub.startswith("c") and sub[1:].isdigit() and int(sub[1:]) < len(AVA_COLORS):
             cur = dict(avatars(chat_id).get(pid) or {})
             cur["c"] = AVA_COLORS[int(sub[1:])]
-            cur.setdefault("e", "" if cur.get("img") else "🤖")
+            cur.setdefault("e", "")  # лише колір тла — логотип моделі лишається
             set_avatar(chat_id, pid, cur)
         elif sub == "reset":
             set_avatar(chat_id, pid, None)
+        elif sub == "off":  # 🏷 знайти офіційні картинки й показати їх у чаті пронумерованими
+            found = await official_avatars(pid)
+            if not found:
+                toast = "Офіційних картинок не знайшов — сайт моделі не відповів. Спробуйте пізніше або «📷 Своя картинка»."
+            else:
+                toast = f"🏷 Знайдено {len(found)} — оберіть номер"
+                try:
+                    await ctx.bot.send_photo(chat_id, ava_collage(found), caption="🏷 Офіційні картинки " + PROVIDERS.get(pid, {}).get("title", pid)
+                                             + ": " + " · ".join(f"{i + 1} — {l}" for i, (l, _d) in enumerate(found)))
+                except Exception:  # noqa: BLE001
+                    log.info("аватарка: прев'ю не надіслалось")
+        elif sub in ("fg", "fs", "fh", "fr", "fbx"):  # 🎨 ефекти — поверх будь-якої аватарки
+            cur = dict(avatars(chat_id).get(pid) or {})
+            if sub == "fg":
+                cur["g"] = 0 if cur.get("g") else 1
+            elif sub == "fs":
+                steps = [1.0, 1.8, 2.6]
+                cur["s"] = steps[(steps.index(float(cur.get("s") or 1)) + 1) % 3] if float(cur.get("s") or 1) in steps else 1.0
+            elif sub == "fh":
+                cur["h"] = (int(cur.get("h") or 0) + 60) % 360
+            elif sub == "fr":
+                opts = [""] + AVA_COLORS
+                cur["r"] = opts[(opts.index(cur.get("r") or "") + 1) % len(opts)] if (cur.get("r") or "") in opts else ""
+            elif sub == "fbx":
+                cur["b"] = ""
+            set_avatar(chat_id, pid, cur)
+        elif sub == "fb":
+            ask_input(chat_id, "avabadge", pid)
+            screen = ("🔤 Який символ поставити в куток аватарки? Цифра, 1–3 літери чи емодзі — напр. <code>2</code>, <code>Pro</code>, <code>⚡</code>.", [CANCEL_ROW])
+        elif sub.startswith("o") and sub[1:].isdigit():
+            found = AVA_FOUND.get(pid) or []
+            k = int(sub[1:])
+            if k < len(found):
+                cur = dict(avatars(chat_id).get(pid) or {})
+                cur.update(img=found[k][1], e="", c="")
+                set_avatar(chat_id, pid, cur)
+                toast = f"✅ Аватарка: {found[k][0]}"
         elif sub == "img":
             ask_input(chat_id, "avaimg", pid)
             screen = ("📷 Надішліть картинку (фото) — зроблю з неї круглу аватарку для моделі.", [CANCEL_ROW])
-        if sub != "img":
+        if sub not in ("img", "fb"):
             screen = scr_avatar(chat_id, pid)
     elif a == "tclr":  # 🧹 скасувати всі «❓ чекають рішення» (питання без відповіді)
         n = 0
@@ -8948,6 +9075,12 @@ async def handle_awaited(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text):
         if screen:
             return await show(update, *screen, edit=False)
         return
+    if act == "avabadge":
+        AWAIT.pop(chat_id, None)
+        cur = dict(avatars(chat_id).get(data) or {})
+        cur["b"] = (text or "").strip()[:3]
+        set_avatar(chat_id, data, cur)
+        return await show(update, *scr_avatar(chat_id, data), edit=False)
     if act in ("premd", "premt"):
         if act == "premd":
             d = premium.parse_date(text, TZ)
@@ -10057,7 +10190,9 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         pid = AWAIT.pop(chat_id)[1]
         try:
             data = bytes(await (await msg.photo[-1].get_file()).download_as_bytearray())
-            set_avatar(chat_id, pid, {"img": await asyncio.to_thread(avatar_from_photo, data)})
+            cur = dict(avatars(chat_id).get(pid) or {})
+            cur.update(img=await asyncio.to_thread(avatar_from_photo, data), e="", c="")
+            set_avatar(chat_id, pid, cur)
             await msg.reply_text("🎭 Готово — нова аватарка вже в застосунку.")
         except Exception:  # noqa: BLE001
             await msg.reply_text("Не вдалося обробити картинку — спробуйте інше фото.")
