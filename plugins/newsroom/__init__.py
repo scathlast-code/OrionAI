@@ -949,7 +949,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
         return text, rows
 
     def hub_H5(self, chat):
-        text = "🗂 <b>Архів</b>\n\nУсе, що вже пройшло через новинарня."
+        text = "🗂 <b>Архів</b>\n\nУсе, що вже пройшло через новинарню."
         rows = [[("🗂 Усі чернетки", self.cb("ls", "ok")), ("📚 Історії", self.cb("Sl"))],
                 [("⭐ Обране й папки", self.cb("Fo")), ("🧾 Зведення", self.cb("dg"))],
                 [("📁 Теки й архів новин", self.cb("flds")), ("⏳ Черга й помилки", self.cb("q"))],

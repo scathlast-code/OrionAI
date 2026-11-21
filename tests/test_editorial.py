@@ -102,3 +102,15 @@ def test_talk_merges_decisions_and_posts_live_in_chats(tmp_path):
     assert any("Що й коли" in b[0] for r in rows for b in r)
     t, rows = p.list_screen(1, "decision")
     assert "Обговорення й рішення" in t
+
+
+def test_news_screen_has_topics(tmp_path):
+    from tests.test_plugins_lists import news
+    from plugins.editorial import Plugin
+    np_, _ = news(tmp_path)
+    np_.host.extra["plugin"] = lambda pid: np_ if pid == "news" else None
+    p = Plugin(np_.host)
+    t, rows = p.list_screen(1, "news")
+    labels = " ".join(b[0] for r in rows for b in r)
+    for w in ("Гарячі", "Екологія", "Агро", "Здоров", "Енергетика", "Нові чернетки", "Джерела", "Звіт"):
+        assert w in labels, w
