@@ -6209,7 +6209,56 @@ async def auto_backup():
 
 def scr_backups(chat_id):
     t, rows = bkui.scr_backups(BK, TZ)
-    return t, [[("🛟 Збереження під час оновлень", "m:lb")]] + rows
+    extra = [[("🧰 Бекапи розробника (код за розділами)", "m:devbk")]] if is_admin_id(chat_id) else []
+    return t, [[("🛟 Збереження під час оновлень", "m:lb")]] + rows + extra
+
+
+def scr_devbk(chat_id, key=None):
+    """🧰 Знімки коду за розділами — щоб повернути лише зламану частину, а не всю програму."""
+    import devbackup as DB_
+    idx, secs = DB_.index(), DB_.sections()
+    if key is None:
+        lines = ["🧰 <b>Бекапи розробника</b>",
+                 "Знімок коду кожного розділу окремо. Робиться сам, коли власник натискає «Старт» після оновлення, — лише для розділів, "
+                 "які змінились. Зберігаю по 15 останніх. Секретів (ключів, .env) тут немає — лише код.", ""]
+        rows = []
+        for k, (title, _f) in secs.items():
+            h = idx.get(k) or []
+            lines.append(f"{title} — " + (f"{len(h)} зн., останній {datetime.fromtimestamp(h[-1]['at'], TZ):%d.%m %H:%M}" if h else "ще немає"))
+            rows.append([(f"{title.split(' (')[0]} · {len(h)}", f"m:devbk:{k}")])
+        rows.append([("📸 Зняти зараз", "m:devbk:_now"), ("« Копії", "m:backup")])
+        return "\n".join(lines), rows
+    title = secs.get(key, (key, []))[0]
+    hist = list(reversed(idx.get(key) or []))
+    lines = [f"🧰 <b>{esc(title)}</b>", "Торкніться знімка: що зміниться, архів чи відновлення цієї частини.", ""]
+    rows = []
+    for i, h in enumerate(hist[:15]):
+        when = f"{datetime.fromtimestamp(h['at'], TZ):%d.%m %H:%M}"
+        lines.append(f"{i + 1}. {when} · файлів {h['n']}" + (f" · версія {h['commit']}" if h.get("commit") else "") + f" · {esc(h.get('reason', ''))}")
+        rows.append([(f"{i + 1}. {when}", f"m:devbk:{key}:{i}")])
+    if not hist:
+        lines.append("Знімків ще немає.")
+    rows.append([("« Бекапи розробника", "m:devbk")])
+    return "\n".join(lines), rows
+
+
+def scr_devbk_item(chat_id, key, i):
+    import devbackup as DB_
+    hist = list(reversed(DB_.index().get(key) or []))
+    if i >= len(hist):
+        return scr_devbk(chat_id, key)
+    h = hist[i]
+    changed = DB_.diff_names(key, h["file"])
+    lines = [f"🧰 <b>Знімок {datetime.fromtimestamp(h['at'], TZ):%d.%m.%Y %H:%M}</b>", f"Розділ: {esc(DB_.sections().get(key, (key,))[0])}",
+             f"Відрізняється від поточного коду файлів: <b>{len(changed)}</b>"]
+    lines += [f"• <code>{esc(c)}</code>" for c in changed[:15]] + ([f"… ще {len(changed) - 15}"] if len(changed) > 15 else [])
+    lines += ["", "♻️ Відновлення поверне лише цю частину й перезапустить бота. Діє до наступного оновлення з GitHub — "
+                  "щоб закріпити, скажіть розробнику (Claude) повернути цей розділ у коді."]
+    rows = [[("📦 Надіслати архів", f"m:devbkz:{key}:{i}")]]
+    if changed:
+        rows.append([("♻️ Відновити цю частину", f"m:devbkr:{key}:{i}")])
+    rows.append([("« Знімки розділу", f"m:devbk:{key}")])
+    return "\n".join(lines), rows
 
 
 # ---------------------------------------------------------------- 🛟 нічого не губиться під час оновлень (lifeboat.py)
@@ -8218,7 +8267,7 @@ async def finish_wizard(update, ctx, chat_id):
 
 
 EDITOR_ACTIONS = {"btn", "bi", "bmv", "bup", "bdn", "bset", "lren", "lunren", "bgnew", "bgdel", "brl", "brldel", "breset"}
-VIEW_ACTIONS = {"appm", "sbx", "imp", "home", "dl", "d", "f", "tl", "t", "md", "lim", "st", "nt", "cr", "canva", "pins", "box", "it", "acc",
+VIEW_ACTIONS = {"devbk", "appm", "sbx", "imp", "home", "dl", "d", "f", "tl", "t", "md", "lim", "st", "nt", "cr", "canva", "pins", "box", "it", "acc",
                 "mem", "mdl", "mdv", "btn", "bi", "brl", "voice", "cpl", "cp", "bk", "fr", "svc", "sv", "svls", "diag", "jl", "j", "bks", "bkt", "bkls", "bkrs", "bkfmt", "bkscope", "lib", "mi", "note", "bl", "pr", "pri", "backup", "qask", "rm", "rw", "cl", "why", "mdtest", "hub", "today", "prem", "ava", "minfo", "xs", "ag"}
 
 
@@ -9050,6 +9099,34 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
             return
         else:
             screen = None
+    elif a == "devbk" and is_admin_id(chat_id):
+        import devbackup as DB_
+        if arg == "_now":
+            done = await asyncio.to_thread(DB_.snapshot, "вручну")
+            toast, screen = ("📸 Знято: " + ", ".join(t.split(" (")[0] for t in done))[:190] if done else "Змін з минулого знімка немає", scr_devbk(chat_id)
+        elif arg and len(parts) > 3 and parts[3].isdigit():
+            screen = scr_devbk_item(chat_id, arg, int(parts[3]))
+        else:
+            screen = scr_devbk(chat_id, arg or None)
+    elif a == "devbkz" and is_admin_id(chat_id):
+        import devbackup as DB_
+        hist = list(reversed(DB_.index().get(arg) or []))
+        i = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+        if i < len(hist):
+            await ctx.bot.send_document(chat_id, DB_.zip_bytes(hist[i]["file"]), filename=hist[i]["file"], caption="🧰 Знімок коду розділу")
+        toast, screen = "📦 Надіслано", None
+    elif a == "devbkr" and is_admin_id(chat_id):
+        i = parts[3] if len(parts) > 3 else "0"
+        if len(parts) > 4 and parts[4] == "yes":
+            import devbackup as DB_
+            hist = list(reversed(DB_.index().get(arg) or []))
+            n = await asyncio.to_thread(DB_.restore, arg, hist[int(i)]["file"])
+            await ctx.bot.send_message(chat_id, f"♻️ Повернуто файлів: {n}. Перезапускаю бота — за хвилину натисніть «Старт» і перевірте.")
+            asyncio.get_running_loop().call_later(2, lambda: os._exit(0))  # Railway сам підніме бота з поверненим кодом
+            toast, screen = "♻️ Відновлюю…", None
+        else:
+            screen = ("♻️ <b>Точно відновити цю частину?</b>\nПоточний код розділу спершу збережу окремим знімком — повернутись можна.",
+                      [[("✅ Так, відновити", f"m:devbkr:{arg}:{i}:yes"), ("✖️ Ні", f"m:devbk:{arg}:{i}")]])
     elif a == "colmix":  # 🧾 новини на дві теми: куди віднести — і одразу далі зі зведенням
         pk, _, ch = (arg or "").partition(":") if ":" in (arg or "") else (arg or "", "", parts[3] if len(parts) > 3 else "")
         ch = ch or (parts[3] if len(parts) > 3 else "both")
@@ -10432,6 +10509,9 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await show(update, *scr_space(update.effective_chat.id, sp["id"]), edit=False)
     if not allowed(update):
         return await deny(update)
+    if is_admin_id(user.id) and not ctx.args:  # 🧰 «Старт» після оновлення — знімок коду розділів, що змінились (тихо, у фоні)
+        import devbackup as DB_
+        asyncio.get_running_loop().run_in_executor(None, DB_.snapshot, "старт")
     m_obb = re.fullmatch(r"obb_([a-z]+)_(\d{8})", ctx.args[0]) if ctx.args else None
     if m_obb and PLUGINS.get("news") and hasattr(PLUGINS.get("news"), "jump"):  # ↗️ «відкрити X» → кнопка X, що блимає
         try:
