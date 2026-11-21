@@ -3169,17 +3169,8 @@ CANCEL_ROW = [("✖️ Скасувати", "m:cancel")]
 # ---------------------------------------------------------------- головне меню
 
 
-def scr_home(chat_id, open_group=None):
-    """Головне меню-акордеон: категорія лишається на місці, а її кнопки з'являються прямо під нею."""
-    _migrate_compact_menu(chat_id)
-    did = current_dialog(chat_id)
-    d = dialog_get(did)
-    open_tasks = len(tasks_open(chat_id=chat_id))
-    try:
-        banner = PLUGINS.banner(chat_id)
-    except Exception:  # noqa: BLE001
-        banner = ""
-    # 👋 привітання й лише кількість справ — самі справи в «🌅 Сьогодні» та «💬 Робота»
+def home_counts(chat_id):
+    """👋 Привітання й кількість справ — однаково для чату й застосунку."""
     name = (known_name(chat_id)[0] or (member_get(chat_id) or {}).get("name") or "").split(" ")[0]
     hour = datetime.now(TZ).hour
     hello = "Доброго ранку" if 5 <= hour < 12 else "Добрий день" if hour < 18 else "Добрий вечір" if hour < 23 else "Доброї ночі"
@@ -3194,15 +3185,31 @@ def scr_home(chat_id, open_group=None):
             red_n = red.my_open(chat_id)[1]
         except Exception:  # noqa: BLE001
             red_n = 0
+    open_tasks = len(tasks_open(chat_id=chat_id))
     total = open_tasks + today_n + red_n
-    word = "завдання" if total % 10 in (2, 3, 4) and not 12 <= total % 100 <= 14 else "завдання" if total % 10 == 1 and total % 100 != 11 else "завдань"
-    text = (
-        (banner + "\n\n" if banner else "")
-        + f"👋 <b>{hello}{', ' + esc(name) if name else ''}!</b>\n\n"
-        + (f"У вас <b>{total}</b> {word}" + (f" (на сьогодні — {today_n})" if today_n else "") + ".\n"
-           "Перегляньте їх у «🌅 Сьогодні» чи «📓 Записнику»." if total else
-           "Відкритих завдань немає. Що нового — у «🌅 Сьогодні».")
-    )
+    word = "завдання" if total % 10 in (1, 2, 3, 4) and not 11 <= total % 100 <= 14 else "завдань"
+    return {"name": name, "hello": hello, "today": today_n, "red": red_n, "open": open_tasks, "total": total, "word": word}
+
+
+def home_greeting_html(g):
+    return (f"👋 <b>{g['hello']}{', ' + esc(g['name']) if g['name'] else ''}!</b>\n\n"
+            + (f"У вас <b>{g['total']}</b> {g['word']}" + (f" (на сьогодні — {g['today']})" if g['today'] else "") + ".\n"
+               "Перегляньте їх у «🌅 Сьогодні» чи «📓 Записнику»." if g['total'] else
+               "Відкритих завдань немає. Що нового — у «🌅 Сьогодні»."))
+
+
+def scr_home(chat_id, open_group=None):
+    """Головне меню-акордеон: категорія лишається на місці, а її кнопки з'являються прямо під нею."""
+    _migrate_compact_menu(chat_id)
+    did = current_dialog(chat_id)
+    d = dialog_get(did)
+    open_tasks = len(tasks_open(chat_id=chat_id))
+    try:
+        banner = PLUGINS.banner(chat_id)
+    except Exception:  # noqa: BLE001
+        banner = ""
+    g = home_counts(chat_id)
+    text = (banner + "\n\n" if banner else "") + home_greeting_html(g)
     pending = len(members_list("pending")) if is_admin_id(chat_id) else 0
     badges = {"acc": f" · 🔔 {pending}"} if pending else {}
     if pending:
@@ -8143,7 +8150,7 @@ def _cut_html(body, n):
         out.append(l)
         k += 1 if l.strip() else 0
     t = "\n".join(out).strip()
-    if t.count("<b>") != t.count("</b>") or t.count("<i>") != t.count("</i>") or t.count("<code>") != t.count("</code>"):
+    if any(len(re.findall(rf"<{tg}[\s>]", t)) != t.count(f"</{tg}>") for tg in ("b", "i", "u", "s", "code", "pre", "a", "blockquote", "tg-spoiler")):
         t = re.sub(r"<[^>]+>", "", t)
     return t + ("…" if k >= n and len(lines) > len(out) else "")
 
