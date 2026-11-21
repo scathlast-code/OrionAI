@@ -94,6 +94,7 @@ DB_EXISTED = os.path.exists(DB_PATH)  # 🛟 щойно створена баз�
 HISTORY_LIMIT = int(env("HISTORY_LIMIT", "30"))
 MAX_TOKENS = int(env("MAX_TOKENS", "2000"))
 REQUEST_TIMEOUT = float(env("REQUEST_TIMEOUT", "45"))  # довше — краще одразу спитати іншу модель
+GEMINI_FAST = env("GEMINI_FAST_MODEL", "gemini-flash-lite-latest")  # ⚡ запасна швидка Gemini, коли основна мовчить
 STREAM_IDLE = float(env("STREAM_IDLE_TIMEOUT", "18"))  # ✍️ модель пише потоком: тиша довша за це — одразу інша модель (а не чекати 45 с)
 OLLAMA_TIMEOUT = float(env("OLLAMA_TIMEOUT", "300"))  # своя модель на процесорі думає довше за хмарні
 PORT = int(env("PORT", "8000"))
@@ -1523,7 +1524,7 @@ async def post_chat(client, p, messages, use_tools):
             )
     except httpx.TimeoutException:
         count_request(p["id"], error=True)
-        raise ProviderError("timeout", f"мовчав {int(OLLAMA_TIMEOUT if p['id'] == 'ollama_local' else (STREAM_IDLE if stream else REQUEST_TIMEOUT))} с", 15)  # коротка пауза: наступне повідомлення вже знову спробує
+        raise ProviderError("timeout", f"{p['model']}: мовчав {int(OLLAMA_TIMEOUT if p['id'] == 'ollama_local' else (STREAM_IDLE if stream else REQUEST_TIMEOUT))} с", 15)  # коротка пауза: наступне повідомлення вже знову спробує
     except httpx.HTTPError as e:
         count_request(p["id"], error=True)
         raise ProviderError("network", str(e) or type(e).__name__, 300 if p["id"] == "ollama_local" else 120)
@@ -1909,7 +1910,22 @@ async def _ask_llm(history, user_content, preferred=None, fallback=True, exclude
                                 "limit": limit, "try": k, "of": len(cands),
                                 "prev": (PROVIDERS[prev[-1][0]]["title"] + " — " + ERR_SHORT.get(prev[-1][1]["kind"], prev[-1][1]["kind"])) if prev else ""}
         try:
-            text, warnings = await ask_provider(PROVIDERS[pid], messages)
+            try:
+                text, warnings = await ask_provider(PROVIDERS[pid], messages)
+            except ProviderError as e0:
+                # ⚡ Gemini мовчить (важка «думаюча» модель чи перевантаження) — одразу пробуємо швидку Gemini, а не чекаємо інших
+                main_m = PROVIDERS[pid]["model"]
+                if pid != "gemini" or e0.kind not in ("timeout", "overloaded") or main_m == GEMINI_FAST:
+                    raise
+                progress_stage(f"⚡ Gemini ({main_m}) мовчить — пробую швидшу {GEMINI_FAST}…", 2, 3)
+                if CHAT.get() and CHAT.get() in LIVE:
+                    LIVE[CHAT.get()]["model"] = GEMINI_FAST
+                try:
+                    text, warnings = await ask_provider({**PROVIDERS[pid], "model": GEMINI_FAST, "_alt": True}, messages)
+                except ProviderError:
+                    raise e0 from None
+                warnings = warnings + [f"⚡ Основна модель Gemini ({main_m}) не почала відповідати вчасно — відповіла швидша {GEMINI_FAST}. "
+                                       "Якщо так часто: Railway → Variables → GEMINI_MODEL = gemini-flash-latest (або приберіть змінну)."]
         except ProviderError as e:
             info = e.info()
             fails = mark_error(pid, info)
