@@ -75,6 +75,7 @@ import orion_modes
 import lifetime_stats
 import sys
 import html as html_lib
+import shutil
 import tempfile
 from pathlib import Path
 from community import Community
@@ -2661,6 +2662,25 @@ async def _plugin_chat_answer(chat_id, text):
 
 
 APP_MEDIA = {}  # uid -> [{"name","url","size","kind"}] — показати в Mini App після завантаження
+
+
+def _app_keep_bytes(data: bytes, name: str):
+    """🖼 Копія фото/файлу, надісланого в чат із дії застосунку, — тимчасове посилання для показу в застосунку (3 год)."""
+    med = PLUGINS.get("med")
+    if not med or not hasattr(med, "keep"):
+        return None
+    import tempfile as _tf
+    d = Path(_tf.mkdtemp(prefix="orion-app-"))
+    f = d / (re.sub(r"[^\w.\- ]+", "_", name)[:80] or "файл")
+    f.write_bytes(data)
+    try:
+        return med.keep(f)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+import miniapp as _mini_keep  # noqa: E402
+_mini_keep.MEDIA_KEEPER = _app_keep_bytes
 
 PLUGINS = orion_plugins.Registry(orion_plugins.Host(
     data_dir=Path(os.path.dirname(DB_PATH) or "."),
