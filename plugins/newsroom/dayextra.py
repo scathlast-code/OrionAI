@@ -37,13 +37,31 @@ def tidy(text, date=""):
     t = re.sub(r"\[\s*(?:\.\.\.|…)?\s*\]", " ", text or "")
     t = re.sub(r"\s+", " ", t).strip(" ,:;—–-[](){}…»«\"'")
     t = re.sub(r"(?<=\S)\s*([—–])\s*(?=\S)", r" \1 ", t)
+    t = re.sub(r"^[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F\s]+", "", t)  # смайлик на початку — дата вже стоїть окремо
     if date:
         try:
             d = dt.date.fromisoformat(date)
-            t = re.sub(rf"^(?:з\s+|до\s+)?{d.day}\s+{MONTHS_GEN[d.month - 1]}(?:\s+{d.year}(?:\s+року)?)?\s*[,:—–-]?\s*", "", t, flags=re.I)
+            mon = MONTHS_GEN[d.month - 1]
+            t = re.sub(rf"^(?:з\s+|до\s+)?{d.day}\s+{mon}(?:\s+{d.year}(?:\s+року)?)?\s*[,:—–-]?\s*", "", t, flags=re.I)
+            # та сама дата всередині речення («у вівторок, 24 листопада, о 16:53») — прибираємо, якщо це не межа проміжку
+            t = re.sub(rf",?\s*(?<!по )(?<!до )(?<![–-] )(?<![–-])\b{d.day}\s+{mon}\b(?:\s+{d.year}(?:\s+року)?)?\s*,?", " ", t, flags=re.I)
+            t = re.sub(r"\s+([,.!?;:])", r"\1", re.sub(r"\s{2,}", " ", t)).strip()
         except ValueError:
             pass
     return (t[0].upper() + t[1:]) if t else t
+
+
+def dedupe(items):
+    """Одна подія — один рядок: та сама дата й те саме явище (повня, потік, затемнення…) з різних сайтів — лишаємо перший."""
+    out, seen = [], set()
+    for it in items or []:
+        m = ASTRO_RE.search(it.get("text", "")) or ASTROL_RE.search(it.get("text", ""))
+        k = (it.get("date", ""), m.group(0).lower()[:5] if m else _key(it.get("text", ""))[:20])
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(it)
+    return out
 
 
 def dates_in(text, year):
