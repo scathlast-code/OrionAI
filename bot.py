@@ -2618,19 +2618,19 @@ DEFAULT_GROUPS = {
 }
 DEFAULT_LAYOUT = [
     ["today", "home"], ["g:work", "home"], ["g:settings", "home"],
-    ["dl", "g:work"], ["zap", "g:work"], ["g:news", "g:work"], ["sp", "g:work"], ["pins", "g:work"], ["inbox", "g:work"], ["wx", "g:work"], ["cr", "g:work"],
+    ["dl", "g:work"], ["zap", "g:work"], ["g:news", "g:work"], ["sp", "g:work"], ["inbox", "g:work"], ["wx", "g:work"], ["cr", "g:work"],
     ["red", "g:news"], ["news", "g:news"], ["utm", "g:news"], ["col", "g:news"],
-    ["md", "g:settings"], ["st", "g:settings"], ["acc", "g:settings"], ["backup", "g:settings"], ["svc", "g:settings"],
+    ["md", "g:settings"], ["pins", "g:settings"], ["acc", "g:settings"], ["backup", "g:settings"], ["svc", "g:settings"],
     ["btns", "g:settings"], ["diag", "g:settings"], ["help", "g:settings"],
     # вкладки об'єднаних розділів: окремо в меню не стоять, але відкриваються з розділу-«хаба» (і їх можна повернути в меню в «🧭 Вигляд»)
     ["arc", "off"], ["trash", "off"], ["jrn", "off"], ["qask", "off"], ["prio", "off"], ["partners", "off"], ["ollama", "off"],
     ["lib", "off"], ["voice", "off"], ["comm", "off"], ["hubm", "off"], ["app", "off"], ["plg", "off"],
     ["runmode", "off"], ["links", "off"], ["sbx", "off"], ["imp", "off"], ["menu", "off"],
-    ["tl", "off"], ["nt", "off"], ["stk", "off"], ["med", "off"],  # тепер усередині «📓 Записника» й «🎬 Медійки»
+    ["tl", "off"], ["nt", "off"], ["stk", "off"], ["med", "off"], ["st", "off"],  # тепер усередині «📓 Записника» й «🎬 Медійки»
 ]
 
 L = Layout(ITEMS, DEFAULT_LAYOUT, DEFAULT_GROUPS, lambda c: prefs(c), lambda c, k, v: set_pref(c, k, v),
-           locked={"st"}, admin_items={"acc", "backup", "svc", "comm", "runmode", "links", "ollama", "news", "hubm"}, is_admin=lambda c: is_admin_id(c), use_kb=False)
+           locked={"md"}, admin_items={"acc", "backup", "svc", "comm", "runmode", "links", "ollama", "news", "hubm"}, is_admin=lambda c: is_admin_id(c), use_kb=False)
 
 
 def _migrate_compact_menu(chat_id):
@@ -2640,6 +2640,24 @@ def _migrate_compact_menu(chat_id):
         _migrate_menu_v8(chat_id)
         _migrate_menu_v9(chat_id)
         _migrate_menu_v10(chat_id)
+        _migrate_menu_v11(chat_id)
+
+
+def _migrate_menu_v11(chat_id):
+    """«🗂 Сховище» → у «⚙️ Налаштування»; «🎛 Поведінка» влилася в «🤖 ШІ-моделі»."""
+    p = prefs(chat_id)
+    if p.get("menu_v11"):
+        return
+    saved = [list(x) for x in (p.get("layout") or [])]
+    if saved:
+        out = [x for x in saved if x[0] not in ("pins", "st")]
+        pos = next((k + 1 for k, x in enumerate(out) if x[0] == "md"), None)
+        if pos is None:
+            pos = next((k + 1 for k, x in enumerate(out) if x[1] == "g:settings"), len(out))
+        out[pos:pos] = [["pins", "g:settings"]]
+        out.append(["st", "off"])
+        set_pref(chat_id, "layout", out)
+    set_pref(chat_id, "menu_v11", True)
 
 
 def _migrate_menu_v10(chat_id):
@@ -7995,8 +8013,10 @@ HUBS = {
         ("🗄 Архів — прибране з очей", "m:box:archived", 2, "all"),
         ("🗑 Кошик — 30 днів до видалення", "m:box:trash", 2, "all"),
     ]),
-    "md": ("🤖 ШІ-моделі", "Хто відповідає, чи всі моделі працюють, черговість і своя модель.", [
+    "md": ("🤖 ШІ-моделі", "Хто відповідає і як: моделі, їхній стан, черговість, пам'ять і стиль відповідей, голос.", [
         ("🤖 Хто відповідає", "m:md", 6, "all"),
+        ("🧠 Як відповідає", "m:st", 8, "all"),
+        ("🎙 Голос", "m:voice", 2, "open"),
         ("🩺 Стан моделей", "m:mdtest:show", 30, "all"),
         ("❓ Спитати одну модель", "m:qask", 1, "all"),
         ("🏆 Черговість запитів", "m:pr", 1, "open"),
