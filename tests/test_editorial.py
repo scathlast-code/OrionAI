@@ -50,4 +50,4 @@ def test_people_link_to_telegram(tmp_path):
     asyncio.run(p.route(None, None, 77, ["pme", k]))
     assert p.my_names(77) == ["Валентин"] and p.my_open(77) == (1, 1)
     t, _r = p.people_screen(77)
-    assert "⭐ <code>ВАЛЕНТИН</code>" in t
+    assert "<code>ВАЛЕНТИН</code>" in t and "⭐" not in t
