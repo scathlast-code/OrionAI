@@ -8284,7 +8284,7 @@ async def finish_wizard(update, ctx, chat_id):
 
 EDITOR_ACTIONS = {"btn", "bi", "bmv", "bup", "bdn", "bset", "lren", "lunren", "bgnew", "bgdel", "brl", "brldel", "breset"}
 VIEW_ACTIONS = {"devbk", "appm", "sbx", "imp", "home", "dl", "d", "f", "tl", "t", "md", "lim", "st", "nt", "cr", "canva", "pins", "box", "it", "acc",
-                "mem", "mdl", "mdv", "btn", "bi", "brl", "voice", "cpl", "cp", "bk", "fr", "svc", "sv", "svls", "diag", "jl", "j", "bks", "bkt", "bkls", "bkrs", "bkfmt", "bkscope", "lib", "mi", "note", "bl", "pr", "pri", "backup", "qask", "rm", "rw", "cl", "why", "mdtest", "hub", "today", "prem", "ava", "minfo", "xs", "ag"}
+                "mem", "mdl", "mdv", "btn", "bi", "brl", "voice", "cpl", "cp", "bk", "fr", "svc", "sv", "svls", "diag", "jl", "j", "bks", "bkt", "bkls", "bkrs", "bkfmt", "bkscope", "lib", "mi", "note", "bl", "pr", "pri", "backup", "qask", "rm", "rw", "cl", "why", "mdtest", "hub", "today", "prem", "ava", "minfo", "xs", "ag", "clfree"}
 
 
 def is_view(data):
@@ -9800,6 +9800,9 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         res = await sync_wakes(force=True)
         toast = (f"Додано {res[0]}, прибрано {res[1]}" if res else (NODE.get("cron_error") or "Без змін"))[:190]
         screen = scr_wake(chat_id)
+    elif a == "clfree":  # 🆓 безкоштовні сервери для бота
+        from cluster import free_hosts_screen
+        screen = free_hosts_screen(esc)
     elif a == "cl":
         screen = scr_cluster(chat_id)
     elif a == "clrun":
