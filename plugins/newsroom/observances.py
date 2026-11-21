@@ -605,7 +605,7 @@ class ObservancesUI:
             if any(self.verified(r["id"]) for r in days[:25] + ongoing[:12]):
                 lines.append("<i>✅N — скільки незалежних ресурсів підтверджують (посилання — одразу після рядка) · ⚠️1 — лише одне джерело, звіряйте</i>")
         if lines:
-            out.append(("days", f"📌 Дні · {len(days)}" if days else f"⏳ Триває · {len(ongoing)}", lines))
+            out.append(("days", f"📌 {'Сьогодні відзначається' if d == self.today() else 'Цього дня відзначається'} · {len(days)}" if days else f"⏳ Триває · {len(ongoing)}", lines))
         rest = [i for i in plan if id(i) not in used]
         if rest:  # 🗓 теми з контент-плану, яких немає серед днів; джерело — сама таблиця
             pl = []
@@ -742,7 +742,7 @@ class ObservancesUI:
         rows.append([(f"📝 Списки дня {'▾' if l_open else '▸'}", self.cb("obh", flip("l")))])
         if l_open:
             ymd = d.strftime("%Y%m%d")
-            cats = [("days", "📌 Дні")] + [(c, DB.CATS[c][0].split(" ", 1)[0] + " " + DB.CATS[c][0].split(" ", 1)[1].split(" ")[0]) for c in DB.LIST_CATS]
+            cats = [("days", "📌 Відзначається")] + [(c, DB.CATS[c][0].split(" ", 1)[0] + " " + DB.CATS[c][0].split(" ", 1)[1].split(" ")[0]) for c in DB.LIST_CATS]
             btns = [(label, self.cb("obl", f"{c}.{ymd}")) for c, label in cats]
             rows += [btns[i:i + 3] for i in range(0, len(btns), 3)]
             rows.append([("⚠️ Важливі попереду", self.cb("obup")), ("🔔 Попередження", self.cb("obws"))])
@@ -894,7 +894,7 @@ class ObservancesUI:
         """📝 Редагований список дня: торкніться пункту — змінити, затінити, зробити особистим."""
         d = dt.date(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8]))
         md = d.strftime("%m-%d")
-        title = "📌 Дні" if cat == "days" else DB.CATS[cat][0]
+        title = "📌 Відзначається" if cat == "days" else DB.CATS[cat][0]
         notes = Notes()  # джерело — посиланням одразу після кожного пункту
         if cat == "days":
             items = [(r["id"], self.obs_line(r, notes=notes)) for r in self.obs_on(d, chat)]
