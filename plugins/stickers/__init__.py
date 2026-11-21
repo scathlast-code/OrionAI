@@ -17,6 +17,7 @@ from pathlib import Path
 
 from plugins import Plugin as Base, esc
 from . import exporter as X
+from . import builder as B
 
 log = logging.getLogger("orion.plugins.stickers")
 CHECK_EVERY = 6 * 3600
@@ -26,6 +27,7 @@ CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, chat I
     files INTEGER, dups INTEGER, parts INTEGER, bytes INTEGER, errors INTEGER);
 CREATE TABLE IF NOT EXISTS tracked (id INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER, name TEXT, kind TEXT, title TEXT,
     signature TEXT, ids TEXT, count INTEGER, checked REAL, changed REAL, UNIQUE(chat, name));
+CREATE TABLE IF NOT EXISTS mysets (id INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER, name TEXT UNIQUE, title TEXT, kind TEXT, created REAL);
 CREATE TABLE IF NOT EXISTS prefs (chat INTEGER PRIMARY KEY, mode TEXT DEFAULT 'one', png INTEGER DEFAULT 0);
 """
 
@@ -44,7 +46,7 @@ class Plugin(Base):
                "один спільний архів без повторів або окремий архів на кожен пакет, великі архіви діляться на частини до 45 МБ. "
                "PNG-копії статичних стікерів, інформація про пакет, історія, стеження за оновленнями пакетів. "
                "Надішліть боту будь-який стікер — він запропонує завантажити весь пакет.")
-    VIEWS = {"hist", "trk", "help", "info"}
+    VIEWS = {"hist", "trk", "help", "info", "my", "ms"}
 
     def __init__(self, host):
         super().__init__(host)
@@ -53,6 +55,8 @@ class Plugin(Base):
             con.executescript(SCHEMA)
         self.pending: dict[str, tuple[int, str]] = {}   # токен -> (чат, текст із посиланнями)
         self.busy: set[int] = set()
+        self.draft: dict[int, dict] = {}   # чат -> {"title", "stickers": [...]} — новий набір у зборі
+        self.mode: dict[int, tuple[str, int]] = {}  # чат -> ("add"|"rm", id набору): стікери, що надходять, додаємо/прибираємо
         self.commands = [("stickerpack", self.cmd_pack, "Стікери: завантажити пакети за посиланнями")]
 
     def db(self):
@@ -97,7 +101,7 @@ class Plugin(Base):
             [("📥 Завантажити пакети", self.cb("in")), ("🔎 Про пакет", self.cb("infoask"))],
             [(("📦 Один архів" if p["mode"] == "one" else "🗂 Окремо"), self.cb("mode")),
              (("🖼 PNG: так" if p["png"] else "🖼 PNG: ні"), self.cb("png"))],
-            [("🧩 Вибрати окремі стікери", self.cb("selask"))],
+            [("🧩 Мої набори", self.cb("my")), ("🧩 Вибрати окремі", self.cb("selask"))],
             [("🕘 Історія", self.cb("hist")), ("👁 Стеження", self.cb("trk"))],
             [("ℹ️ Як це працює", self.cb("help")), ("« Плагіни", "m:pl")],
         ]
@@ -135,6 +139,87 @@ class Plugin(Base):
         rows.append([("« Стікери", self.cb())])
         return "\n".join(lines)[:4000], rows
 
+    # ================================================================ 🧩 мої набори
+    def mysets(self, chat):
+        with closing(self.db()) as con:
+            return [dict(r) for r in con.execute("SELECT * FROM mysets WHERE chat=? ORDER BY id DESC", (chat,))]
+
+    def myset(self, chat, sid):
+        with closing(self.db()) as con:
+            r = con.execute("SELECT * FROM mysets WHERE id=? AND chat=?", (int(sid), chat)).fetchone()
+        return dict(r) if r else None
+
+    def my_screen(self, chat):
+        rs = self.mysets(chat)
+        lines = ["🧩 <b>Мої набори</b>", "",
+                 "Створюйте власні набори стікерів чи емодзі: з нуля, зі стікерів інших пакетів (цілими пакетами або по одному), "
+                 "об'єднуйте кілька пакетів в один, чистьте повтори й прибирайте зайве. Набір з'являється у вашому Telegram.", ""]
+        rows = []
+        for r in rs:
+            tp = "емодзі" if r["kind"] == "custom_emoji" else "стікери"
+            lines.append(f'• <a href="https://t.me/{"addemoji" if r["kind"] == "custom_emoji" else "addstickers"}/{esc(r["name"])}">{esc(r["title"])}</a> · {tp}')
+            rows.append([(f"🧩 {r['title'][:28]}", self.cb("ms", r["id"]))])
+        rows.append([("➕ Новий набір", self.cb("newask")), ("🔀 Об'єднати пакети", self.cb("mergeask"))])
+        rows.append([("« Стікери", self.cb())])
+        return "\n".join(lines)[:4000], rows
+
+    async def set_screen(self, chat, sid, note=""):
+        r = self.myset(chat, sid)
+        if not r:
+            return self.my_screen(chat)
+        kind = "addemoji" if r["kind"] == "custom_emoji" else "addstickers"
+        try:
+            cur = await self.host.bot().get_sticker_set(r["name"])
+            count = f"{len(cur.stickers)} з {B.LIMIT.get(cur.sticker_type, 120)}"
+        except Exception as exc:  # noqa: BLE001
+            count = f"недоступний ({esc(type(exc).__name__)})"
+        m = self.mode.get(chat)
+        hint = {"add": "\n\n➕ <b>Режим додавання:</b> надсилайте стікери чи посилання на пакети — додам. «✅ Готово» — завершити.",
+                "rm": "\n\n➖ <b>Режим прибирання:</b> надсилайте стікери з цього набору — приберу. «✅ Готово» — завершити."}.get(
+                    m[0] if m and m[1] == int(sid) else "", "")
+        text = (f'🧩 <b>{esc(r["title"])}</b>\n<a href="https://t.me/{kind}/{esc(r["name"])}">t.me/{kind}/{esc(r["name"])}</a>\n'
+                f"Стікерів: {count}" + (f"\n\n{note}" if note else "") + hint)
+        rows = [[("➕ Додати", self.cb("madd", sid)), ("➖ Прибрати", self.cb("mrm", sid))],
+                [("🧹 Почистити повтори", self.cb("mclean", sid)), ("📤 Розкласти", self.cb("mout", sid))],
+                [("✅ Готово", self.cb("mdone", sid))] if m and m[1] == int(sid) else [("🗑 Видалити набір", self.cb("mdel", sid))],
+                [("« Мої набори", self.cb("my"))]]
+        return text, rows
+
+    def draft_screen(self, chat):
+        d = self.draft.get(chat) or {}
+        n = len(B.dedup(d.get("stickers", [])))
+        text = (f"➕ <b>Новий набір «{esc(d.get('title', ''))}»</b>\n\n"
+                "Надсилайте стікери по одному або посилання на пакети (можна кілька) — я збираю. "
+                "Тип набору (стікери чи емодзі) — за першим стікером. Повтори прибираю сам.\n\n"
+                f"Зібрано: {n}" + ("\n" + "\n".join("⚠️ " + esc(x) for x in d.get("skipped", [])[-5:]) if d.get("skipped") else ""))
+        rows = [[(f"✅ Створити · {n}", self.cb("mk"))] if n else [], [("✖️ Скасувати", self.cb("mkno"))]]
+        return text, [r for r in rows if r]
+
+    async def unpack(self, chat, name):
+        """📤 Розкласти: кожен стікер окремим повідомленням — щоб переслати, зберегти чи вибрати потрібні."""
+        bot = self.host.bot()
+        s = await bot.get_sticker_set(name)
+        for st in s.stickers:
+            try:
+                await bot.send_sticker(chat, st.file_id)
+            except Exception:  # noqa: BLE001
+                log.info("розкласти: не надіслано", exc_info=True)
+            await asyncio.sleep(0.05)
+        await self.host.notify(chat, f"📤 Розклав «{esc(s.title)}»: {len(s.stickers)} шт.", [[("« Мої набори", self.cb("my"))]])
+
+    async def _make(self, chat):
+        d = self.draft.pop(chat, None) or {}
+        bot = self.host.bot()
+        try:
+            name, kind, added, skipped = await B.create(bot, chat, d.get("title") or "Мій набір", d.get("stickers", []), bot.username)
+        except Exception as exc:  # noqa: BLE001
+            return f"⚠️ Не вдалося створити: {exc}", self.my_screen(chat)
+        with closing(self.db()) as con, con:
+            cur = con.execute("INSERT INTO mysets(chat,name,title,kind,created) VALUES(?,?,?,?,?)", (chat, name, d.get("title") or "Мій набір", kind, time.time()))
+            sid = cur.lastrowid
+        note = f"✅ Створено: {added}" + (f" · пропущено {skipped} (інший тип чи ліміт)" if skipped else "")
+        return "✅ Набір створено", await self.set_screen(chat, sid, note)
+
     def help_screen(self):
         text = ("ℹ️ <b>Стікери: як це працює</b>\n\n"
                 "• Працює через офіційний Telegram Bot API (getStickerSet + getFile) — без входу у ваш акаунт.\n"
@@ -171,6 +256,64 @@ class Plugin(Base):
         if a == "selask":
             self.ask(chat, "select")
             return None, ("🧩 Надішліть посилання на пакети — прийде архів-чернетка з кнопками вибору.", [[("✖️ Скасувати", "m:cancel")]])
+        if a == "my":
+            return None, self.my_screen(chat)
+        if a == "ms":
+            return None, await self.set_screen(chat, x)
+        if a == "newask":
+            self.ask(chat, "newtitle")
+            return None, ("➕ <b>Новий набір</b>\n\nЯк його назвати?", [[("✖️ Скасувати", "m:cancel")]])
+        if a == "mergeask":
+            self.ask(chat, "merge")
+            return None, ("🔀 <b>Об'єднати пакети</b>\n\nНадішліть посилання на 2+ пакети одного типу (стікери або емодзі), "
+                          "а першим рядком — назву нового набору. Повтори приберу, пакети російською чи 18+ — пропущу.", [[("✖️ Скасувати", "m:cancel")]])
+        if a == "mk":
+            self.host.cancel_input(chat)
+            return await self._make(chat)
+        if a == "mkno":
+            self.draft.pop(chat, None)
+            self.mode.pop(chat, None)
+            self.host.cancel_input(chat)
+            return "Скасовано", self.my_screen(chat)
+        if a in ("madd", "mrm"):
+            if not self.myset(chat, x):
+                return "Не знайдено", self.my_screen(chat)
+            self.mode[chat] = ("add" if a == "madd" else "rm", int(x))
+            if a == "madd":
+                self.ask(chat, "addlinks", int(x))
+            return None, await self.set_screen(chat, x)
+        if a == "mdone":
+            self.mode.pop(chat, None)
+            self.host.cancel_input(chat)
+            return "Готово", await self.set_screen(chat, x)
+        if a == "mclean":
+            r = self.myset(chat, x)
+            n = await B.clean(self.host.bot(), r["name"]) if r else 0
+            return (f"🧹 Прибрано повторів: {n}" if n else "Повторів немає"), await self.set_screen(chat, x)
+        if a == "mout":
+            r = self.myset(chat, x)
+            if r:
+                self._bg(self.unpack(chat, r["name"]))
+            return "📤 Надсилаю по одному…", None
+        if a == "mdel":
+            return None, ("🗑 Видалити набір назавжди? У Telegram він зникне в усіх.",
+                          [[("🗑 Так, видалити", self.cb("mdel2", x)), ("« Ні", self.cb("ms", x))]])
+        if a == "mdel2":
+            r = self.myset(chat, x)
+            if r:
+                try:
+                    await self.host.bot().delete_sticker_set(r["name"])
+                except Exception:  # noqa: BLE001
+                    log.info("видалення набору", exc_info=True)
+                with closing(self.db()) as con, con:
+                    con.execute("DELETE FROM mysets WHERE id=?", (int(x),))
+            return "Видалено", self.my_screen(chat)
+        if a == "outp" and x in self.pending:  # 📤 розкласти будь-який пакет
+            _o, text = self.pending[x]
+            packs = X.parse_links(text)
+            if packs:
+                self._bg(self.unpack(chat, packs[0][1]))
+            return "📤 Надсилаю по одному…", None
         if a == "mode":
             p = self.prefs(chat)
             self.set_pref(chat, mode="each" if p["mode"] == "one" else "one")
@@ -230,10 +373,37 @@ class Plugin(Base):
         except Exception as exc:  # noqa: BLE001
             return f"⚠️ Не вдалося отримати пакет «{esc(name)}»: {esc(exc)}", [[("« Стікери", self.cb())]]
         t = self._token(chat, f"t.me/{kind}/{name}")
-        return self.info_text(info), [[("📦 Завантажити", self.cb("go", t)), ("👁 Стежити", self.cb("trk1", t))], [("« Стікери", self.cb())]]
+        return self.info_text(info), [[("📦 Завантажити", self.cb("go", t)), ("👁 Стежити", self.cb("trk1", t))],
+                                      [("📤 Розкласти по одному", self.cb("outp", t))], [("« Стікери", self.cb())]]
 
     async def on_text(self, update, ctx, chat, key, data, text):
         packs = X.parse_links(text)
+        bot = self.host.bot()
+        if key == "newtitle":
+            self.draft[chat] = {"title": text.strip()[:64], "stickers": [], "skipped": []}
+            self.ask(chat, "newsrc")
+            return None, self.draft_screen(chat)
+        if key == "newsrc":
+            d = self.draft.setdefault(chat, {"title": "Мій набір", "stickers": [], "skipped": []})
+            got, skipped = await B.pack_stickers(bot, [n for _k, n in packs])
+            d["stickers"] += got
+            d["skipped"] += skipped
+            self.ask(chat, "newsrc")
+            return None, self.draft_screen(chat)
+        if key == "merge":
+            title = text.strip().splitlines()[0] if text.strip() else ""
+            title = "Об'єднаний набір" if X.parse_links(title) or not title else title[:64]
+            got, skipped = await B.pack_stickers(bot, [n for _k, n in packs])
+            self.draft[chat] = {"title": title, "stickers": got, "skipped": skipped}
+            return await self._make(chat)
+        if key == "addlinks":
+            r = self.myset(chat, data)
+            if not r:
+                return "Не знайдено", self.my_screen(chat)
+            got, skipped = await B.pack_stickers(bot, [n for _k, n in packs])
+            added, sk = await B.add(bot, chat, r["name"], got)
+            self.ask(chat, "addlinks", data)
+            return f"➕ Додано: {added}", await self.set_screen(chat, data, f"➕ Додано {added}" + (f" · пропущено {sk + len(skipped)}" if sk or skipped else ""))
         if not packs:
             return "Не знайшов посилань на пакети", (
                 "⚠️ Потрібні посилання виду <code>https://t.me/addstickers/НАЗВА</code> або <code>https://t.me/addemoji/НАЗВА</code>.",
@@ -271,7 +441,33 @@ class Plugin(Base):
     async def on_sticker(self, update, ctx):
         msg = update.message
         st = msg.sticker if msg else None
-        if not st or not st.set_name or msg.chat.type != "private":
+        if not st or msg.chat.type != "private":
+            return False
+        chat = msg.chat_id
+        if chat in self.draft:  # збираємо новий набір
+            self.draft[chat]["stickers"].append(st)
+            t, rows = self.draft_screen(chat)
+            await self.host.notify(chat, t, rows)
+            return True
+        m = self.mode.get(chat)
+        if m:
+            r = self.myset(chat, m[1])
+            bot = self.host.bot()
+            try:
+                if m[0] == "add" and r:
+                    added, _sk = await B.add(bot, chat, r["name"], [st])
+                    note = "➕ Додано" if added else "Вже є в наборі або інший тип"
+                elif r and st.set_name == r["name"]:
+                    await bot.delete_sticker_from_set(st.file_id)
+                    note = "➖ Прибрано"
+                else:
+                    note = "Цей стікер не з цього набору"
+            except Exception as exc:  # noqa: BLE001
+                note = f"⚠️ {type(exc).__name__}"
+            t, rows = await self.set_screen(chat, m[1], note)
+            await self.host.notify(chat, t, rows)
+            return True
+        if not st.set_name:
             return False
         kind = "addemoji" if st.type == "custom_emoji" else "addstickers"
         t = self._token(msg.chat_id, f"t.me/{kind}/{st.set_name}")
