@@ -27,8 +27,8 @@ def test_parse_wiki_and_kinds():
 def test_calendar_logic_scan_and_screens(tmp_path):
     p, sent = news(tmp_path)
     p.today = lambda: dt.date(2026, 11, 6)
-    p.obs_add("День супу", "day", "11-06", "11-06", 1, "ваш запис")
-    p.obs_add("Тиждень інформування про грип", "week", "11-03", "11-09", 1, "ваш запис")
+    p.obs_add("День супу", "day", "11-06", "11-06", 1, "ваш запис", "https://uk.wikipedia.org/wiki/6_листопада")
+    p.obs_add("Тиждень інформування про грип", "week", "11-03", "11-09", 1, "ваш запис", "https://example.org/flu")
     p.obs_add("Новорічний місячник", "month", "12-15", "01-15", 1, "ваш запис")      # через межу року
     titles = [r["title"] for r in p.obs_on(dt.date(2026, 11, 6))]
     assert "День супу" in titles and "Тиждень інформування про грип" in titles and "Movember — місяць чоловічого здоров'я" in titles
@@ -79,7 +79,7 @@ def test_daybook_sections_importance_astro():
 def test_lists_edit_shadow_personal(tmp_path):
     p, sent = news(tmp_path)
     p.today = lambda: dt.date(2026, 11, 20)
-    p.obs_add("Всесвітній день довкілля", "day", "11-20", "11-20", 1, "Вікіпедія")
+    p.obs_add("Всесвітній день довкілля", "day", "11-20", "11-20", 1, "Вікіпедія", "https://uk.wikipedia.org/wiki/20_листопада")
     p.db_add("11-20", "history", "1945 — почався процес", "https://x")
     t, rows = p.obs_home(1, "l")
     assert "Історія" in t and "‼️" in t and "Підготував" in t

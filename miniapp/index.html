@@ -87,6 +87,11 @@ details{margin:2px 0}details summary{cursor:pointer;color:var(--hint);font-size:
 .feedcard{background:var(--card);border-radius:14px;padding:10px 12px;margin:8px 0}.feedcard.new{box-shadow:inset 3px 0 0 var(--acc)}
 .feedcard small{color:var(--hint);font-size:12px}.ftext{margin-top:4px;overflow-wrap:anywhere}.frows{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .frows button{border:0;border-radius:10px;padding:6px 10px;font:inherit;font-size:13px;background:color-mix(in srgb,var(--acc) 14%,transparent);color:var(--acc)}
+/* 🏃 довга назва кнопки не обрізається, а повільно «пробігає» (туди-назад), як у бігучому рядку */
+button.mq{text-overflow:clip!important}
+button.mq>.mqt{display:inline-block;will-change:transform;animation:mqrun var(--mqd,6s) ease-in-out infinite alternate}
+@keyframes mqrun{0%,18%{transform:translateX(0)}82%,100%{transform:translateX(var(--mqx,0))}}
+@media (prefers-reduced-motion:reduce){button.mq>.mqt{animation:none}button.mq{text-overflow:ellipsis!important}}
 </style>
 </head>
 <body>
@@ -414,6 +419,17 @@ function drawCards(main,cards){ // кожне посилання — окрем�
     let last=0;box.addEventListener('click',e=>{if(e.target.closest('details'))return;const n=Date.now();if(n-last<350){copyText(c.value,box);last=0}else last=n});
     box.addEventListener('dblclick',e=>{e.preventDefault()});list.appendChild(box)}
   main.appendChild(list)}
+// 🏃 бігучий текст для кнопок, чия назва не вміщається (замість «…» — видно повну назву)
+function marquee(root){(root||document).querySelectorAll('button').forEach(b=>{
+  if(b.dataset.mq||b.children.length&&!b.querySelector(':scope>.mqt'))return;
+  const txt=b.textContent;if(!txt||b.clientWidth<40)return;
+  if(b.scrollWidth<=b.clientWidth+2)return;
+  b.dataset.mq='1';b.classList.add('mq');const sp=document.createElement('span');sp.className='mqt';sp.textContent=txt;b.textContent='';b.appendChild(sp);
+  const cs=getComputedStyle(b);const room=b.clientWidth-parseFloat(cs.paddingLeft)-parseFloat(cs.paddingRight);const over=sp.scrollWidth-room;
+  if(over<=2){b.classList.remove('mq');b.textContent=txt;return}
+  b.style.setProperty('--mqx',(-over-4)+'px');b.style.setProperty('--mqd',Math.max(3,over/18)+'s')})}
+let mqTimer=null;new MutationObserver(()=>{clearTimeout(mqTimer);mqTimer=setTimeout(()=>marquee(document.getElementById('main')),120)})
+  .observe(document.body,{childList:true,subtree:true});
 async function openMenu(push=true){
   const my=++seq; if(push && cur && curView && cur!=='menu') hist.push(cur); cur='menu'; curView=true; curTitle='☰'; syncBack();
   if(menuCache) renderMenu(menuCache); else {tabs();loading()}
