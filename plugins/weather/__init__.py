@@ -502,6 +502,9 @@ class WeatherPlugin(Plugin):
         day = day or now.date()
         key = day.strftime("%m-%d")
         c = self.cfg()
+        if c.get("lore_v") != 2:  # прикмети, зібрані до обов'язкової перевірки, — перезбираємо й перевіряємо
+            c["lore"], c["lore_v"] = {}, 2
+            self.save(c)
         cached = (c.get("lore") or {}).get(key)
         import langguard
         if cached and not langguard.foreign(cached):  # старий кеш з іншомовними словами — перезбираємо

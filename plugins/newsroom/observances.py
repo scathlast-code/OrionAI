@@ -511,6 +511,10 @@ class ObservancesUI:
         """Народні прикмети: з Вікіпедії, а якщо там порожньо — із плагіна погоди (ШІ, раз на дату)."""
         md = d.strftime("%m-%d")
         import langguard
+        if self.store.get("lore_cache_v") != 2:  # зібране до обов'язкової перевірки — наново
+            self.store.set("lore_cache", {})
+            self.store.set("garden_cache", {})
+            self.store.set("lore_cache_v", 2)
         lc = self.store.get("lore_cache") or {}
         if lc.get(md) and langguard.foreign(lc[md]):  # кеш з іншомовними вставками — збираємо наново
             lc.pop(md)
