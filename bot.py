@@ -9063,7 +9063,7 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
             create_planned_task(chat_id, src["text"][:1000])
             toast, screen = "✅ Записано в завдання", None
         elif act == "dl":
-            med = PLUGINS.get("media")
+            med = PLUGINS.get("med")
             url = TS.URL_RE.search(src["text"]).group(0)
             if med and hasattr(med, "start_quick"):
                 toast, screen = med.start_quick(chat_id, url) or "⬇️ Завантажую — стан і файл прийдуть сюди", None
