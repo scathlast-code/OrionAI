@@ -525,7 +525,12 @@ class ObservancesUI:
         if notes is not None:
             src = notes.mark(it.get("url"), _src_label(it.get("url"))) if str(it.get("url") or "").startswith("http") else \
                 (" · <i>ваш запис</i>" if it.get("owner") else "")
-        return ("👤 " if it.get("owner") else "") + mark + esc(it["text"]) + src
+        text = re.sub(r"\s*\([^)]*[\u3040-\u30ff\u4e00-\u9fff\uac00-\ud7af][^)]*\)", "", it["text"])  # ієрогліфи в дужках — геть
+        emo = DB.topic_emoji(text) + " " if it.get("cat") in ("born", "died", "history", "discover") else ""
+        body = esc(text)
+        if mark and notes is not None:  # ❗ наша тема — жирним (у списку ще й цитатою)
+            body = f"<b>{body}</b>"
+        return ("👤 " if it.get("owner") else "") + mark + emo + body + src
 
     def db_get(self, iid):
         with closing(self.store.db()) as con:
@@ -1215,7 +1220,8 @@ class ObservancesUI:
         page = max(0, min(int(page or 0), max(0, (len(items) - 1) // per)))
         chunk = items[page * per:(page + 1) * per]
         lines = [f"<b>{title} · {d.day} {MONTHS_GEN[d.month - 1]}</b>", ""]
-        lines += [f"{page * per + i + 1}. {t}" for i, (_id, t) in enumerate(chunk)] or ["Порожньо."]
+        lines += [(f"<blockquote>{page * per + i + 1}. {t}</blockquote>" if ("❗" in t[:8] or "‼️" in t[:12]) else f"{page * per + i + 1}. {t}")
+                  for i, (_id, t) in enumerate(chunk)] or ["Порожньо."]  # ❗ важливе — окремою цитатою
         lines += ["", "Торкніться номера, щоб змінити. Затінене не повертається при оновленні; додане — повторюється щороку. "
                   "Спільне редагують усі, 👤 особисте — лише ви."]
         open_ = "ob" if cat == "days" else "obi"
