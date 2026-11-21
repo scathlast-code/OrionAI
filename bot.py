@@ -2173,21 +2173,42 @@ async def push_invite(bot, key):
         uid = None  # за @username бот людину не шукає: про незнайомих він нічого не зберігає
     if not uid or member_status(uid) == "blocked":
         return False
-    try:
-        await bot.send_message(uid, INVITE_TEXT, reply_markup=kb([[("✅ Згоден(-на)", "cons:yes"), ("❌ Не згоден(-на)", "cons:no")]]))
+    if member_status(uid) != "pending" and str(uid) not in seen_users():
+        return False  # ще не натискав «Старт» — дозвіл чекатиме на нього
+    try:  # уже натискав «Старт» — це і є згода: відкриваємо доступ одразу, без додаткових питань
+        ch = await bot.get_chat(uid)
+        user = type("U", (), {"id": uid, "full_name": " ".join(x for x in (ch.first_name, ch.last_name) if x) or str(uid), "username": ch.username})()
+        preinvite_remove(key)
+        await welcome_approved(bot, user, "раніше, а ви дали дозвіл")
         return True
     except Exception as exc:  # noqa: BLE001 — людина ще не відкривала бота або заблокувала його
         log.info("запрошення %s не надіслано: %s", key, exc)
         return False
 
 
+async def welcome_approved(bot, user, how="за вашим дозволом"):
+    """Людина, якій доступ дали заздалегідь, натиснула «Старт» — це й є її згода: доступ одразу, без схвалень."""
+    member_upsert(user, "approved")
+    member_set(user.id, "approved")
+    await bot.send_message(user.id, "👋 Ласкаво просимо! Доступ до бота й застосунку відкрито.", reply_markup=menu_kb(user.id))
+    t, r = scr_home(user.id)
+    await bot.send_message(user.id, t, parse_mode=ParseMode.HTML, reply_markup=kb(r))
+    who = esc(user.full_name) + (f" (@{esc(user.username)})" if user.username else "")
+    for admin in admin_ids():
+        try:
+            await bot.send_message(admin, f"✅ {who} натиснув(-ла) «Старт» {how} — тепер має доступ до бота й застосунку.",
+                                   parse_mode=ParseMode.HTML, reply_markup=kb([[("👥 Доступ", "m:acc")]]))
+        except Exception:  # noqa: BLE001
+            log.info("сповіщення про нового учасника не надіслано %s", admin)
+
+
 async def deny(update: Update):
-    if preinvite_match(update.effective_user) and member_status(update.effective_user.id) != "blocked":
-        markup = kb([[("✅ Згоден(-на)", "cons:yes"), ("❌ Не згоден(-на)", "cons:no")]])
-        text = INVITE_TEXT
+    key = preinvite_match(update.effective_user)
+    if key and member_status(update.effective_user.id) != "blocked":
+        preinvite_remove(key)
         if update.callback_query:
             await update.callback_query.answer()
-        return await update.effective_chat.send_message(text, reply_markup=markup)
+        return await welcome_approved(update.get_bot(), update.effective_user)
     st = member_status(update.effective_user.id)
     if st in (None, "removed") and owner_id() and update.effective_user.id != owner_id():
         # Хто натиснув «Старт» — одразу заявка власнику з кнопкою «Дати доступ». Після схвалення бот просто починає працювати.
@@ -3928,7 +3949,7 @@ def scr_access():
         lines.append(f"\n🔗 {uses}, до {datetime.fromtimestamp(inv['expires'], TZ).strftime('%d.%m')}:\n<code>{esc(invite_link(inv['code']))}</code>")
     pre = preinvites_list()
     for x in pre:
-        lines.append(f"\n⏳ Додано вами, чекає згоди: <b>{esc(x['key'])}</b> — людина має відкрити бота й погодитись")
+        lines.append(f"\n⏳ Дозволено заздалегідь: <b>{esc(x['key'])}</b> — доступ відкриється, щойно людина натисне «Старт»")
     rows = [[("🔗 Одноразове запрошення", "m:inv:1"), ("♾ На 7 днів", "m:inv:0")], [("➕ Додати за @ім'ям чи ID", "m:addmem")]]
     rows += [[(f"🚫 Скасувати додавання {x['key']}", f"m:prex:{x['key']}")] for x in pre]
     for m in pending:
@@ -9271,7 +9292,7 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         ask_input(chat_id, "addmem")
         screen = (
             "➕ <b>Кого додати?</b>\nНапишіть @username або числовий ID акаунта Telegram.\n\n"
-            "Після цього людина має один раз відкрити бота (знайти в пошуку Telegram) — бот спитає її згоди.",
+            "Це дозвіл заздалегідь: щойно людина сама натисне «Старт», доступ до бота й застосунку відкриється одразу — без жодних підтверджень.",
             [CANCEL_ROW],
         )
     elif a == "prex":
@@ -9667,10 +9688,10 @@ async def _handle_awaited(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text):
         key = preinvite_add(text)
         link = f"https://t.me/{BOT_USERNAME}" if BOT_USERNAME else "бот у пошуку Telegram"
         if await push_invite(ctx.bot, key):
-            note = f"✅ {esc(key)} додано. Ця людина вже знайома з ботом — запит на згоду їй уже надіслано, чекаємо відповіді."
+            note = f"✅ {esc(key)} — ця людина вже натискала «Старт», тож доступ відкрито одразу й вона вже отримала привітання."
         else:
             note = (f"✅ {esc(key)} додано. Бот поки не може написати цій людині першим (Telegram дозволяє це лише після «Старт»). "
-                    f"Надішліть їй {esc(link)} — після «Старт» вона одразу побачить запит на згоду.")
+                    f"Надішліть їй {esc(link)} — щойно вона натисне «Старт», доступ відкриється сам, без жодних підтверджень.")
         t, r = scr_access()
         return await reply_html(update, note + "\n\n" + t, kb(r))
     if action == "nadd":
@@ -9726,20 +9747,10 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if member_status(user.id) == "blocked":
             return await deny(update)
         code = ctx.args[0][4:]
-        if member_status(user.id) != "pending":
-            if not invite_use(code):
-                return await update.message.reply_text("Це запрошення недійсне або вже використане. Попросіть у власника нове.")
-            member_upsert(user, "pending", code)
-            who = esc(user.full_name) + (f" (@{esc(user.username)})" if user.username else "")
-            await ctx.bot.send_message(
-                owner_id(),
-                f"👥 <b>Новий запит на доступ</b>\n{who}\nID: <code>{user.id}</code>\n\nЛюдина прийшла за вашим запрошенням.",
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb([[("✅ Дозволити", f"m:accok:{user.id}"), ("❌ Відхилити", f"m:accno:{user.id}")]]),
-            )
-        return await update.message.reply_text(
-            "👋 Вітаю! Запит на доступ надіслано власнику бота. Щойно він підтвердить, я напишу вам."
-        )
+        if not invite_use(code):
+            return await update.message.reply_text("Це запрошення недійсне або вже використане. Попросіть у власника нове.")
+        member_upsert(user, "approved", code)  # посилання-запрошення — це вже дозвіл власника; «Старт» — згода людини
+        return await welcome_approved(ctx.bot, user, "за посиланням-запрошенням")
     if ctx.args and ctx.args[0].startswith("inb_") and is_admin_id(user.id):  # 📮 дотик до імені людини → переписка з нею
         inb = PLUGINS.get("inb")
         uid = ctx.args[0][4:]
