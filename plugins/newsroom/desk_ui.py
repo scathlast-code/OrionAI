@@ -215,6 +215,7 @@ class DeskUI:
             data["notes"] = (extra_note + " " + data["notes"]).strip()
         kind = "article" if size == "big" else "news"
         did = self.store.add_draft(None, data, kind=kind, model=model, status="draft")
+        self._autocheck(did)  # 🔎 кожна чернетка перевіряється одразу: факти й мова
         if story_id:
             self.desk.add_ref(story_id, "draft", did, data["headline"], relation=tkey)
         for f in finds[:5]:

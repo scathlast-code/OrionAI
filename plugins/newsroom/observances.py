@@ -121,7 +121,7 @@ def _src_label(url, fallback=""):
     if "wikipedia.org" in u:
         from urllib.parse import unquote
         page = unquote(u.split("/wiki/")[-1]).replace("_", " ")
-        return "Вікіпедія · " + page.replace("#", " → ")
+        return "Вікіпедія (" + page.replace("#", " → ") + ")"
     return fallback
 
 
@@ -366,6 +366,8 @@ class ObservancesUI:
         lines = [self.obs_line(r, link=with_links, notes=notes) for r in days[:25]]
         if ongoing:
             lines += ["", "<b>Триває:</b>"] + [self.obs_line(r, link=with_links, notes=notes) for r in ongoing[:12]]
+        if notes is not None and lines:
+            lines.append(notes.flush())
         if lines:
             out.append(("days", f"📌 Дні · {len(days)}" + (f" · триває {len(ongoing)}" if ongoing else ""), lines))
         for cat in DB.LIST_CATS:
@@ -376,18 +378,20 @@ class ObservancesUI:
                     items = [{"text": x, "owner": 0} for x in cached.splitlines() if x.strip()]
             if items:
                 cap = {"history": 12, "born": 10, "died": 8}.get(cat, 15)
-                urls = {it.get("url") or "" for it in items[:cap]}
-                one = notes is not None and len(urls) == 1  # одне джерело на весь список — зноска біля заголовка
                 body = [("👤 " if it.get("owner") else "") + esc(it["text"])
-                        + (notes.mark(it.get("url"), _src_label(it.get("url"))) if notes is not None and not one else "") for it in items[:cap]]
+                        + (notes.mark(it.get("url"), _src_label(it.get("url"))) if notes is not None else "") for it in items[:cap]]
                 if notes is not None and cat == "lore" and not any(str(it.get("url") or "").startswith("http") for it in items):
                     body.append("<i>(зібрано ШІ з відомих народних прикмет — звіряйте)</i>")
                 if len(items) > cap:
                     body.append(f"… ще {len(items) - cap} — у «📝 Списки»")
-                head_ = DB.CATS[cat][0] + (notes.mark(next(iter(urls)), _src_label(next(iter(urls)))) if one else "")
-                out.append((cat, head_, body))
-        out.append(("astro", DB.CATS["astro"][0] + (notes.mark("https://gml.noaa.gov/grad/solcalc/", "NOAA · розрахунок Сонця й Місяця")
-                                                     if notes is not None else ""), DB.astro_lines(d, self.host.tz)))
+                if notes is not None:
+                    body.append(notes.flush())
+                out.append((cat, DB.CATS[cat][0], [x for x in body if x]))
+        astro = DB.astro_lines(d, self.host.tz)
+        if notes is not None:
+            notes.mark("https://gml.noaa.gov/grad/solcalc/", "NOAA (розрахунок Сонця й Місяця)")
+            astro = astro + [notes.flush()]
+        out.append(("astro", DB.CATS["astro"][0], astro))
         out.append(("astrol", DB.CATS["astrol"][0], DB.astrol_lines(d)))
         g = (self.store.get("garden_cache") or {}).get(self.garden_key(d))
         if g:
@@ -455,7 +459,7 @@ class ObservancesUI:
         tail += (f"\n<i>Підготував {esc(who)} · {dt.datetime.now(self.host.tz) if self.host.tz else dt.datetime.now():%d.%m %H:%M}"
                  f" · джерела: Вікіпедія, канали, ваші записи · 📚 {cov}/366{'' if cov >= 366 else ' вантажиться'}"
                  f" · ⏰ {hm if on else 'вимк.'}</i>")
-        tail = notes.legend() + tail
+        notes.cur = []
         text = self.fit(head, parts, tail)
         open_ = open_ or ""
         t_open, m_open, l_open = "t" in open_, "m" in open_, "l" in open_
@@ -481,7 +485,7 @@ class ObservancesUI:
                      [("🗓 Календар", self.cb("obc", d.strftime("%Y%m"))), ("➕ Своя тема", self.cb("oba"))],
                      [("🌱 Поради саду", self.cb("obg")), ("📜 Прикмети", self.cb("obj"))],
                      [("🔄 Оновити з інтернету", self.cb("obu")), (("⏰ " + hm) if on else "⏰ вимк.", self.cb("obm"))]]
-        rows.append([("🔗 Вікіпедія", "url:" + self.wiki_day_url(d)), ("« Знайти й написати", self.cb("D"))])
+        rows.append([("« Знайти й написати", self.cb("D"))])  # джерела — зносками під кожною частиною, не кнопками
         return text, rows
 
     async def obs_digest(self, chat):
@@ -506,7 +510,12 @@ class ObservancesUI:
     async def ensure_lore(self, d):
         """Народні прикмети: з Вікіпедії, а якщо там порожньо — із плагіна погоди (ШІ, раз на дату)."""
         md = d.strftime("%m-%d")
-        if self.db_items(md, "lore") or (self.store.get("lore_cache") or {}).get(md):
+        import langguard
+        lc = self.store.get("lore_cache") or {}
+        if lc.get(md) and langguard.foreign(lc[md]):  # кеш з іншомовними вставками — збираємо наново
+            lc.pop(md)
+            self.store.set("lore_cache", lc)
+        if self.db_items(md, "lore") or lc.get(md):
             return
         wx = self.host.extra.get("plugin", lambda pid: None)("wx")
         if not wx:
@@ -524,6 +533,9 @@ class ObservancesUI:
         """🌱 Поради саду, городу, господарству й тваринам на цю декаду місяця (ШІ, раз на декаду)."""
         key = self.garden_key(d)
         cache = self.store.get("garden_cache") or {}
+        import langguard
+        if cache.get(key) and langguard.foreign(cache[key]):
+            force = True
         if (cache.get(key) and not force) or not self.host.ask_ai:
             return cache.get(key, "")
         part = ("на початку", "в середині", "наприкінці")[int(key[-1]) - 1]
@@ -536,6 +548,11 @@ class ObservancesUI:
         except Exception:  # noqa: BLE001
             return ""
         text = re.sub(r"[*_#`]+", "", (text or "").strip())[:1500]
+        import langguard
+
+        async def _rev_ask(pr):  # 🔎 перевіряє ІНША модель, ніж та, що писала
+            return (await self.host.ask_ai(pr, label="🔎 Перевірка порад", avoid=_m))[0]
+        text = re.sub(r"[*_#`]+", "", await langguard.review(text, _rev_ask, "поради саду й господарству на цю пору"))[:1500]
         if text:
             cache[key] = text
             self.store.set("garden_cache", cache)

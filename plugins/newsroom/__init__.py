@@ -242,6 +242,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
         if item["related_to"]:
             data["notes"] = (f"🔗 Схоже на матеріал #{item['related_to']} — можливо, оновлення події. " + data["notes"]).strip()
         did = self.store.add_draft(iid, data, model=model, target=target, status="draft" if ok else "length_mismatch")
+        self._autocheck(did)  # 🔎 кожна чернетка перевіряється одразу: факти й мова
         self.store.set_item(iid, status="done", photo="", error="")
         it2 = self.store.item(iid)
         if it2.get("story_id"):
@@ -1471,6 +1472,28 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
             await self.host.notify(chat, f"📏 #{did}: вийшло {n} замість {d['target']} після 5 спроб. Схвалення заблоковано — спробуйте ще раз або змініть довжину.")
         await self.host.notify(chat, *self.card(did))
 
+    def _autocheck(self, did):
+        """🔎 Автоматична перевірка нової чернетки: звірка фактів із джерелами + мова (іншомовні вставки), у фоні."""
+        async def go():
+            d = self.store.draft(did)
+            if not d:
+                return
+            try:
+                report = await self.engine.check(d, self.host.search)
+            except Exception as exc:  # noqa: BLE001
+                report = f"⚠️ Автоматична звірка не вдалася: {exc}"
+            import langguard
+            bits = langguard.foreign((d.get("headline") or "") + "\n" + (d.get("body") or ""))
+            if bits:
+                report = (report or "") + "\n🔤 Іншомовні вставки — замініть: " + ", ".join(bits[:10])
+            self.store.update_draft(did, keep_version=True, check_report=report or "✅ Перевірено автоматично: зауважень немає")
+        try:
+            t = asyncio.get_running_loop().create_task(go())
+            self.__dict__.setdefault("_auto_tasks", set()).add(t)
+            t.add_done_callback(lambda x: self._auto_tasks.discard(x))
+        except RuntimeError:
+            pass
+
     async def _check(self, chat, did):
         d = self.store.draft(did)
         try:
@@ -1491,6 +1514,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
         except Exception as exc:  # noqa: BLE001
             return await self.host.notify(chat, f"⚠️ Зведення не вдалося: {esc(exc)[:300]}")
         did = self.store.add_draft(None, data, kind="digest", model=model, target=target, status="draft" if ok else "length_mismatch")
+        self._autocheck(did)  # 🔎 кожна чернетка перевіряється одразу: факти й мова
         await self.host.notify(chat, *self.card(did))
 
     def post_html(self, d):

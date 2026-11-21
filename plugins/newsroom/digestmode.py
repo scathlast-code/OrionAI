@@ -237,6 +237,7 @@ class DigestMode:
         data["notes"] = (f"🧾 {t['label']} · з {len(items)} матеріалів. " + data.get("notes", "")).strip()
         did = self.store.add_draft(None, data, kind="digest", model=model, target=int(t.get("length") or 0),
                                    status="draft" if ok else "length_mismatch")
+        self._autocheck(did)  # 🔎 кожна чернетка перевіряється одразу: факти й мова
         bundle = self.bundle_text(items)
         dest = t.get("dest") or "review"
         if dest.startswith("bot:"):

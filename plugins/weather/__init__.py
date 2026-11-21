@@ -72,9 +72,8 @@ def om_url(lat, lon):
 
 def verify_line(notes=None):
     """📎 Наприкінці тексту: зноски-джерела цього зведення + де звірити прогноз."""
-    head = notes.legend() if notes else ""
     others = " · ".join(f'<a href="{u}">{n}</a>' for n, u in SOURCES[1:])
-    return head + f"\n🔎 Звірити: {others}"
+    return f"\n🔎 Звірити прогноз: {others}"
 
 
 def wet(code):
@@ -253,8 +252,12 @@ class WeatherPlugin(Plugin):
             body = "\n\n".join(f"<b>{self.day_title(times[i], i)}</b>\n" + self.summary(pts, data, i)
                                 for i in range(min(days, len(times))) if self.summary(pts, data, i))
             if body:
-                mark = notes.mark(om_url(pts[0][1], pts[0][2]), f"Open-Meteo · {co['name']}") if notes is not None else ""
-                parts.append(f"🌍 <b>Погода · {esc(co['name'])}</b> · {len(pts)} найбільших міст{mark}\n<blockquote expandable>{body}</blockquote>")
+                foot = ""
+                if notes is not None:
+                    for nm, la, lo in pts[:6]:
+                        notes.mark(om_url(la, lo), f"Open-Meteo · {nm}")
+                    foot = "\n" + notes.flush()
+                parts.append(f"🌍 <b>Погода · {esc(co['name'])}</b> · {len(pts)} найбільших міст\n<blockquote expandable>{body}{foot}</blockquote>")
         return "\n".join(parts)
 
     def countries_screen(self, chat):
@@ -317,7 +320,9 @@ class WeatherPlugin(Plugin):
             lines.append("🌂 Без істотних опадів")
         if windy:
             lines.append("💨 Сильний вітер (12+ м/с): " + most(windy))
-        return "\n".join(lines)
+        if notes is not None:  # 📎 джерело — зноскою під цим зведенням (по регіонах)
+            lines.append(notes.flush())
+        return "\n".join(x for x in lines if x)
 
     def ua_compact(self, data, i):
         """Один рядок на день (для 4–7 днів): діапазон по країні й головне явище."""
@@ -484,6 +489,13 @@ class WeatherPlugin(Plugin):
         tail = verify_line(notes) + "\n<i>Температура в °C</i>"
         return text[:4000 - len(tail)] + tail, rows
 
+    async def _ask_text(self, prompt, avoid=None):
+        try:
+            t, _m = await self.host.ask_ai(prompt, label="🔎 Перевірка тексту", avoid=avoid)
+        except TypeError:  # старий хост без avoid
+            t, _m = await self.host.ask_ai(prompt, label="🔎 Перевірка тексту")
+        return t
+
     async def lore(self, day=None):
         """📜 Народний календар дня: назва дня в народі, прикмети про погоду, звичаї й заборони. Кеш на дату (ММ-ДД)."""
         now = dt.datetime.now(self.host.tz) if getattr(self.host, "tz", None) else dt.datetime.now()
@@ -491,7 +503,8 @@ class WeatherPlugin(Plugin):
         key = day.strftime("%m-%d")
         c = self.cfg()
         cached = (c.get("lore") or {}).get(key)
-        if cached:
+        import langguard
+        if cached and not langguard.foreign(cached):  # старий кеш з іншомовними словами — перезбираємо
             return cached
         if not getattr(self.host, "ask_ai", None):
             return ""
@@ -500,10 +513,14 @@ class WeatherPlugin(Plugin):
                   "2) 3–5 народних прикмет про погоду цього дня;\n"
                   "3) 2–4 звичаї, обряди чи заборони цього дня;\n"
                   "4) 1–2 приказки, якщо відомі.\n"
+                  "Пиши лише українською, без жодного слова іншими мовами. "
                   "Лише справжні, відомі українські народні прикмети й звичаї; нічого не вигадуй — якщо для цього дня мало відомо, "
                   "напиши менше. Без вступів і висновків, рядки з емодзі на початку, без markdown-зірочок.")
-        text, _model = await self.host.ask_ai(prompt, label="🌤 Погода: прикмети дня")
+        text, model = await self.host.ask_ai(prompt, label="🌤 Погода: прикмети дня")
         text = re.sub(r"[*_#`]+", "", (text or "").strip())[:2500]
+        # 🔎 обов'язкова перевірка ІНШОЮ моделлю: вислови, кальки, факти (не той день, вигадані звичаї) — до показу й кешування
+        text = await langguard.review(text, lambda pr: self._ask_text(pr, avoid=model), "народні прикмети й звичаї дня")
+        text = re.sub(r"[*_#`]+", "", text)[:2500]
         if text:
             c.setdefault("lore", {})[key] = text
             self.save(c)
