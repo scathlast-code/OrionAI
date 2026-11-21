@@ -3,6 +3,9 @@
 - Посилання з YouTube, Instagram, TikTok, Facebook, Threads, X, Telegram, Reddit, Vimeo, Pinterest та сотень інших
   сайтів (yt-dlp, gallery-dl, прямі файли, відкриті дописи Telegram, Open Graph) → список знайденого → вибір
   елементів, якості, формату (відео / MP3 / GIF / без звуку), озвучки, субтитрів, таймкодів, тексту допису, ZIP.
+- 🎵 Музика допису: назва накладеної пісні (з метаданих сайту або 🔎 Shazam) — у підписі; окремим файлом — фрагмент саме
+  з допису й/або повна версія; 🗣 чистий звук автора (ШІ Demucs відокремлює голос від музики); каруселі фото під музику
+  (TikTok, Instagram), дописи спільноти YouTube з кількома картинками. Усі налаштування — до завантаження.
 - 🔴 Ефір — запис перших 1/3/5 хвилин. 🍪 Входи — cookies.txt для сайтів, що вимагають входу.
 - 🧽 Метадані — звіт і очищена копія фото, відео, аудіо, PDF, Office, HTML/MHTML, ZIP/TAR.
 Усе працює для кожного учасника окремо; одночасно одне завдання на людину.
@@ -270,6 +273,30 @@ class Plugin(Base):
         if a == "off" and x in self.offers:  # старі кнопки «Знайти й завантажити» з попередньої версії
             c, url = self.offers.pop(x)
             return self.start_quick(chat, url) or "🔎 Шукаю…", (self.live_screen(chat) if self.in_app() else None)
+        if a in ("og", "ox", "oa", "os", "osv", "oso", "osm", "opt"):
+            job = self.job_by(chat, x)
+            if not job:
+                return "Посилання застаріло — надішліть його ще раз", None
+            if a == "ox":  # перемикач — лише оновлюємо екран налаштувань
+                xs = job.__dict__.setdefault("x", set())
+                xs.symmetric_difference_update({y})
+                return None, self.options_screen(chat, job)
+            if a == "os":
+                return None, self.sep_screen(job)
+            if a == "opt":
+                if len(job.items) == 1 and job.items[0].engine == "yt":
+                    self._bg(chat, self.show_formats(chat, job, None))
+                    return "⚙️", None
+                return None, self.options_screen(chat, job)
+            if self.busy(chat):
+                return "⏳ Ще завантажую попереднє", None
+            if a == "og":
+                self._bg(chat, self.opt_go(chat, job))
+            elif a == "oa":
+                self._bg(chat, self.post_audio(chat, job))
+            else:
+                self._bg(chat, self.sep_go(chat, job, a[-1] if a != "osv" else "v"))
+            return "⬇️ Починаю", (self.live_screen(chat) if self.in_app() else None)
         if a in ("fq", "fa", "fp", "ff", "fr", "fall", "sp", "spn"):
             job = self.job_by(chat, x)
             if not job:
@@ -684,7 +711,12 @@ class Plugin(Base):
             t, rows = self.job_screen(chat)
             await self._status(chat, status, f"📋 {esc(src)} · {len(job.items)} елементів — виберіть, що завантажити.\n\n" + t, rows)
             return
-        await self.download(chat, job, list(range(1, len(job.items) + 1)), status=status)
+        if all(it.engine == "text" for it in job.items):  # лише текст допису — нічого налаштовувати
+            await self.download(chat, job, list(range(1, len(job.items) + 1)), status=status)
+            return
+        text, rows = self.options_screen(chat, job)  # ⚙️ усі налаштування — ДО завантаження, компактно
+        self.live[chat] = (text, rows)
+        await self._status(chat, status, text, rows)
 
     # ---------------------------------------------------------------- сторіс: вибір
     async def show_stories(self, chat, job, status):
@@ -748,6 +780,156 @@ class Plugin(Base):
         original = re.search(r"original sound|оригінальний звук|оригинальный звук|son original|sonido original|orijinal ses|suara asli", track, re.I)
         return artist, track, not original
 
+    def song_of(self, job):
+        """(виконавець, назва, накладена?) з метаданих будь-якого елемента допису; кешується в job."""
+        if job.__dict__.get("song") is not None:
+            return job.__dict__["song"] or None
+        m = None
+        for it in job.items[:30]:
+            m = M.music_of(it.info)
+            if m:
+                break
+        job.__dict__["song_info"] = m or {}
+        job.__dict__["song"] = (m["artist"], m["title"], not m["original"]) if m else False
+        return job.__dict__["song"] or None
+
+    @staticmethod
+    def song_name(song):
+        artist, track, _ = song
+        return f"{artist} — {track}" if artist and artist.lower() not in track.lower() else track
+
+    def parts(self, job):
+        """Номери візуальних елементів (фото/відео) і окремих звукових доріжок допису."""
+        vis = [k for k, it in enumerate(job.items, 1) if it.engine != "text" and not M.is_audio_item(it)]
+        aud = [k for k, it in enumerate(job.items, 1) if M.is_audio_item(it)]
+        imgs = [k for k in vis if M.is_image_item(job.items[k - 1])]
+        return vis, aud, imgs
+
+    def options_screen(self, chat, job):
+        """⚙️ Що буде завантажено й як — ДО завантаження; лише потрібні перемикачі."""
+        vis, aud, imgs = self.parts(job)
+        vids = len(vis) - len(imgs)
+        song, tok = self.song_of(job), job.token
+        x = job.__dict__.setdefault("x", set())
+        first = job.items[(vis or [1])[0] - 1]
+        what = " · ".join(t for t in [f"🖼 {len(imgs)} фото" if imgs else "", f"🎬 {vids} відео" if vids else "",
+                                      "🎵 звукова доріжка" if aud or (job.__dict__.get("song_info") or {}).get("url") else ""] if t)
+        lines = [f"📦 <b>{esc(first.title[:150])}</b>", f"📍 {esc(job.__dict__.get('src') or M.site_name(job.url))}" + (f" · {what}" if what else ""), ""]
+        if song and song[2]:
+            lines.append(f"🎵 Накладена музика: <b>{esc(self.song_name(song)[:120])}</b>")
+        elif song:
+            lines.append(f"🎙 Звук: оригінальний звук автора ({esc(song[1][:80])})")
+        elif vids:
+            lines.append("🎵 Яку музику накладено, сайт не вказав — «🔎 Розпізнати» дізнається за звуком.")
+        elif imgs:
+            lines.append("🎵 Музики до цих фото сайт не віддав.")
+        on = lambda k: "☑️" if k in x else "▫️"  # noqa: E731
+        rows = [[(f"⬇️ Завантажити{' усе' if len(vis) > 1 else ''}" + (" без звуку" if "mute" in x else ""), self.cb("og", tok))]]
+        tog = []
+        if vids or aud or (song and song[2]):
+            tog.append((f"{on('mus')} 🎵 Музика окремо", self.cb("ox", tok, "mus")))
+        if song and song[2]:
+            tog.append((f"{on('full')} 🎶 Повна пісня", self.cb("ox", tok, "full")))
+        if tog:
+            rows.append(tog)
+        if vids:
+            rows.append([(f"{on('mute')} 🔇 Відео без звуку", self.cb("ox", tok, "mute")), ("🔊 Лише звук", self.cb("oa", tok))])
+            rows.append([("🗣 Чистий звук автора ▸", self.cb("os", tok))] + ([] if song else [("🔎 Розпізнати", self.cb("fr", tok))]))
+        elif aud:
+            rows.append([("🔊 Лише звук", self.cb("oa", tok))])
+        if len(vis) > 1:
+            rows.append([("🔢 Вибрати окремі", self.cb("menu", tok))])
+        lines += ["", "<i>☑️ — додати до завантаження. «🎵 Музика окремо» — доріжка саме з цього допису; "
+                  "«🎶 Повна пісня» — повна версія з YouTube/SoundCloud.</i>", self.limits_line()]
+        return "\n".join(lines)[:4000], rows
+
+    def sep_screen(self, job):
+        tok = job.token
+        return ("🗣 <b>Чистий звук автора</b>\n\n"
+                "Соцмережа вже змішала накладену музику з оригінальним звуком в один файл, окремої «чистої» доріжки сайт не віддає. "
+                "Бот відокремить голос і живий звук від музики штучним інтелектом (Demucs, безкоштовно, на сервері).\n\n"
+                "• Для мови й голосу — добре; шум вулиці чи інструменти в кадрі можуть частково піти разом із музикою.\n"
+                "• Час: перший раз після оновлення сервера ≈3–5 хв (встановлення), далі ≈1–2 хв на хвилину відео.",
+                [[("🎬 Відео з чистим звуком", self.cb("osv", tok))],
+                 [("🗣 Лише чистий звук (MP3)", self.cb("oso", tok)), ("🎼 Лише музика", self.cb("osm", tok))],
+                 [("« Налаштування завантаження", self.cb("opt", tok))]])
+
+    async def opt_go(self, chat, job):
+        """⬇️ Завантаження з обраними перемикачами: файли допису → (☑️) музика окремо → (☑️) повна пісня."""
+        x = job.__dict__.get("x", set())
+        vis, aud, _ = self.parts(job)
+        nums = vis or aud
+        job.options.mode, job.options.cuts = ("mute" if "mute" in x else "video"), ()
+        status = await self._status(chat, None, f"⬇️ Готую: {esc(job.__dict__.get('src') or '')}…", [[("⏹ Зупинити", self.cb("stop"))]])
+        await self.download(chat, job, nums, status=status)
+        if "mus" in x:
+            await self.post_audio(chat, job)
+        if "full" in x and self.song_of(job):
+            await self.full_song(chat, job, keep=True)
+
+    async def post_audio(self, chat, job):
+        """🔊 Звук саме з цього допису: окрема доріжка (TikTok/Instagram) → інакше звук із відео (MP3)."""
+        vis, aud, imgs = self.parts(job)
+        song, si = self.song_of(job), job.__dict__.get("song_info") or {}
+        name = self.song_name(song) if song else "Звук допису"
+        stop = [[("⏹ Зупинити", self.cb("stop"))]]
+        if aud:
+            sub = Job(secrets.token_hex(4), job.url, [M.Item(job.items[k - 1].engine, job.items[k - 1].url,
+                                                             {**job.items[k - 1].info, "title": name}, job.items[k - 1].index) for k in aud])
+        elif si.get("url"):
+            ext = (Path(si["url"].split("?")[0]).suffix or ".m4a").lstrip(".")
+            sub = Job(secrets.token_hex(4), job.url, [M.Item("direct", si["url"], {"title": name, "extension": ext})])
+        elif len(vis) > len(imgs):
+            sub = Job(secrets.token_hex(4), job.url, [job.items[k - 1] for k in vis if k not in imgs][:1])
+            sub.options.mode = "audio"
+        else:
+            await self._status(chat, None, "🎵 Сайт не віддав окремо музику з цього допису."
+                               + (f"\nЦе: <b>{esc(name)}</b> — можна взяти повну версію." if song else ""),
+                               [[("🎶 Повна пісня", self.cb("ff", job.token))]] if song else [])
+            return
+        sub.options.post = False
+        sub.__dict__.update(src=job.__dict__.get("src") or "", song=job.__dict__.get("song"), song_info=si)
+        status = await self._status(chat, None, f"🎵 Готую звук допису: {esc(name[:80])}…", stop)
+        await self.download(chat, sub, list(range(1, len(sub.items) + 1)), status=status)
+
+    async def sep_go(self, chat, job, what):
+        """🗣 Відокремлення оригінального звуку від музики: what = v (відео з чистим звуком) | o (лише голос) | m (лише музика)."""
+        vis, aud, imgs = self.parts(job)
+        vids = [k for k in vis if k not in imgs] or aud
+        stop = [[("⏹ Зупинити", self.cb("stop"))]]
+        if not vids:
+            await self._status(chat, None, "У цьому дописі немає відео чи звуку.")
+            return
+        item = job.items[vids[0] - 1]
+        status = await self._status(chat, None, "⬇️ Завантажую відео для розділення звуку…", stop)
+
+        async def say(t):
+            await self._status(chat, status, t, stop)
+        try:
+            with tempfile.TemporaryDirectory(prefix="orion-sep-") as work:
+                work = Path(work)
+                opts = replace(job.options, mode="video", cuts=(), height=min(job.options.height or 720, 720))
+                path, _t, info = await M.fetch(item, job.url, opts, work)
+                voice, music = await M.separate(path, work, progress=say)
+                stem = Path(safe_name(item.title[:60], "media")).stem
+                if what == "v":
+                    out = work / f"{stem} · чистий звук.mp4"
+                    await say("🎬 Складаю відео з чистим звуком…")
+                    await run(*M.FF, "-i", path, "-i", voice, "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac",
+                              "-b:a", "160k", "-shortest", "-movflags", "+faststart", out, timeout=900)
+                    cap = "🗣 Відео з оригінальним звуком (музику прибрано ШІ)"
+                else:
+                    src_ = voice if what == "o" else music
+                    out = work / (f"{stem} · " + ("чистий звук.mp3" if what == "o" else "музика.mp3"))
+                    await run(*M.FF, "-i", src_, "-b:a", "192k", out, timeout=600)
+                    cap = "🗣 Лише оригінальний звук (без музики)" if what == "o" else "🎼 Лише музика (без голосу)"
+                await say(f"⬆️ Надсилаю ({mb(out.stat().st_size)})…")
+                await self.send_media(chat, out, esc(cap))
+            await self._status(chat, status, "✅ Готово", [[("⚙️ Ще варіант", self.cb("os", job.token))]])
+        except JobError as exc:
+            await self._status(chat, status, f"⚠️ Не вдалося розділити звук: {esc(str(exc)[:400])}",
+                               [[("🔁 Ще раз", self.cb("os", job.token))]])
+
     def limits_line(self):
         lim = self.tg_limit()
         return f"ℹ️ Ліміт Telegram: файл до {'2 ГБ' if lim >= 1024 ** 3 else mb(lim)}" + ("" if self.big.ready() else " (більше — з TELEGRAM_API_ID)")
@@ -777,7 +959,7 @@ class Plugin(Base):
         else:
             rows.append([("🎬 Відео", self.cb("fq", tok, 0))])
         rows.append([("🔊 Звук (MP3)" + (f" · {mb(a_size)}" if a_size else ""), self.cb("fa", tok)), ("🖼 Превʼю", self.cb("fp", tok))])
-        song = job.__dict__.get("song") or self.music(info)
+        song = self.song_of(job) or self.music(info)
         if song:
             artist, track, added = song
             name = f"{artist} — {track}" if artist else track
@@ -786,7 +968,7 @@ class Plugin(Base):
                 rows.append([("🎵 Фрагмент з відео", self.cb("fa", tok)), ("🎶 Повна пісня", self.cb("ff", tok))])
         else:
             rows.append([("🔎 Розпізнати музику", self.cb("fr", tok))])
-        rows.append([("✂️ Обрізка, GIF, субтитри", self.cb("menu", tok))])
+        rows.append([("🗣 Чистий звук автора ▸", self.cb("os", tok)), ("✂️ Обрізка, GIF, субтитри", self.cb("menu", tok))])
         lines += ["", self.limits_line()]
         text = "\n".join(lines)[:1000]
         self.live[chat] = (text, rows)
@@ -846,7 +1028,7 @@ class Plugin(Base):
         status = await self._status(chat, None, f"⬇️ Готую: {esc(job.__dict__.get('src') or '')}…", [[("⏹ Зупинити", self.cb("stop"))]])
         await self.download(chat, job, nums, status=status)
 
-    async def full_song(self, chat, job):
+    async def full_song(self, chat, job, keep=False):
         artist, track, _ = job.__dict__.get("song") or self.music(job.items[0].info) or ("", "", False)
         query = f"{artist} {track}".strip()
         status = await self._status(chat, None, f"🔎 Шукаю повну пісню: {esc(query[:80])}…", [[("⏹ Зупинити", self.cb("stop"))]])
@@ -861,7 +1043,8 @@ class Plugin(Base):
                     song.options.mode = "audio"
                     song.options.post = False
                     song.__dict__["src"] = "SoundCloud" if eng.startswith("sc") else "YouTube"
-                    self.jobs[chat] = song
+                    if not keep:
+                        self.jobs[chat] = song
                     await self.download(chat, song, [1], status=status)
                     return
             except JobError as exc:
@@ -958,14 +1141,20 @@ class Plugin(Base):
                         await stage(f"⚙️ Обробляю: {esc(item.title[:90])}…", force=True)
                     who, link = M.author(info)
                     desc = M.post_text(info)
+                    if not job.__dict__.get("song"):  # yt-dlp часто знає пісню лише після завантаження
+                        m = M.music_of(info or {})
+                        if m:
+                            job.__dict__.update(song=(m["artist"], m["title"], not m["original"]), song_info=m)
+                    song = job.__dict__.get("song")
+                    song_html = f"\n🎵 {esc(self.song_name(song))}" if song and song[2] else ""
                     outs = await M.render(path, opts, work, item.engine == "direct") if path else []
                     # Опис і автор — у підписі самого файлу (Telegram дозволяє 1024 символи); довший текст — ще й окремо
                     # Підпис HTML: довгі адреси — короткими посиланнями «Автор» / «Допис»; ліміт Telegram — 1024 видимі символи
                     who_html = (f'<a href="{esc(link)}">{esc(who)}</a>' if link else esc(who)) if who else ""
                     site = M.site_name(job.url) if str(job.url).startswith("http") else (job.__dict__.get("src") or "")
                     tail = (f"\n\n👤 {who_html}" if who else "\n") + (f" · {esc(site)}" if site else "") \
-                        + (f' · <a href="{esc(job.url)}">🔗 Допис</a>' if str(job.url).startswith("http") else "")
-                    tail_len = len(f"\n\n👤 {who} · {site} · 🔗 Допис")
+                        + (f' · <a href="{esc(job.url)}">🔗 Допис</a>' if str(job.url).startswith("http") else "") + song_html
+                    tail_len = len(f"\n\n👤 {who} · {site} · 🔗 Допис") + len(re.sub(r"<[^>]+>|&\w+;", "", song_html))
                     first = True
                     for out in outs + tracks:
                         cap = ""
@@ -1043,7 +1232,7 @@ class Plugin(Base):
             msg = "📝 Тут лише текст допису — надіслав його вище."
         else:
             msg = "⚠️ Файлів не знайшлося. Спробуйте інший формат або якість."
-        rows = [[("⚙️ Інший формат (MP3, якість…)" if quick else "📋 До набору", self.cb("menu", job.token))], [("« Медіа", self.cb())]]
+        rows = [[("⚙️ Доналаштувати й завантажити ще" if quick else "📋 До набору", self.cb("opt" if quick else "menu", job.token))], [("« Медіа", self.cb())]]
         if quick and (sent or shown):
             try:  # статус більше не потрібен — лишаємо тільки файли й одну кнопку
                 await bot.delete_message(chat, status.message_id)

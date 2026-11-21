@@ -855,6 +855,8 @@ async def inspect_link(url, work):
         or domain_matches(host, ("discordapp.com", "discordapp.net", "t.me", "telegram.me"))
     ):
         probes = (page_probe, video_probe, gallery_probe)
+    elif YT_POST.match(url):
+        probes = (yt_post_probe,)  # 🖼 допис спільноти YouTube: одна чи кілька картинок
     elif STORY.match(url):
         probes = (story_probe,)
     elif FB_STORY.match(url):
@@ -1171,3 +1173,169 @@ async def render_special(path, options, work):
                       *([] if not cuts[0][0] and cuts[0][1] is None else ["-preset", "fast", "-pix_fmt", "yuv420p"]), dest, timeout=450)
         out.append(dest)
     return out
+
+
+# ================================================================ 🎵 музика, накладена соцмережею
+AUDIO_EXT = {".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wav", ".oga", ".mka"}
+IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".bmp", ".tif", ".tiff", ".heic"}
+ORIGINAL_RE = re.compile(r"original sound|original audio|оригінальн\w* звук|оригинальн\w* звук|son original|sonido original|"
+                         r"orijinal ses|suara asli|som original|originalton|dźwięk oryginalny", re.I)
+_TITLE_KEYS = ("title", "song_name", "track", "name", "audio_title", "music_title")
+_ARTIST_KEYS = ("display_artist", "artist", "authorName", "author_name", "author", "artist_name", "ig_artist", "owner")
+_URL_KEYS = ("playUrl", "play_url", "progressive_download_url", "download_url", "audio_url", "url", "fast_start_progressive_download_url")
+_MUSIC_KEYS = ("music_asset_info", "music_info", "music_metadata", "original_sound_info", "music", "sound", "audio", "song",
+               "clips_metadata", "audio_info")
+
+
+def _s(v):
+    if isinstance(v, dict):
+        v = v.get("username") or v.get("name") or v.get("full_name") or ""
+    if isinstance(v, list):
+        v = ", ".join(_s(x) for x in v if _s(x))
+    return str(v or "").strip()
+
+
+def _music_from(d):
+    title = next((_s(d.get(k)) for k in _TITLE_KEYS if _s(d.get(k))), "")
+    if not title or len(title) > 200 or title.startswith("http"):
+        return None
+    artist = next((_s(d.get(k)) for k in _ARTIST_KEYS if _s(d.get(k))), "")
+    url = next((d.get(k) for k in _URL_KEYS if isinstance(d.get(k), str) and d.get(k).startswith("http")), "")
+    if isinstance(d.get("playUrl"), list) and d["playUrl"]:
+        url = url or d["playUrl"][0]
+    orig = bool(d.get("original") or d.get("is_original") or d.get("original_sound_info") or ORIGINAL_RE.search(title))
+    dur = d.get("duration")
+    if not dur and isinstance(d.get("duration_in_ms"), (int, float)):
+        dur = d["duration_in_ms"] / 1000
+    return {"title": title, "artist": artist, "url": url, "original": orig, "duration": dur or 0}
+
+
+def music_of(info, _depth=0):
+    """Яка музика накладена на допис: {title, artist, url (фрагмент з допису, якщо сайт його віддає), original}.
+    Шукає у відомих полях yt-dlp (track/artist), TikTok (music.title/authorName/playUrl), Instagram
+    (music_asset_info.title/display_artist), Facebook (music/sound) — на будь-якій глибині метаданих."""
+    if not isinstance(info, dict) or _depth > 6:
+        return None
+    if _depth == 0:
+        track = _s(info.get("track"))
+        if track:
+            artist = _s(info.get("artist") or info.get("artists"))
+            return {"title": track, "artist": artist, "url": "", "original": bool(ORIGINAL_RE.search(track)), "duration": 0}
+    for k in _MUSIC_KEYS:
+        v = info.get(k)
+        if isinstance(v, dict):
+            inner = v.get("music_asset_info") or v.get("music_info") or v.get("original_sound_info")
+            if isinstance(inner, dict):
+                got = music_of({"music_asset_info": inner} if "music_asset_info" not in v else v, _depth + 1) or _music_from(inner)
+                if got:
+                    if v.get("original_sound_info") and not v.get("music_info"):
+                        got["original"] = True
+                    return got
+            got = _music_from(v)
+            if got:
+                return got
+            got = music_of(v, _depth + 1)
+            if got:
+                return got
+    for v in info.values():
+        if isinstance(v, dict):
+            got = music_of(v, _depth + 1) if any(k in v for k in _MUSIC_KEYS) else None
+            if got:
+                return got
+        elif isinstance(v, list) and v and isinstance(v[0], dict) and _depth < 3:
+            for x in v[:5]:
+                got = music_of(x, _depth + 1) if any(k in x for k in _MUSIC_KEYS) else None
+                if got:
+                    return got
+    return None
+
+
+def is_audio_item(item):
+    ext = (item.info.get("extension") or Path(urlsplit(str(item.url)).path).suffix.lstrip(".")).lower()
+    return ("." + ext) in AUDIO_EXT
+
+
+def is_image_item(item):
+    ext = (item.info.get("extension") or Path(urlsplit(str(item.url)).path).suffix.lstrip(".")).lower()
+    return ("." + ext) in IMAGE_EXT
+
+
+# ================================================================ 🖼 YouTube: дописи спільноти (каруселі картинок)
+YT_POST = re.compile(r"https?://(?:www\.|m\.)?youtube\.com/(?:post/[\w-]+|channel/[\w-]+/community\?.*lb=|@[\w.-]+/community\?.*lb=)")
+
+
+def _yt_initial(text):
+    m = re.search(r"ytInitialData\s*=\s*(\{.+?\});\s*</script>", text, re.S) or re.search(r"var ytInitialData = (\{.+?\});", text, re.S)
+    return json.loads(m.group(1)) if m else {}
+
+
+def _yt_walk(node, key):
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k == key:
+                yield v
+            yield from _yt_walk(v, key)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _yt_walk(v, key)
+
+
+def yt_post_images(data):
+    """Усі картинки першого допису спільноти в найвищій якості (=s0 — оригінальний розмір)."""
+    post = next(_yt_walk(data, "backstagePostRenderer"), None) or next(_yt_walk(data, "sharedPostRenderer"), None) or data
+    urls = []
+    for img in _yt_walk(post, "backstageImageRenderer"):
+        thumbs = ((img or {}).get("image") or {}).get("thumbnails") or []
+        if thumbs:
+            u = thumbs[-1].get("url", "")
+            u = re.sub(r"=s\d+[^/?#]*$|=w\d+-h\d+[^/?#]*$", "=s0", u)
+            if u.startswith("//"):
+                u = "https:" + u
+            if u and u not in urls:
+                urls.append(u)
+    text = "".join(r.get("text", "") for t in _yt_walk(post, "contentText") if isinstance(t, dict) for r in t.get("runs") or [])
+    author = next((r.get("text", "") for a in _yt_walk(post, "authorText") if isinstance(a, dict) for r in a.get("runs") or []), "")
+    return urls, text, author
+
+
+async def yt_post_probe(url, work):
+    if not YT_POST.match(url):
+        return []
+    async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+            "Accept-Language": "uk,en;q=0.8"}, cookies={"CONSENT": "YES+1"},
+            proxy=os.environ.get("MEDIA_PROXY", "").strip() or None) as c:
+        r = await c.get(url)
+        r.raise_for_status()
+    urls, text, author = yt_post_images(_yt_initial(r.text))
+    if not urls:
+        raise JobError("У цьому дописі YouTube немає картинок (або він доступний лише після входу).")
+    base = {"description": text, "uploader": author, "webpage_url": url, "title": (text[:60] or "Допис YouTube")}
+    return [Item("direct", u, {**base, "extension": "jpg", "filename": f"youtube-post-{i}"}) for i, u in enumerate(urls, 1)]
+
+
+# ================================================================ 🗣 відокремити оригінальний звук від музики (ШІ)
+async def separate(path, work, progress=None):
+    """Demucs (htdemucs, лише процесор): голос/оригінальний звук окремо від музики → (vocals.wav, music.wav).
+    Перший запуск після оновлення сервера ставить Demucs (≈3–5 хв); далі — ≈1–2 хв на хвилину звуку."""
+    import importlib
+    import sys
+    try:
+        importlib.import_module("demucs")
+    except ImportError:
+        if progress:
+            await progress("📦 Перший запуск: встановлюю розділювач звуку Demucs (≈3–5 хв)…")
+        await run(sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check",
+                  "--extra-index-url", "https://download.pytorch.org/whl/cpu", "torch", "torchaudio", "demucs", timeout=1500)
+        importlib.invalidate_caches()
+    wav = work / "sep-in.wav"
+    await run(*FF, "-i", path, "-vn", "-ac", "2", "-ar", "44100", wav, timeout=600)
+    if progress:
+        await progress("🗣 Відокремлюю оригінальний звук від музики (ШІ на процесорі, ≈1–2 хв на хвилину звуку)…")
+    out = work / "sep"
+    await run(sys.executable, "-m", "demucs", "--two-stems=vocals", "-n", "htdemucs", "--segment", "7", "-j", "1",
+              "-o", out, wav, timeout=3600)
+    found = list(out.rglob("vocals.wav")), list(out.rglob("no_vocals.wav"))
+    if not found[0] or not found[1]:
+        raise JobError("Розділювач звуку не повернув результат.")
+    return found[0][0], found[1][0]
