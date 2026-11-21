@@ -38,8 +38,8 @@ def mb(n):
 
 class Plugin(Base):
     id = "stk"
-    icon = "🧷"
-    title = "Стікери"
+    icon = "🏷"
+    title = "Наліпки"
     version = "2.0"
     admin_only = False
     summary = ("Завантажує пакети стікерів і кастомних емодзі Telegram в оригінальних форматах (.webp, .tgs, .webm): "

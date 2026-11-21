@@ -97,7 +97,7 @@ def count(event: str, where: str = "chat"):
 def stats_text():
     s = stats()
     top = sorted(s["sections"].items(), key=lambda x: -x[1])[:5]
-    names = {"news": "📰 Ньюзрум", "stk": "🧷 Стікери", "menu": "меню", "info": "плагіни"}
+    names = {"news": "📰 Новинарня", "stk": "🏷 Наліпки", "menu": "меню", "info": "плагіни"}
     week = sum(v for k, v in s["days"].items() if k >= time.strftime("%Y-%m-%d", time.localtime(time.time() - 7 * 86400)))
     return (f"Відкрито: {s['opens']} · натискань: {s['clicks']} · за 7 днів подій: {week}\n"
             f"Де: " + (", ".join(f"{'чат' if k == 'chat' else 'застосунок'} {v}" for k, v in s["where"].items()) or "—") + "\n"

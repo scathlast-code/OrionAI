@@ -341,7 +341,7 @@ class DeskUI:
             return "", [], sid
         rel, what = "inshe", ""
         try:
-            data, _m = await self.engine._json(relation_prompt(raw, ours), "Ти — випусковий редактор. Лише JSON.", "📰 Ньюзрум: звірка з нашими")
+            data, _m = await self.engine._json(relation_prompt(raw, ours), "Ти — випусковий редактор. Лише JSON.", "📰 Новинарня: звірка з нашими")
             rel = str(data.get("relation") or "inshe").lower()
             what = str(data.get("what") or "")[:200]
         except Exception as exc:  # noqa: BLE001

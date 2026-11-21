@@ -206,7 +206,7 @@ class Engine:
 
     async def write(self, raw, meta, target=0, rules="", related="", image=None):
         system = system_prompt(rules)
-        label = "📰 Ньюзрум: рерайт"
+        label = "📰 Новинарня: рерайт"
         data, model = await self._json(news_prompt(raw, meta, target, related), system, label, image=image)
         data = clean(data)
         ok, tries = True, 0
@@ -216,24 +216,24 @@ class Engine:
 
     async def revise(self, draft, instruction, target=0, rules=""):
         system = system_prompt(rules)
-        data, model = await self._json(revise_prompt(draft, instruction, target), system, "📰 Ньюзрум: правка")
+        data, model = await self._json(revise_prompt(draft, instruction, target), system, "📰 Новинарня: правка")
         data = clean(data)
         ok = True
         if target:
-            data, ok, _ = await self.fit_length(data, target, system, "📰 Ньюзрум: правка")
+            data, ok, _ = await self.fit_length(data, target, system, "📰 Новинарня: правка")
         return data, model, ok
 
     async def refit(self, draft, target, rules=""):
         data = {k: draft.get(k) for k in ("headline", "body")}
-        data, ok, _ = await self.fit_length(data, target, system_prompt(rules), "📰 Ньюзрум: довжина")
+        data, ok, _ = await self.fit_length(data, target, system_prompt(rules), "📰 Новинарня: довжина")
         return data, ok
 
     async def digest(self, drafts, target, rules=""):
         system = system_prompt(rules)
-        data, model = await self._json(digest_prompt(drafts, target), system, "📰 Ньюзрум: зведення")
+        data, model = await self._json(digest_prompt(drafts, target), system, "📰 Новинарня: зведення")
         data = clean(data)
         data["sources"] = [f"#{d['id']} {d['headline'][:60]}" for d in drafts][:12]
-        data, ok, _ = await self.fit_length(data, target, system, "📰 Ньюзрум: зведення")
+        data, ok, _ = await self.fit_length(data, target, system, "📰 Новинарня: зведення")
         return data, model, ok
 
     async def check(self, draft, search, source_text=""):
@@ -255,7 +255,7 @@ class Engine:
             lines.append(f"⚠️ Пошук не дав результатів: {err or 'невідомо'} — факти не звірено")
         else:
             text, model = await self.ask_ai(check_prompt(draft, "\n\n".join(found_parts)),
-                                            system="Ти — фактчекер. Пиши стисло українською.", label="📰 Ньюзрум: звірка")
+                                            system="Ти — фактчекер. Пиши стисло українською.", label="📰 Новинарня: звірка")
             lines.append((text or "").strip()[:1500])
             lines.append(f"🌐 Незалежних ресурсів у звірці: {len(hosts)}" + (" — ⚠️ замало, бажано 2+" if len(hosts) < 2 else "")
                          + f" · звіряв: {model}")

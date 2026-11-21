@@ -2570,7 +2570,8 @@ CM = Community(db, lambda: [owner_id()] if owner_id() else [], tz=TZ, ai=cm_ai, 
 ITEMS = {
     "dl": ("💬 Розмови", "m:dl"),
     "tl": ("⏰ Завдання", "m:tl"),
-    "cr": ("🎨 Створення", "m:hub:cr"),
+    "cr": ("🎬 Медійка", "m:hub:cr"),
+    "zap": ("📓 Записник", "m:hub:zap"),
     "menu": ("☰ Меню", "m:home"),
     "md": ("🤖 ШІ-моделі", "m:hub:md"),
     "qask": ("❓ Спитати модель", "m:qask"),
@@ -2595,35 +2596,37 @@ ITEMS = {
     "links": ("🔗 Посилання", "m:lnk"),
     "ollama": ("🦙 Моя Ollama", "m:ol"),
     "plg": ("🔌 Плагіни", "m:pl"),
-    "news": ("📰 Ньюзрум", "m:pl:news"),
+    "news": ("✍️ Публікації", "m:pl:news"),
     "red": ("🗞 Редакція", "m:pl:red"),
     "utm": ("🔗 UTM-мітки", "m:utm"),
-    "stk": ("🧷 Стікери", "m:pl:stk"),
-    "med": ("📥 Медіа", "m:pl:med"),
+    "stk": ("🏷 Наліпки", "m:pl:stk"),
+    "med": ("⬇️ Завантажити", "m:pl:med"),
     "wx": ("🌤 Погода", "m:pl:wx"),
     "col": ("📥 Збір текстів", "m:col"),
     "today": ("🌅 Сьогодні", "m:today"),
     "sp": ("🤝 Простори", "m:sp"),
     "sbx": ("🧪 Пісочниця", "m:sbx"),
     "imp": ("💡 Покращити", "m:imp"),
-    "inbox": ("📮 Скринька", "m:pl:inb"),
+    "inbox": ("📬 Пошта", "m:pl:inb"),
     "hubm": ("🧭 Мої боти", "m:pl:hub"),
     "app": ("📱 Чат і застосунок", "m:appm"),
 }
 DEFAULT_GROUPS = {
     "work": "💬 Робота",
+    "news": "📰 Новинарня",
     "settings": "⚙️ Налаштування",
 }
 DEFAULT_LAYOUT = [
-    ["today", "home"], ["g:work", "home"], ["g:settings", "home"],
-    ["dl", "g:work"], ["tl", "g:work"], ["nt", "g:work"], ["col", "g:work"], ["sp", "g:work"], ["pins", "g:work"], ["inbox", "g:work"],
-    ["red", "g:work"], ["news", "g:work"], ["utm", "g:work"], ["stk", "g:work"], ["med", "g:work"], ["wx", "g:work"], ["cr", "g:work"],
+    ["today", "home"], ["g:work", "home"], ["g:news", "home"], ["g:settings", "home"],
+    ["dl", "g:work"], ["zap", "g:work"], ["sp", "g:work"], ["pins", "g:work"], ["inbox", "g:work"], ["wx", "g:work"], ["cr", "g:work"],
+    ["red", "g:news"], ["news", "g:news"], ["utm", "g:news"], ["col", "g:news"],
     ["md", "g:settings"], ["st", "g:settings"], ["acc", "g:settings"], ["backup", "g:settings"], ["svc", "g:settings"],
     ["btns", "g:settings"], ["diag", "g:settings"], ["help", "g:settings"],
     # вкладки об'єднаних розділів: окремо в меню не стоять, але відкриваються з розділу-«хаба» (і їх можна повернути в меню в «🧭 Вигляд»)
     ["arc", "off"], ["trash", "off"], ["jrn", "off"], ["qask", "off"], ["prio", "off"], ["partners", "off"], ["ollama", "off"],
     ["lib", "off"], ["voice", "off"], ["comm", "off"], ["hubm", "off"], ["app", "off"], ["plg", "off"],
     ["runmode", "off"], ["links", "off"], ["sbx", "off"], ["imp", "off"], ["menu", "off"],
+    ["tl", "off"], ["nt", "off"], ["stk", "off"], ["med", "off"],  # тепер усередині «📓 Записника» й «🎬 Медійки»
 ]
 
 L = Layout(ITEMS, DEFAULT_LAYOUT, DEFAULT_GROUPS, lambda c: prefs(c), lambda c, k, v: set_pref(c, k, v),
@@ -2635,6 +2638,43 @@ def _migrate_compact_menu(chat_id):
         _migrate_compact_menu_inner(chat_id)
     finally:
         _migrate_menu_v8(chat_id)
+        _migrate_menu_v9(chat_id)
+
+
+def _migrate_menu_v9(chat_id):
+    """Меню v9: «📓 Записник» (завдання + нотатки), «🎬 Медійка» (створення + наліпки + завантаження),
+    група «📰 Новинарня» (Редакція, Публікації, UTM-мітки, Збір текстів); Скринька → Пошта. Решта порядку зберігається."""
+    p = prefs(chat_id)
+    if p.get("menu_v9"):
+        return
+    saved = [list(x) for x in (p.get("layout") or [])]
+    if saved:
+        out, zap_done = [], False
+        for item, place in saved:
+            if item in ("tl", "nt"):
+                if not zap_done and place != "off":
+                    out.append(["zap", place])
+                    zap_done = True
+                out.append([item, "off"])
+                continue
+            if item in ("stk", "med"):
+                out.append([item, "off"])
+                continue
+            if item in ("red", "news", "utm", "col", "g:news", "zap"):
+                continue
+            out.append([item, place])
+        if not zap_done:
+            out.append(["zap", "g:work"])
+        pos = next((k for k, x in enumerate(out) if x[0] == "g:work"), 0) + 1
+        out[pos:pos] = [["g:news", "home"]]
+        out += [["red", "g:news"], ["news", "g:news"], ["utm", "g:news"], ["col", "g:news"]]
+        set_pref(chat_id, "layout", out)
+    groups = dict(p.get("groups") or DEFAULT_GROUPS)
+    groups.setdefault("news", DEFAULT_GROUPS["news"])
+    set_pref(chat_id, "groups", groups)
+    labels = {k: v for k, v in (p.get("labels") or {}).items() if k not in ("news", "inbox", "stk", "med", "cr")}
+    set_pref(chat_id, "labels", labels)
+    set_pref(chat_id, "menu_v9", True)
 
 
 def _migrate_compact_menu_inner(chat_id):
@@ -7946,9 +7986,15 @@ HUBS = {
         ("🤝 Інші боти й ШІ", "m:pr:b", 0, "open"),
         ("🦙 Своя модель Ollama", "m:ol", 2, "open"),
     ]),
-    "cr": ("🎨 Створення", "Картинки, слайдшоу, музика й дизайн — і все, що вже створено.", [
+    "cr": ("🎬 Медійка", "Створення картинок, слайдшоу, музики й дизайну, наліпки й завантаження — і все, що вже створено.", [
         ("🎨 Створити", "m:cr", 3, "all"),
+        ("🏷 Наліпки", "m:pl:stk", 2, "open"),
+        ("⬇️ Завантажити", "m:pl:med", 2, "open"),
         ("🖼 Мої медіа", "m:lib", 1, "open"),
+    ]),
+    "zap": ("📓 Записник", "Завдання й нотатки разом: що зробити (з датою — завдання) і що запам'ятати (без дати — нотатка).", [
+        ("⏰ Завдання", "m:tl", 6, "all"),
+        ("📝 Нотатки", "m:nt", 6, "all"),
     ]),
     "st": ("🎛 Поведінка", "Як ШІ відповідає: пам'ять, стиль, довжина — і голос.", [
         ("🧠 Відповіді", "m:st", 40, "all"),

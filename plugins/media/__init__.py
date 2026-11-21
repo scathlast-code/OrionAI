@@ -93,8 +93,8 @@ def bar(done, total, speed=0, eta=0):
 
 class Plugin(Base):
     id = "med"
-    icon = "📥"
-    title = "Медіа"
+    icon = "⬇️"
+    title = "Завантажити"
     version = "1.0"
     admin_only = False
     summary = ("Завантаження відео, фото, аудіо й тексту дописів за посиланням із YouTube, Instagram, TikTok, Facebook, "

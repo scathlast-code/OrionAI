@@ -116,8 +116,8 @@ def src_links(sources, sep=" · "):
 
 class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Base):
     id = "news"
-    icon = "📰"
-    title = "Ньюзрум"
+    icon = "✍️"
+    title = "Публікації"
     version = "2.0"
     admin_only = True
     summary = ("ШІ-редакція GreenPost: збирає новини з пересилань, каналів, RSS, WhatsApp і вебхуків, відсіює дублікати, "
@@ -156,7 +156,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
     async def _ai(self, prompt, system=None, label=None, image=None):
         if not self.host.ask_ai:
             raise RuntimeError("у бота не підключено жодної моделі ШІ")
-        return await self.host.ask_ai(prompt, system=system, label=label or "📰 Ньюзрум", image=image)
+        return await self.host.ask_ai(prompt, system=system, label=label or "📰 Новинарня", image=image)
 
     # ================================================================ прийом
     def ingest(self, origin, text, source_name="", source_url="", photo="", requested_by=0, hint=""):
