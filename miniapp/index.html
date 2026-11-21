@@ -85,7 +85,7 @@ body.marking .cell,body.marking .seg button,body.marking .card{outline:1.5px das
 .cc-b{border:0;border-radius:10px;padding:5px 9px;font:inherit;font-size:12px;background:color-mix(in srgb,var(--acc) 16%,transparent);color:var(--acc);cursor:pointer}
 .cc-v{font-family:ui-monospace,Menlo,monospace;font-size:14.5px;margin-top:6px;overflow-wrap:anywhere}.copycard details{margin-top:6px;font-size:12px;color:var(--hint)}
 .cc-f{font-family:ui-monospace,Menlo,monospace;overflow-wrap:anywhere;margin:4px 0}
-details{margin:2px 0}details.sec-det{margin:6px 0 10px}details.sec-det>summary{color:var(--txt);font-size:15px;padding:4px 0}details.sec-det[open]>summary{margin-bottom:4px}details summary{cursor:pointer;color:var(--hint);font-size:13.5px}blockquote{margin:6px 0;padding-left:10px;border-left:3px solid var(--sep)}
+details{margin:2px 0}details.sec-det{margin:6px 0 10px}details.sec-det>summary{color:var(--txt);font-size:15px;padding:4px 0;list-style:none}details.sec-det>summary::-webkit-details-marker{display:none}details.sec-det>summary::after{content:' ▾';color:var(--hint)}details.sec-det.full>summary::after{content:' ▴'}details.sec-det>blockquote{margin:4px 0 0}details.sec-det:not(.full)>blockquote{max-height:4.3em;overflow:hidden;-webkit-mask-image:linear-gradient(#000 55%,transparent);mask-image:linear-gradient(#000 55%,transparent);cursor:pointer}.ldr{display:flex;flex-direction:column;align-items:center;gap:8px;padding:28px 0 10px;color:var(--hint)}.ldr .spin{width:28px;height:28px;border:3px solid var(--sep);border-top-color:var(--link,#2481cc);border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}details summary{cursor:pointer;color:var(--hint);font-size:13.5px}blockquote{margin:6px 0;padding-left:10px;border-left:3px solid var(--sep)}
 .feedcard{background:var(--card);border-radius:14px;padding:10px 12px;margin:8px 0}.feedcard.new{box-shadow:inset 3px 0 0 var(--acc)}
 .feedcard small{color:var(--hint);font-size:12px}.ftext{margin-top:4px;overflow-wrap:anywhere}.frows{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .frows button{border:0;border-radius:10px;padding:6px 10px;font:inherit;font-size:13px;background:color-mix(in srgb,var(--acc) 14%,transparent);color:var(--acc)}
@@ -131,16 +131,19 @@ function sanitize(html){
     if(q.hasAttribute('expandable')){const det=document.createElement('details'),sum=document.createElement('summary');
       let p=q.previousSibling;while(p&&((p.nodeType===1&&p.tagName==='BR')||(p.nodeType===3&&!p.textContent.trim())))p=p.previousSibling;
       if(p&&p.nodeType===1&&p.tagName==='B'){ // заголовок розділу («📌 Сьогодні відзначається · 8») — сам рядок, що згортає/розгортає весь розділ, як у боті
-        let n=p.nextSibling;while(n&&n!==q){const nx=n.nextSibling;n.remove();n=nx}sum.appendChild(p);det.className='sec-det'}
+        let n=p.nextSibling;while(n&&n!==q){const nx=n.nextSibling;n.remove();n=nx}sum.appendChild(p);det.className='sec-det';det.setAttribute('open','');
+        const bq=document.createElement('blockquote');bq.append(...q.childNodes);det.append(sum,bq);q.replaceWith(det);continue}
       else{while(q.firstChild&&!(q.firstChild.nodeType===1&&q.firstChild.tagName==='BR'))sum.appendChild(q.firstChild);if(q.firstChild)q.firstChild.remove()}
       if(!sum.textContent.trim())sum.textContent='Докладніше';det.append(sum,...q.childNodes);q.replaceWith(det)}
     else{const b=document.createElement('blockquote');b.append(...q.childNodes);q.replaceWith(b)}}
   (function walk(n){for(const c of [...n.childNodes]){if(c.nodeType===1){const t=c.tagName.toLowerCase();
     if(!['b','strong','i','em','u','s','code','pre','a','br','details','summary','blockquote'].includes(t)){c.replaceWith(...c.childNodes);continue}
-    for(const a of [...c.attributes]) if(!(t==='a'&&a.name==='href'&&/^https?:/.test(a.value))&&!(t==='details'&&a.name==='class'&&a.value==='sec-det')) c.removeAttribute(a.name);
+    for(const a of [...c.attributes]) if(!(t==='a'&&a.name==='href'&&/^https?:/.test(a.value))&&!(t==='details'&&((a.name==='class'&&/^sec-det( full)?$/.test(a.value))||a.name==='open'))) c.removeAttribute(a.name);
     if(t==='code'&&/^[А-ЯІЇЄҐA-Z'’ -]{2,40}$/.test(c.textContent.trim()))c.className='person'; // ім'я виконавця — жовтим
     if(t==='a'){c.target='_blank';c.onclick=e=>{e.preventDefault();const sl=c.href.match(/[?&]start=((?:inb|obb|obl)_[A-Za-z0-9_]+)/);if(sl){haptic();open_('m:start:'+sl[1]);return}try{TG.openLink(c.href)}catch(_){window.open(c.href)}}}
     walk(c)}}})(d);return d.innerHTML}
+document.addEventListener('click',e=>{const sm=e.target.closest&&e.target.closest('details.sec-det>summary, details.sec-det:not(.full)>blockquote');
+  if(!sm||e.target.closest('a'))return;e.preventDefault();sm.closest('details').classList.toggle('full')},true);
 function split(label){
   const m=label.match(/^(\p{Extended_Pictographic}(?:️|‍\p{Extended_Pictographic})*|[●▫️«])\s*/u);
   let icon=m?m[1]:'', rest=m?label.slice(m[0].length):label, badge='';
@@ -176,12 +179,15 @@ async function call(op, data, extra, quiet){
     if(r.status===403){render({text:'<b>Немає доступу</b>\nЦей застосунок відкривається лише для учасників бота.\nЯкщо вас запросили — поверніться в чат із ботом і натисніть «✅ Згоден(-на)», потім відкрийте застосунок знову.',rows:[]},true);return null}
     if(!r.ok){if(!quiet)toast('Помилка сервера (HTTP '+r.status+') — спробуйте ще раз; якщо повторюється, натисніть 🐞');return null}
     return await r.json()}catch(e){if(!quiet)toast(e instanceof SyntaxError?'Сервер відповів незрозуміло — спробуйте ще раз':'Сервер бота не відповідає — спробуйте ще раз за хвилину');return null}finally{busy=false}}}
-function loading(){const m=document.getElementById('main');m.innerHTML='<div class="skel"></div><div class="skel"></div><div class="skel"></div>';const c=document.getElementById('composer');if(c)c.style.display='none';const mb=document.getElementById('mbar');if(mb)mb.remove()}
+let LDT=null;
+function loading(){const m=document.getElementById('main');m.innerHTML='<div class="ldr"><div class="spin"></div><b>⏳ Завантажую…</b><small id="ldrs"></small></div><div class="skel"></div><div class="skel"></div><div class="skel"></div>';
+  const t0=Date.now();clearInterval(LDT);LDT=setInterval(()=>{const e=document.getElementById('ldrs');if(!e){clearInterval(LDT);return}const s=Math.round((Date.now()-t0)/1000);
+    e.textContent=s+' с'+(s>=4?' · збираю свіжі дані (погода, дні, джерела) — це може тривати до хвилини':'')},500);const c=document.getElementById('composer');if(c)c.style.display='none';const mb=document.getElementById('mbar');if(mb)mb.remove()}
 async function open_(data, push=true){
   if(data==='m:home'||data==='m:nav:home') return openMenu(push);
   // «Назад» веде на попередній ЕКРАН, а не на попереднє налаштування: вибір на тому самому екрані історію не множить,
   // а дії (перемикачі, вибір моделі) ніколи не повторюються при поверненні.
-  const my=++seq; const t=setTimeout(()=>{if(my===seq)loading()},350);
+  const my=++seq; const t=setTimeout(()=>{if(my===seq)loading()},150);
   const res=await call('screen',data); clearTimeout(t); if(my!==seq||!res) return;
   if(!res.text){ if(res.toast) toast(res.toast); for(const n of res.notes||[]) toast(n); return }
   const title=titleOf(res.text), same=!!cur && title===curTitle;

@@ -1158,21 +1158,27 @@ class ObservancesUI:
         return out
 
     def fit(self, head, parts, tail, limit=3900):
-        """Склеює частини, поки вміщається в одне повідомлення Telegram (HTML не ріжемо посередині)."""
+        """Склеює частини в одне повідомлення Telegram. Частина — рядок або (повна, коротка): спершу всі коротко
+        (щоб жоден розділ не випав), далі по черзі розгортаємо до повних, поки вміщається."""
         import html as _h
         vis = lambda x: len(_h.unescape(re.sub(r"<[^>]+>", "", x)))  # noqa: E731 — ліміт Telegram рахує видимий текст, не теги
         try:
             import uilayout
-            if uilayout.SCOPE.get() == "app":  # у застосунку ліміту Telegram немає — усі розділи, жоден не випадає
+            if uilayout.SCOPE.get() == "app":  # у застосунку ліміту Telegram немає — усі розділи повністю
                 limit = 60000
         except Exception:  # noqa: BLE001
             pass
-        text = head
-        for p in parts:
-            if vis(text) + vis(p) + vis(tail) + 2 > limit or len(text) + len(p) + len(tail) > 30000:
-                continue  # не вміщається — пропускаємо цю частину, коротші нижче ще можуть увійти
-            text += "\n" + p
-        return text + tail
+        full = [p if isinstance(p, tuple) else (p, p) for p in parts]
+        pick = [None] * len(full)
+        used = vis(head) + vis(tail)
+        for i, (f, sh) in enumerate(full):  # 1) кожен розділ — хоча б коротко
+            if used + vis(sh) + 1 <= limit and len(sh) < 30000:
+                pick[i], used = sh, used + vis(sh) + 1
+        for i, (f, sh) in enumerate(full):  # 2) розгортаємо по черзі
+            if pick[i] is not None and f != sh and used - vis(sh) + vis(f) <= limit:
+                used += vis(f) - vis(sh)
+                pick[i] = f
+        return head + "".join("\n" + p for p in pick if p is not None) + tail
 
     def obs_home(self, chat=None, open_="", weather=""):
         """Зведення дня: дні й погода першими, далі згорнуті списки; ✍️ теми, 📝 списки й ⚙️ меню — «гармоніками».
@@ -1205,13 +1211,18 @@ class ObservancesUI:
             else:
                 if link and not any("відкрити " in ln for ln in lines[-1:]):
                     lines = lines + [f"↗️ {link}"]
-                parts.append(f"<b>{title}</b>\n<blockquote expandable>" + "\n".join(lines) + "</blockquote>")
+                body = [ln for ln in lines if "відкрити " not in ln and not ln.startswith("… ще")]
+                short = body[:2] + ([f"… ще {len(body) - 2} · {link}"] if len(body) > 2 and link else [f"↗️ {link}"] if link else [])
+                parts.append((f"<b>{title}</b>\n<blockquote expandable>" + "\n".join(lines) + "</blockquote>",
+                              f"<b>{title}</b>\n<blockquote expandable>" + "\n".join(short) + "</blockquote>"))
         up = self.upcoming(chat, 30)
         tail = ""
         if up:
             more = (f"\n… ще {len(up) - 10} · " if len(up) > 10 else "\n↗️ ") + self.jump_link("up", d)
-            tail += f"\n<b>⚠️ Найближчі важливі дні · {len(up)}</b>\n<blockquote expandable>" + "\n".join(
-                f"{x.day:02d}.{x.month:02d} · {(x - d).days} дн. · {self.obs_line(r, notes=notes)}{self.plan_who(x)(r)}" for x, r in up[:10]) + more + "</blockquote>"
+            ul = [f"{x.day:02d}.{x.month:02d} · {(x - d).days} дн. · {self.obs_line(r, notes=notes)}{self.plan_who(x)(r)}" for x, r in up[:10]]
+            head_u = f"<b>⚠️ Найближчі важливі дні · {len(up)}</b>\n<blockquote expandable>"
+            parts.append((head_u + "\n".join(ul) + more + "</blockquote>",
+                          head_u + "\n".join(ul[:2]) + (f"\n… ще {len(up) - 2} · " if len(up) > 2 else "\n↗️ ") + self.jump_link("up", d) + "</blockquote>"))
         on = self.store.get("obs_morning") is not False
         cov = self.obs_coverage()
         hm = self.store.get("obs_time") or "07:30"
@@ -1219,7 +1230,7 @@ class ObservancesUI:
             who = "@" + self.host.bot().username
         except Exception:  # noqa: BLE001 — бот ще не ініціалізований або тести
             who = "OrionAI"
-        tail += (f"\n<i>Підготував {esc(who)} · {dt.datetime.now(self.host.tz) if self.host.tz else dt.datetime.now():%d.%m %H:%M}"
+        tail += (f"\n\n<i>Підготував {esc(who)} · {dt.datetime.now(self.host.tz) if self.host.tz else dt.datetime.now():%d.%m %H:%M}"
                  f" · джерела: Вікіпедія, канали, ваші записи · 📚 {cov}/366{'' if cov >= 366 else ' вантажиться'}"
                  f" · ⏰ {hm if on else 'вимк.'}</i>")
         notes.cur = []

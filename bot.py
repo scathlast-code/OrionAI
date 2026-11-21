@@ -4195,8 +4195,7 @@ def agenda_block(chat_id):
         except Exception:  # noqa: BLE001
             log.info("редакційні на сьогодні не прочитано", exc_info=True)
     head = ("<b>📌 На сьогодні</b>\n" + "\n".join(lines) + "\n\n") if lines else ""  # порожнього списку не показуємо
-    rows.append([("➕ Завдання", "m:tnew"), ("📝 Нотатка", "m:nadd")])
-    rows.append([("🤝 Простори", "m:sp"), ("💬 Розмови", "m:dl")])
+    rows.append([("📓 Записник: нове завдання чи нотатка", "m:hub:zap")])  # самі «➕ Завдання» й «📝 Нотатка» — у «📓 Записнику»
     return head, rows
 
 
