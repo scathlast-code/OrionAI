@@ -381,8 +381,8 @@ class ObservancesUI:
             items_ = data.get(sel.isoformat(), [])
             ed = [(f"✏️ {k + 1}", self.cb("obce", f"{sel:%Y%m%d}.{k}")) for k in range(min(len(items_), 8))]
             rows[-3:-3] = [ed[i:i + 4] for i in range(0, len(ed), 4)] + [
-                [("➕ Тема дня", self.cb("obca", f"{sel:%Y%m%d}.topics")), ("➕ Сайт", self.cb("obca", f"{sel:%Y%m%d}.site")),
-                 ("➕ SMM", self.cb("obca", f"{sel:%Y%m%d}.smm"))]]
+                [("➕ Тема дня", self.cb("obca", f"{sel:%Y%m%d}.topics")), ("➕ Сайт", self.cb("obca", f"{sel:%Y%m%d}.site"))],
+                [("➕ Блог", self.cb("obca", f"{sel:%Y%m%d}.blog")), ("➕ Соцмережі", self.cb("obca", f"{sel:%Y%m%d}.smm"))]]
         if day_mode:
             items = data.get(sel.isoformat(), [])
             lines.append(f"<b>{'Сьогодні' if sel == today else f'{sel.day} {MONTHS_GEN[sel.month - 1]}'}, {WD[sel.weekday()]} · {len(items)}</b>")
@@ -430,7 +430,7 @@ class ObservancesUI:
                           [[("🗑 Прибрати цю тему", self.cb("obcd", x))]] + back)
         if a == "obca":
             self.ask(chat, "obce", {"op": "add", "ymd": ymd, "slot": rest or "topics"})
-            where = {"topics": "теми дня", "site": "рядка «Сайт»", "smm": "рядка «smm»"}.get(rest, "теми дня")
+            where = {"topics": "теми дня", "site": "рядка «Сайт»", "blog": "рядка «Блог»", "smm": "рядка «Соцмережі»"}.get(rest, "теми дня")
             return None, (f"➕ <b>Нова тема для {where}</b> · {ymd[6:8]}.{ymd[4:6]}\nНадішліть текст (напр. «Назва - Автор»).", back)
         if a == "obcd":
             it = self._cp_item(ymd, int(rest or 0))
@@ -518,8 +518,8 @@ class ObservancesUI:
             d = dt.date.fromisoformat(day)
             have = [self._tkey(r["title"]) for r in self.obs_on(d)]
             for it in items:
-                if it.get("where") or not self.DAYLIKE_RE.search(it["title"]):
-                    continue  # статті для сайту/SMM — не дні
+                if not self.DAYLIKE_RE.search(it["title"]):
+                    continue  # статті для сайту/соцмереж без назви дня — це завдання, не дні
                 k = self._tkey(it["title"])
                 if any(k == h or (len(k) > 8 and (k in h or h in k)) for h in have):
                     continue
@@ -859,7 +859,8 @@ class ObservancesUI:
                 except ValueError:
                     src = " · " + self.cplan_ref(self.today())
             else:
-                src = notes.mark(r.get("url"), _src_label(r.get("url"), r.get("source") or ""))
+                host = str(r.get("url") or "").split("/")[2].removeprefix("www.") if "//" in str(r.get("url") or "") else ""
+                src = notes.mark(r.get("url"), _src_label(r.get("url"), host))  # джерело — сайт, звідки факт, а не наш календар
             src += "".join(notes.mark(u, host) for u, host in (v.get("urls") or [])[:2]) if v else ""
             return f"{KINDS.get(r['kind'], '•').split()[0]}{marks} {title}{span}{check}{src}"
         if link and str(r.get("url", "")).startswith("http"):
@@ -899,6 +900,8 @@ class ObservancesUI:
             if not hit:
                 return ""
             used.update(id(i) for i in hit)
+            if not any(i.get("author") for i in hit):  # ◽ сірий — за день ніхто не відповідає (призначити — у «🗞 Редакція»)
+                return " · ◽" + ("" if r.get("source") == "Контент-план" else " · " + self.cplan_ref(d))
             return (" · ✍️ " + ", ".join(esc((i["author"] or "") + (f" ({i['where']})" if i["where"] else "")).strip() or "у плані" for i in hit)
                     + ("" if r.get("source") == "Контент-план" else " · " + self.cplan_ref(d)))
         lines = [self.obs_line(r, link=with_links, notes=notes) + (who(r) if plan else "") for r in days[:25]]
@@ -910,11 +913,6 @@ class ObservancesUI:
         if lines:
             out.append(("days", f"📌 {'Сьогодні відзначається' if d == self.today() else 'Цього дня відзначається'} · {len(days)}" if days else f"⏳ Триває · {len(ongoing)}", lines))
         rest = [i for i in plan if id(i) not in used]
-        if rest and out and out[-1][0] == "days":  # 📝 що ще в плані на цей день (статті для сайту, SMM) — частина «днів»
-            out[-1][2].extend(["", f"<b>📝 Ще в контент-плані · {len(rest)}</b>"] + [
-                f"• {esc(i['title'])}" + "".join(f" · {x}" for x in ((f"✍️ {esc(i['author'])}" if i["author"] else ""),
-                                                                    (f"📍 {i['where']}" if i["where"] else "")) if x) + " · " + self.cplan_ref(d)
-                for i in rest[:12]])
         for cat in DB.LIST_CATS:
             items = self.db_items(md, cat, chat)
             if items:
@@ -989,7 +987,7 @@ class ObservancesUI:
     # ↗️ «відкрити X»: переносить до кнопки X (вона блимає), а вже кнопка відкриває розділ
     JUMP = {  # ключ → (назва в «відкрити …», підпис кнопки)
         "days": ("Дні", "📅 Дні"), "up": ("Дні", "📅 Дні"), "wx": ("Погоду", "🌤 Погода"), "lore": ("Прикмети", "📜 Прикмети"),
-        "garden": ("Сад-город", "🌱 Сад-город"), "astro": ("Астрономію", "🔭 Астрономія дня"), "astrol": ("Астрологію", "♈ Астрологія"),
+        "garden": ("Сад-город", "🌱 Сад-город"), "astro": ("Астрономію", "🔭 Астрономія"), "astrol": ("Астрологію", "♈ Астрологія"),
         "trad": ("Традиції", "🪔 Традиції"), "born": ("Народились", "🎂 Народились"), "died": ("Померли", "🕯 Померли"),
         "history": ("Історію", "🏛 Історія"), "discover": ("Відкриття", "🔬 Відкриття"), "cplan": ("Контент-план", "📋 Контент-план"),
     }

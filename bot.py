@@ -2443,6 +2443,7 @@ ITEMS = {
     "ollama": ("🦙 Моя Ollama", "m:ol"),
     "plg": ("🔌 Плагіни", "m:pl"),
     "news": ("📰 Ньюзрум", "m:pl:news"),
+    "red": ("🗞 Редакція", "m:pl:red"),
     "utm": ("🔗 UTM-мітки", "m:utm"),
     "stk": ("🧷 Стікери", "m:pl:stk"),
     "med": ("📥 Медіа", "m:pl:med"),
@@ -2463,7 +2464,7 @@ DEFAULT_GROUPS = {
 DEFAULT_LAYOUT = [
     ["today", "home"], ["g:work", "home"], ["g:settings", "home"],
     ["dl", "g:work"], ["tl", "g:work"], ["nt", "g:work"], ["col", "g:work"], ["sp", "g:work"], ["pins", "g:work"], ["inbox", "g:work"],
-    ["news", "g:work"], ["utm", "g:work"], ["stk", "g:work"], ["med", "g:work"], ["wx", "g:work"], ["cr", "g:work"],
+    ["red", "g:work"], ["news", "g:work"], ["utm", "g:work"], ["stk", "g:work"], ["med", "g:work"], ["wx", "g:work"], ["cr", "g:work"],
     ["md", "g:settings"], ["st", "g:settings"], ["acc", "g:settings"], ["backup", "g:settings"], ["svc", "g:settings"],
     ["btns", "g:settings"], ["diag", "g:settings"], ["help", "g:settings"],
     # вкладки об'єднаних розділів: окремо в меню не стоять, але відкриваються з розділу-«хаба» (і їх можна повернути в меню в «🧭 Вигляд»)
