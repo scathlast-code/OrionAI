@@ -559,6 +559,35 @@ class Node:
                 Route("/cluster/settings", settings_, methods=["POST"])]
 
 
+# 🆓 Безкоштовні сервери для бота (перевірено 21.11.2026; умови змінюються — звіряйте за посиланням)
+FREE_HOSTS = [
+    ("☁️ Oracle Cloud Always Free", "найкращий варіант: безкоштовні віртуальні сервери, що працюють постійно; бот уже вміє тут працювати "
+     "(план переїзду — у «Сервері»); потрібна картка для перевірки особи.", "https://www.oracle.com/cloud/free/"),
+    ("🟦 Google Cloud — e2-micro", "один постійний сервер e2-micro безкоштовно лише в регіонах США (Орегон, Айова, Південна Кароліна), "
+     "30 ГБ диска й 1 ГБ трафіку на місяць; реєстрація з платіжним акаунтом.", "https://cloud.google.com/free/docs/compute-getting-started"),
+    ("🟩 Koyeb — безкоштовний екземпляр", "один на акаунт: 512 МБ пам'яті, 0,1 ядра, 2 ГБ диска; засинає після години без запитів — "
+     "для бота потрібен режим вебхука (TG_WEBHOOK=1), тоді Telegram сам будить. З 2026 належить Mistral AI; "
+     "чи дають його новим акаунтам — перевірте при реєстрації.", "https://www.koyeb.com/docs/reference/instances"),
+    ("🟪 Render — безкоштовний вебсервіс", "засинає через 15 хв без запитів (прокидається ~хвилину), файли зникають при кожному перезапуску — "
+     "годиться лише як запасний сервер у режимі вебхука, базу тут не зберегти.", "https://render.com/docs/free"),
+    ("🚂 Railway Free", "після пробного місяця — $1 на місяць безкоштовно, але сервіси засинають; для постійної роботи потрібен Hobby ($5).",
+     "https://docs.railway.com/pricing/free-plan"),
+    ("✖️ Fly.io", "безкоштовного плану для нових акаунтів більше немає — лише коротка проба.", "https://fly.io/docs/about/discontinued-plans/"),
+]
+
+
+def free_hosts_screen(esc, back="m:cl"):
+    lines = ["🆓 <b>Безкоштовні сервери для бота</b>",
+             "Куди можна перенести бота чи додати запасний сервер без оплати. Посилання — одразу після кожного рядка.", ""]
+    for name, about, url in FREE_HOSTS:
+        lines.append(f"<b>{esc(name)}</b> — {esc(about)} <a href=\"{esc(url)}\">джерело</a>")
+    lines += ["", "<i>Порада: основний сервер — Oracle Always Free або Railway Hobby; Koyeb/Render — запасні у режимі вебхука. "
+              "Як підключити запасний — «🛰 Сервери».</i>"]
+    rows = [[(name.split(" ", 1)[1][:28] + " ↗", "url:" + url)] for name, _a, url in FREE_HOSTS[:5]]
+    rows.append([("« Сервери", back)])
+    return "\n".join(lines), rows
+
+
 def cluster_screen(node, esc, tz, back="m:rm"):
     """Екран «🛰 Сервери» — спільний для ШІ-бота й головного (дані кнопок m:cl…)."""
     from datetime import datetime as _dt
@@ -573,7 +602,7 @@ def cluster_screen(node, esc, tz, back="m:rm"):
                   f"<code>{p}CLUSTER_NAME=</code> назва саме цього сервера зі списку",
                   f"<code>{p}CLUSTER_KEY=</code> однаковий секрет (від 16 символів)",
                   "Докладно — docs/21-rezervni-servery.md"]
-        return "\n".join(lines), [[("« Режим роботи", back)]]
+        return "\n".join(lines), [[("🆓 Безкоштовні сервери", "m:clfree")], [("« Режим роботи", back)]]
     sel = node.get("select") or "auto"
     pool = node.get("pool") or [n for n, _ in node.nodes]
     lines.append(f"Як обирати: <b>{SELECT[sel][0]}</b> — {SELECT[sel][1]}")
@@ -595,6 +624,7 @@ def cluster_screen(node, esc, tz, back="m:rm"):
     rows = [[(("● " if k == sel else "") + v[0], f"m:clsel:{k}") for k, v in SELECT.items()]]
     for n, _ in node.nodes:
         rows.append([(("✅ " if n in pool else "🚫 ") + n, f"m:clpool:{n}"), ("👆 Працюй ти", f"m:clpref:{n}")])
+    rows.append([("🆓 Безкоштовні сервери", "m:clfree")])
     rows.append([("🔄 Перевірити зараз", "m:clrun"), ("« Режим роботи", back)])
     return "\n".join(lines), rows
 
@@ -746,7 +776,7 @@ def links_screen(node, esc, back="m:rm"):
              "☁️ <b>Oracle Cloud</b> — безкоштовний сервер; там заходити раз на 2–3 тижні варто (є нагадування)."]
     rows = [[("🚂 Railway: проєкти", "url:" + RAILWAY_URL), ("💰 Кредит і план", "url:" + RAILWAY_PLANS)],
             [("🐙 " + ("Репозиторій" if repo else "GitHub"), "url:" + (repo or GITHUB_URL)), ("✏️ Репозиторій", "m:lnkgh")],
-            [("☁️ Oracle Cloud", "url:" + ORACLE_URL)],
+            [("☁️ Oracle Cloud", "url:" + ORACLE_URL), ("🆓 Безкоштовні сервери", "m:clfree")],
             [("📱 Застосунок GitHub", "url:" + GITHUB_APP), ("📱 Застосунок Oracle", "url:" + ORACLE_APP)],
             [("« Режим роботи", back)]]
     return "\n".join(lines), rows
