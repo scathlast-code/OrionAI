@@ -156,7 +156,7 @@ class DigestMode:
         rows = [[(("⏹ Зупинити збір" if on else "▶️ Почати збір"), self.cb("cgo")), ("📋 Що зібрано", self.cb("cls"))]]
         tb = [(f"Готуй: {t['label']}"[:40], self.cb("cmk", t["id"])) for t in self.templates()]
         rows += [tb[i:i + 2] for i in range(0, len(tb), 2)]
-        rows.append([("➕ Новини ньюзруму за добу на тему…", self.cb("cday")), ("🗑 Очистити зібране", self.cb("cclr"))])
+        rows.append([("➕ Новини новинарні за добу на тему…", self.cb("cday")), ("🗑 Очистити зібране", self.cb("cclr"))])
         rows.append([("⚙️ Шаблони зведень", self.cb("ctp")), ("« Знайти й написати", self.cb("D"))])
         return text, rows
 
@@ -305,7 +305,7 @@ class DigestMode:
             rows = [[("➕ " + t["title"], self.cb("cdt", t["id"]))] for t in self.desk.topics()]
             rows = [sum(rows[i:i + 2], []) for i in range(0, len(rows), 2)]
             rows.append([("➕ 🗂 Усі теми", self.cb("cdt", 0)), ("« Зведення", self.cb("dg"))])
-            return None, ("➕ <b>Новини ньюзруму за добу</b>\n\nНа яку тему додати до зібраного? Бот візьме чернетки, схвалені й опубліковані "
+            return None, ("➕ <b>Новини новинарні за добу</b>\n\nНа яку тему додати до зібраного? Бот візьме чернетки, схвалені й опубліковані "
                           "новини за 24 години, що стосуються теми (за ключовими словами теми й категорією).\nТеми й слова — ✍️ Як писати → 🗂 Теми пошуку.", rows)
         if a == "cdt":
             day = time.time() - 86400
@@ -320,7 +320,7 @@ class DigestMode:
                     continue
                 if text[:80] in have:
                     continue
-                self.add_collected(chat, "text", text, "ньюзрум #" + str(d["id"]), (d["sources"] or [""])[0])
+                self.add_collected(chat, "text", text, "новинарня #" + str(d["id"]), (d["sources"] or [""])[0])
                 n += 1
             name = topic["title"] if topic else "усі теми"
             return (f"➕ {name}: додано {n}" if n else f"За добу немає новин на тему «{name}»"), self.digest_screen(chat)

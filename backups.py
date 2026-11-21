@@ -267,7 +267,7 @@ class Backups:
             "restore_note": "Автоматичне відновлення ботом відновлює базу даних. Файли project/ у повній копії призначені для ручного відновлення коду.",
         }
         entries = [(f"data/{self.name}.db", db_raw), ("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2).encode())]
-        # Бази плагінів (🔌 ньюзрум, стікери…) — консистентні знімки поруч з основною базою; відновлюються вручну.
+        # Бази плагінів (🔌 новинарня, стікери…) — консистентні знімки поруч з основною базою; відновлюються вручну.
         for rel, path in (self.extra_dbs() if self.extra_dbs else []):
             try:
                 entries.append((f"data/{rel}", self._snapshot_file(path)))

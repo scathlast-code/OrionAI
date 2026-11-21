@@ -378,7 +378,7 @@ class Plugin(Base):
         head = (f"📮 <b>{mention(user.id, user.full_name, user.username or '')}</b> · <code>{user.id}</code>"
                 + (" · учасник" if member else "") + f" · {n}-е" + (f"\n↪️ переслано з «{esc(fsrc)}»" if fsrc else "")
                 + "\n<i>Відповідь — просто reply на повідомлення нижче.</i>")
-        rows = [[("↩️ Відповісти", self.cb("r", user.id)), ("📰 У ньюзрум", self.cb("n", user.id, msg.message_id))],
+        rows = [[("↩️ Відповісти", self.cb("r", user.id)), ("📰 У новинарню", self.cb("n", user.id, msg.message_id))],
                 [("🔇 Мут 1 год", f"m:bpn:{user.id}:mute:3600"), ("🔇 Мут 1 добу", f"m:bpn:{user.id}:mute:86400")],
                 [("🚫 Забанити в боті", f"m:bpn:{user.id}:ban"), ("✅ Прочитано", self.cb("ok", user.id))]]
         if user.username:
@@ -547,12 +547,12 @@ class Plugin(Base):
                 r = con.execute("SELECT text, kind FROM msgs WHERE user=? AND src_msg=? ORDER BY id DESC LIMIT 1", (int(x), int(y))).fetchone()
             news = (self.host.extra.get("plugin") or (lambda pid: None))("news")
             if not news or not r:
-                return "Ньюзрум недоступний", None
+                return "Новинарня недоступна", None
             p = self.person(x) or {}
             iid, st, dup = news.ingest("reader", r["text"] or "", f"Читач: {p.get('name', x)}", requested_by=chat)
             if st == "duplicate":
                 return f"♻️ Повтор матеріалу #{dup}", None
-            return (f"📰 Узяв у ньюзрум #{iid}" if iid else "Порожньо (фото/файл без тексту — перешліть його в ньюзрум вручну)"), None
+            return (f"📰 Узяв у новинарню #{iid}" if iid else "Порожньо (фото/файл без тексту — перешліть його в новинарню вручну)"), None
         if a == "set":
             return None, self.settings()
         if a == "chs":

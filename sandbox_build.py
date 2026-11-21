@@ -199,14 +199,14 @@ async def scenes(news, lb):
     out = {}
     t, rows = news.card(1)
     out["forward"] = {"user": "↪️ Переслано з «КМВА»: У Дарницькому районі відкрили екопарк площею 12 га…",
-                      "bot": ["📥 Узяв у ньюзрум #2. Чернетка прийде окремим повідомленням."], "card": {"text": t, "rows": rows}}
+                      "bot": ["📥 Узяв у новинарню #2. Чернетка прийде окремим повідомленням."], "card": {"text": t, "rows": rows}}
     out["update"] = {"user": None, "bot": [], "card": {"text": "🔁 <b>Оновлення нашої новини</b>\n\n🆕 Нове: КМДА: екопарк на Осокорках відкрито для відвідувачів\nhttps://t.me/kyiv_oda/1201\nЩо саме: парк уже відкрито, площа 12 га\n\n" + news.story_text(1),
                                                     "rows": [[("🔁 Написати оновлення", "m:pl:news:Su:1:update"), ("❌ Написати спростування", "m:pl:news:Su:1:refute")], [("📚 Історія", "m:pl:news:St:1")]]}}
     out["sticker"] = {"user": "🐱 [стікер]", "bot": [], "card": {"text": "🧷 Стікер із пакета <code>CuteCats</code>",
                       "rows": [[("📦 Завантажити пакет", "m:pl:stk:go:x"), ("🔎 Про пакет", "m:pl:stk:inf:x")], [("👁 Стежити за оновленнями", "m:pl:stk:trk1:x")]]}}
     toast, scr = await news.import_groups(1, *parse_text("## Південь\n@mykolaiv_oda | Миколаївська ОВА | Миколаївська\n@kherson_oda | Херсонська ОВА | Херсонська\nрядок без посилання"), 0, "add", "канали_області.xlsx")
     out["file"] = {"user": "📎 канали_області.xlsx", "bot": [], "card": {"text": scr[0], "rows": scr[1]}}
-    out["channel"] = {"user": None, "bot": [], "card": {"text": "📡 <b>Ньюзрум</b>: бот бачить групу «Чат громади». Брати звідти новини автоматично?",
+    out["channel"] = {"user": None, "bot": [], "card": {"text": "📡 <b>Новинарня</b>: бот бачить групу «Чат громади». Брати звідти новини автоматично?",
                       "rows": [[("✅ Моніторити", "m:pl:news:Etog:x"), ("📋 Список", f"m:pl:news:Lo:{lb}")]]}}
     Chat.last = None
     chunks = []

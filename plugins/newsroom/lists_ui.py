@@ -1,4 +1,4 @@
-"""Екрани й дії 📋 списків джерел ньюзруму (міксин до Plugin)."""
+"""Екрани й дії 📋 списків джерел новинарні (міксин до Plugin)."""
 from __future__ import annotations
 
 import io
@@ -49,7 +49,7 @@ class ListsUI:
         mt = ("🟢 підключено" + (f" як {esc(self.mt.me.first_name)}" if self.mt.me else "")) if self.mt.ready else \
              ("🟡 налаштовано, підключаюсь…" if mtproto_configured() and not self.mt.error else f"⚪️ {esc(self.mt.error or 'не налаштовано')}")
         lines = ["📋 <b>Списки каналів і чатів</b>", "",
-                 "Бот сам перевіряє кожне увімкнене джерело зі списків і бере звідти нові дописи в ньюзрум.", "",
+                 "Бот сам перевіряє кожне увімкнене джерело зі списків і бере звідти нові дописи в новинарню.", "",
                  "🌐 Публічні канали (вебпревʼю): 🟢 працює",
                  f"📲 Службовий акаунт: {mt}",
                  "🤖 Де бот адмін / учасник: дописи приходять самі", ""]
@@ -164,7 +164,7 @@ class ListsUI:
                 + (f"Спосіб: {self._social_way(e['ref'])}\n" if e["kind"] == "social" else
                    f"Спосіб: {METHODS.get(e['method'], e['method'])}" + (f" (зараз: {METHODS.get(e['via'], e['via'])})" if e["via"] else "") + "\n")
                 + f"Перевірено: {when(e['last_check'])}" + ("" if e["kind"] == "social" else f" · останній допис №{e['last_id'] or '—'}") + "\n"
-                f"Узято в ньюзрум: {e['taken']} · відсіяно фільтром: {e['filtered']}"
+                f"Узято в новинарню: {e['taken']} · відсіяно фільтром: {e['filtered']}"
                 + (f"\n⚠️ {esc(e['last_error'])}" if e["last_error"] else ""))
         rows = [
             [(("⚪️ Вимкнути" if e["enabled"] else "🟢 Увімкнути"), self.cb("Etog", eid)), ("🔄 Перевірити джерело", self.cb("Enow", eid))],

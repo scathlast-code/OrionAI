@@ -2629,7 +2629,8 @@ DEFAULT_LAYOUT = [
 ]
 
 L = Layout(ITEMS, DEFAULT_LAYOUT, DEFAULT_GROUPS, lambda c: prefs(c), lambda c, k, v: set_pref(c, k, v),
-           locked={"md"}, admin_items={"acc", "backup", "svc", "comm", "runmode", "links", "ollama", "news", "hubm"}, is_admin=lambda c: is_admin_id(c), use_kb=False)
+           locked={"md"}, admin_items={"acc", "backup", "svc", "comm", "runmode", "links", "ollama", "news", "hubm"}, is_admin=lambda c: is_admin_id(c), use_kb=False,
+           screen_groups={"g:settings"})
 
 
 def _migrate_compact_menu(chat_id):
@@ -2803,7 +2804,7 @@ def _migrate_compact_menu_inner(chat_id):
         set_pref(chat_id, "accordion_menu_v4", True)
         p = prefs(chat_id)
     if not p.get("plugins_menu_v5"):
-        # Нова головна категорія «🔌 Плагіни» (Ньюзрум, Стікери) — додаємо, не чіпаючи власних налаштувань меню.
+        # Нова головна категорія «🔌 Плагіни» (Новинарня, Стікери) — додаємо, не чіпаючи власних налаштувань меню.
         groups = dict(p.get("groups") or DEFAULT_GROUPS)
         groups.setdefault("plugins", DEFAULT_GROUPS.get("plugins", "📰 Медіа"))
         set_pref(chat_id, "groups", groups)
@@ -3169,17 +3170,8 @@ CANCEL_ROW = [("✖️ Скасувати", "m:cancel")]
 # ---------------------------------------------------------------- головне меню
 
 
-def scr_home(chat_id, open_group=None):
-    """Головне меню-акордеон: категорія лишається на місці, а її кнопки з'являються прямо під нею."""
-    _migrate_compact_menu(chat_id)
-    did = current_dialog(chat_id)
-    d = dialog_get(did)
-    open_tasks = len(tasks_open(chat_id=chat_id))
-    try:
-        banner = PLUGINS.banner(chat_id)
-    except Exception:  # noqa: BLE001
-        banner = ""
-    # 👋 привітання й лише кількість справ — самі справи в «🌅 Сьогодні» та «💬 Робота»
+def home_counts(chat_id):
+    """👋 Привітання й кількість справ — однаково для чату й застосунку."""
     name = (known_name(chat_id)[0] or (member_get(chat_id) or {}).get("name") or "").split(" ")[0]
     hour = datetime.now(TZ).hour
     hello = "Доброго ранку" if 5 <= hour < 12 else "Добрий день" if hour < 18 else "Добрий вечір" if hour < 23 else "Доброї ночі"
@@ -3194,15 +3186,47 @@ def scr_home(chat_id, open_group=None):
             red_n = red.my_open(chat_id)[1]
         except Exception:  # noqa: BLE001
             red_n = 0
+    open_tasks = len(tasks_open(chat_id=chat_id))
     total = open_tasks + today_n + red_n
-    word = "завдання" if total % 10 in (2, 3, 4) and not 12 <= total % 100 <= 14 else "завдання" if total % 10 == 1 and total % 100 != 11 else "завдань"
-    text = (
-        (banner + "\n\n" if banner else "")
-        + f"👋 <b>{hello}{', ' + esc(name) if name else ''}!</b>\n\n"
-        + (f"У вас <b>{total}</b> {word}" + (f" (на сьогодні — {today_n})" if today_n else "") + ".\n"
-           "Перегляньте їх у «🌅 Сьогодні» чи «📓 Записнику»." if total else
-           "Відкритих завдань немає. Що нового — у «🌅 Сьогодні».")
-    )
+    word = "завдання" if total % 10 in (1, 2, 3, 4) and not 11 <= total % 100 <= 14 else "завдань"
+    return {"name": name, "hello": hello, "today": today_n, "red": red_n, "open": open_tasks, "total": total, "word": word}
+
+
+def home_greeting_html(g):
+    return (f"👋 <b>{g['hello']}{', ' + esc(g['name']) if g['name'] else ''}!</b>\n\n"
+            + (f"У вас <b>{g['total']}</b> {g['word']}" + (f" (на сьогодні — {g['today']})" if g['today'] else "") + ".\n"
+               "Перегляньте їх у «🌅 Сьогодні» чи «📓 Записнику»." if g['total'] else
+               "Відкритих завдань немає. Що нового — у «🌅 Сьогодні»."))
+
+
+def scr_group(chat_id, gid):
+    """Тека-кнопка (⚙️ Налаштування): усе, що в ній, — окремим екраном."""
+    import explain
+    g = f"g:{gid}"
+    title = L.label(chat_id, g)
+    about = (explain.E.get(g) or {}).get("what", "") if isinstance(explain.E.get(g), dict) else ""
+    lines = [f"<b>{esc(title)}</b>"] + ([esc(about)] if about else [])
+    for i in L.in_place(chat_id, g):
+        if not i.startswith("g:") and i not in ("menu",):
+            h = explain.short(i)
+            if h:
+                lines.append(f"• {esc(L.label(chat_id, i))} — {esc(h)}")
+    rows = L.accordion_rows(chat_id, place=g)
+    return "\n".join(lines), rows
+
+
+def scr_home(chat_id, open_group=None):
+    """Головне меню-акордеон: категорія лишається на місці, а її кнопки з'являються прямо під нею."""
+    _migrate_compact_menu(chat_id)
+    did = current_dialog(chat_id)
+    d = dialog_get(did)
+    open_tasks = len(tasks_open(chat_id=chat_id))
+    try:
+        banner = PLUGINS.banner(chat_id)
+    except Exception:  # noqa: BLE001
+        banner = ""
+    g = home_counts(chat_id)
+    text = (banner + "\n\n" if banner else "") + home_greeting_html(g)
     pending = len(members_list("pending")) if is_admin_id(chat_id) else 0
     badges = {"acc": f" · 🔔 {pending}"} if pending else {}
     if pending:
@@ -4272,7 +4296,7 @@ def scr_access():
     rows += [[(f"👤 {m['name'] or 'ID ' + str(m['user_id'])}", f"m:mem:{m['user_id']}")] for m in approved]
     rows += [[(f"🚫 Скасувати запрошення …{inv['code'][-4:]}", f"m:invx:{inv['code']}")] for inv in invites]
     full = members_full()
-    lines.append("\n" + ("🔓 Учасники мають усі права, як власник: налаштування, ньюзрум, плагіни, схвалення інших."
+    lines.append("\n" + ("🔓 Учасники мають усі права, як власник: налаштування, новинарня, плагіни, схвалення інших."
                           if full else "🔒 Керувати ботом і схвалювати інших може лише власник."))
     rows.append([("🔒 Права лише власнику" if full else "🔓 Усім учасникам — усе", "m:accfull")])
     rows.append([("ℹ️", "help:g:access"), HOME])
@@ -8055,6 +8079,8 @@ def is_view(data):
         return CM.is_view(parts)
     if len(parts) > 1 and parts[1] == "pl":
         return PLUGINS.is_view(parts[2:])
+    if len(parts) > 2 and parts[1] == "grp":
+        return f"g:{parts[2]}" in L.screen_groups
     return len(parts) > 1 and parts[1] in VIEW_ACTIONS
 
 
@@ -8086,11 +8112,9 @@ HUBS = {
         ("⬇️ Завантажити", "m:pl:med", 2, "open"),
         ("🖼 Мої медіа", "m:lib", 1, "open"),
     ]),
-    "nr": ("📰 Новинарня", "Уся робота з новинами в одному місці: редакція (чати, завдання, люди, звіт), публікації й чернетки, "
-                          "контент-план, UTM-мітки та збір текстів.", [
+    "nr": ("📰 Новинарня", "Уся робота з новинами в одному місці: завдання, новини й чернетки, обговорення й рішення, "
+                          "редакційні чати, люди, контент-план і звіт, а також UTM-мітки та збір текстів.", [
         ("🗞 Редакція", "m:pl:red", 6, "all"),
-        ("✍️ Публікації", "m:pl:news", 0, "open"),
-        ("📋 Контент-план", "m:pl:news:obcp", 0, "open"),
         ("🔗 UTM-мітки", "m:utm", 0, "open"),
         ("📥 Збір текстів", "m:col", 0, "open"),
     ]),
@@ -8143,7 +8167,7 @@ def _cut_html(body, n):
         out.append(l)
         k += 1 if l.strip() else 0
     t = "\n".join(out).strip()
-    if t.count("<b>") != t.count("</b>") or t.count("<i>") != t.count("</i>") or t.count("<code>") != t.count("</code>"):
+    if any(len(re.findall(rf"<{tg}[\s>]", t)) != t.count(f"</{tg}>") for tg in ("b", "i", "u", "s", "code", "pre", "a", "blockquote", "tg-spoiler")):
         t = re.sub(r"<[^>]+>", "", t)
     return t + ("…" if k >= n and len(lines) > len(out) else "")
 
@@ -9502,6 +9526,8 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         await ctx.bot.send_message(chat_id, "🏭 Скинуто: " + ", ".join(done) + ".\nПовернути все можна, надіславши боту файл копії вище.")
         L.visit(chat_id, "m:home")
         return await show(update, *scr_home(chat_id), edit=False)
+    elif a == "grp" and f"g:{arg}" in L.screen_groups:
+        screen = scr_group(chat_id, arg)  # ⚙️ Налаштування — окремий екран, як звичайна кнопка
     elif a == "grp":
         # Акордеон: група розгортається прямо всередині головного меню.
         screen = scr_home(chat_id, arg)
@@ -10674,7 +10700,7 @@ async def cmd_scenarios(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def on_file_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not allowed(update): return await deny(update)
-    if await PLUGINS.on_document(update, ctx):  # 🔌 напр. файл зі списком каналів для ньюзруму
+    if await PLUGINS.on_document(update, ctx):  # 🔌 напр. файл зі списком каналів для новинарні
         return
     doc=update.message.document; chat=update.effective_chat.id
     if doc.file_size and doc.file_size>filework.MAX_INPUT:
@@ -10952,7 +10978,7 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         req = translate_mod.parse_request(msg.text, (r0.text or r0.caption) if r0 else None)
         if req:
             return await do_translate(update, ctx, *req)
-    if await PLUGINS.intercept(update, ctx):  # 🔌 режим прийому ньюзруму, посилання на стікери тощо
+    if await PLUGINS.intercept(update, ctx):  # 🔌 режим прийому новинарні, посилання на стікери тощо
         return
     if not msg.text and not msg.photo:
         return
@@ -11887,7 +11913,7 @@ async def main():
             return PlainTextResponse("ok")
 
         app.router.routes.append(Route(HOOK_PATH, tg_webhook, methods=["POST"]))
-    for _route in reversed(PLUGINS.routes(MCP_SECRET)):  # 🔌 вебхуки плагінів (ньюзрум: n8n, WhatsApp)
+    for _route in reversed(PLUGINS.routes(MCP_SECRET)):  # 🔌 вебхуки плагінів (новинарня: n8n, WhatsApp)
         app.router.routes.insert(0, _route)
     from starlette.routing import Route as _Route
     from starlette.responses import HTMLResponse as _HTML, Response as _Resp

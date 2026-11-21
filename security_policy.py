@@ -150,7 +150,7 @@ async def telegram_guard(update, context, scope=None):
     user = update.effective_user
     if not user:
         # Дописи каналів, де бот адміністратор, не мають автора-користувача. Пропускаємо їх далі
-        # (🏘 Спільноти, 📰 Ньюзрум); усе інше без користувача, як і раніше, зупиняється.
+        # (🏘 Спільноти, 📰 Новинарня); усе інше без користувача, як і раніше, зупиняється.
         if getattr(update, "channel_post", None) or getattr(update, "edited_channel_post", None):
             return
         raise ApplicationHandlerStop
@@ -163,7 +163,7 @@ async def telegram_guard(update, context, scope=None):
         return
     if ok and int(user.id) not in _trusted_ids():
         # Ліміт частоти — лише для сторонніх. Власник і люди з ALLOWED_USERS можуть швидко клацати меню
-        # й пересилати в ньюзрум десятки дописів поспіль.
+        # й пересилати в новинарню десятки дописів поспіль.
         ok = rate_allowed(user.id, limit=int(os.getenv('SECURITY_RATE_LIMIT', '40')))
         reason = 'rate limit' if not ok else reason
     if not ok:

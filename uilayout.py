@@ -36,8 +36,9 @@ class Layout:
     """items: {id: (підпис, дані)}; default_layout: [[id, місце]]; default_groups: {gid: назва}."""
 
     def __init__(self, items, default_layout, default_groups, get_prefs, set_pref, locked=(), admin_items=(),
-                 is_admin=lambda chat: True, home_data="m:home", settings_back="m:st", use_kb=True):
+                 is_admin=lambda chat: True, home_data="m:home", settings_back="m:st", use_kb=True, screen_groups=()):
         self.items = items
+        self.screen_groups = set(screen_groups)  # теки-кнопки: відкриваються окремим екраном, а не розгортаються ▼
         self.default_layout = default_layout
         self.default_groups = default_groups
         self.get_prefs = get_prefs
@@ -138,6 +139,9 @@ class Layout:
             plain.clear()
 
         for i in self.in_place(chat, place):
+            if i.startswith("g:") and i in self.screen_groups and not depth:  # тека-кнопка: окремий екран, без ▼
+                plain.append((self.label(chat, i) + badges.get(i, ""), f"m:grp:{i[2:]}"))
+                continue
             if i.startswith("g:") and i not in chain and not depth:  # згорнута тека на головному — звичайна клітинка сітки
                 plain.append((self.label(chat, i) + badges.get(i, "") + " ▼", f"m:grp:{i[2:]}"))
                 continue

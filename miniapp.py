@@ -330,7 +330,10 @@ def menu(B, uid):
     def items(place, path):
         own, subs = [], []
         for i in L.in_place(uid, place):
-            if i.startswith("g:"):
+            if i.startswith("g:") and i in getattr(L, "screen_groups", ()):  # тека-кнопка (⚙️ Налаштування) — плиткою, як у чаті
+                own.append({"key": i, "label": L.label(uid, i), "data": f"m:grp:{i[2:]}", "hint": explain.short(i) or "Усі налаштування", "hs": 0,
+                            "why": f"m:why:{i}" if i in explain.E else ""})
+            elif i.startswith("g:"):
                 subs += items(i, path + [L.label(uid, i)])
             elif i not in ("menu", "app"):
                 o = (B.prefs(uid).get("hint_over") or {}).get(__import__("button_hints").norm_label(L.label(uid, i))) or {}
@@ -341,23 +344,26 @@ def menu(B, uid):
     sections = items(PLACE_HOME, [])
     if sections and not sections[0]["title"]:
         sections[0]["title"] = "Швидкий доступ"
-    d = B.dialog_get(B.current_dialog(uid))
-    info = [("💬", "Розмова", d["title"], "m:dl"),
-            ("🤖", "Відповідає", B.choice_label(B.get_choice(uid)), "m:md"),
-            ("⏰", "Завдань", str(len(B.tasks_open(chat_id=uid))), "m:tl"),
-            ("📊", "Сьогодні", B.limits_brief(short=True), "m:lim"),
-            ("🔔", "Події", (f"{B.FEED.unseen(uid)} нових" if B.FEED.unseen(uid) else "немає нових") if hasattr(B, "FEED") else "—", "feed")]
-    return {"menu": True, "info": [{"icon": a, "label": b, "value": c, "data": e} for a, b, c, e in info], "sections": sections,
+    g = B.home_counts(uid)  # те саме привітання й лічильник справ, що й на головному екрані бота
+    greet = re.sub(r"<[^>]+>", "", B.home_greeting_html(g))
+    unseen = B.FEED.unseen(uid) if hasattr(B, "FEED") else 0
+    info = [("📓", "Завдань", str(g["total"]), "m:hub:zap"),
+            ("🌅", "На сьогодні", str(g["today"]), "m:today")]
+    if g["red"]:
+        info.append(("🗞", "Редакційні", str(g["red"]), "m:pl:red"))
+    info.append(("🔔", "Події", f"{unseen} нових" if unseen else "немає нових", "feed"))
+    return {"menu": True, "greet": greet, "info": [{"icon": a, "label": b, "value": c, "data": e} for a, b, c, e in info], "sections": sections,
             "tabs": tabs(B, uid), "tabs_max": TABS_MAX}
 
 
 TABS_MAX = 4  # + «☰ Меню», яке лишається завжди
-TABS_DEFAULT = ["chat", "news", "inbox", "stk"]
+TABS_DEFAULT = ["chat", "today", "zap", "nr"]
+TABS_RENAMED = {"news": "nr", "stk": "cr", "med": "cr", "tl": "zap", "nt": "zap", "utm": "nr", "col": "nr", "red": "nr"}  # старі кнопки, що тепер усередині нових розділів
 
 
 def tabs(B, uid):
     """Панель унизу застосунку: вибрані кнопки (налаштовує сам користувач)."""
-    keys = B.prefs(uid).get("app_tabs") or TABS_DEFAULT
+    keys = list(dict.fromkeys(TABS_RENAMED.get(k, k) for k in (B.prefs(uid).get("app_tabs") or TABS_DEFAULT)))
     out = []
     for k in keys:
         if k == "chat":
@@ -365,7 +371,7 @@ def tabs(B, uid):
         elif k == "feed":
             out.append({"key": "feed", "label": "🔔 Події", "data": "feed"})
         elif k in getattr(B.L, "admin_items", set()) and not B.is_admin_id(uid):
-            continue  # розділи лише для власника (📰 Ньюзрум тощо) учаснику не показуємо
+            continue  # розділи лише для власника (📰 Новинарня тощо) учаснику не показуємо
         elif k in B.ITEMS and k not in ("menu", "app") and B.ITEMS[k][1].startswith(("m:", "help:")):
             out.append({"key": k, "label": B.L.label(uid, k), "data": B.ITEMS[k][1]})
     return out[:TABS_MAX]
@@ -375,6 +381,29 @@ def save_tabs(B, uid, keys):
     keys = [str(k) for k in (keys or []) if k in ("chat", "feed") or k in B.ITEMS][:TABS_MAX]
     B.set_pref(uid, "app_tabs", list(dict.fromkeys(keys)))
     return menu(B, uid)
+
+
+def deeplink(B, data):
+    """«m:start:<параметр>» — посилання t.me/…?start=… з тексту відкриваємо прямо в застосунку, а не в чаті."""
+    if not (data or "").startswith("m:start:"):
+        return data
+    arg = data[8:]
+    news = B.PLUGINS.get("news")
+    m = re.fullmatch(r"obb_([a-z]+)_(\d{8})", arg)
+    if m and news and hasattr(news, "jump_target"):
+        import datetime as _dt
+        try:
+            d = _dt.datetime.strptime(m.group(2), "%Y%m%d").date()
+        except ValueError:
+            d = _dt.datetime.now(B.TZ).date()
+        return news.jump_target(m.group(1), d)[1]
+    m = re.fullmatch(r"obl_([a-z]+)_(\d{8})", arg)
+    if m and news and hasattr(news, "cb"):
+        return news.cb("obl", f"{m.group(1)}.{m.group(2)}")
+    m = re.fullmatch(r"inb_(\d+)", arg)
+    if m:
+        return f"m:pl:inb:t:{m.group(1)}"
+    return "m:home"
 
 
 async def run(bot_module, uid, op, data=None, text=None, user=None, file=None):
@@ -398,7 +427,7 @@ async def run(bot_module, uid, op, data=None, text=None, user=None, file=None):
     try:
         B.CHAT.set(uid)
         if op in ("say", "file"):
-            # Повідомлення з застосунку проходить той самий шлях, що й повідомлення в чаті: ньюзрум, стікери, ШІ…
+            # Повідомлення з застосунку проходить той самий шлях, що й повідомлення в чаті: новинарня, стікери, ШІ…
             upd = _Update(uid, sink, capbot, text=text or "", user=user)
             ctx = _Ctx(capbot)
             if op == "file":
@@ -420,6 +449,7 @@ async def run(bot_module, uid, op, data=None, text=None, user=None, file=None):
             else:
                 sink.notes.append("Тут текст не очікувався. Відкрийте розділ і натисніть потрібну дію.")
         else:
+            data = deeplink(B, data)
             upd = _Update(uid, sink, tbot, data=data, user=user)
             await (B.open_data if (data or "").startswith("help:") else B.route)(upd, _Ctx(capbot or tbot), data or "m:home", edit=True, record=False)
     finally:
