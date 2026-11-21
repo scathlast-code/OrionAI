@@ -158,6 +158,14 @@ class ObservancesUI:
                              ("since", "TEXT NOT NULL DEFAULT ''")):
                 if col not in cols:
                     con.execute(f"ALTER TABLE observances ADD COLUMN {col} {ddl}")
+            dcols = {r[1] for r in con.execute("PRAGMA table_info(daybook)")}
+            if "imp" not in dcols:  # ❗ ручна позначка важливого пункту (NULL — автоматично за темою)
+                con.execute("ALTER TABLE daybook ADD COLUMN imp INTEGER")
+            if not self.store.get("discover_split_v1"):  # відкриття — окремим розділом (раніше були в «Історії»)
+                for rid, txt in con.execute("SELECT id, text FROM daybook WHERE cat='history'").fetchall():
+                    if DB.is_discovery(txt):
+                        con.execute("UPDATE OR IGNORE daybook SET cat='discover', key='discover'||substr(key, 8) WHERE id=?", (rid,))
+                self.store.set("discover_split_v1", 1)
             for t, k, a, b, y, src in SEED:
                 con.execute("INSERT OR IGNORE INTO observances(title,kind,start,finish,yearly,source,added,key) VALUES(?,?,?,?,?,?,?,?)",
                             (t, k, a, b, y, src, time.time(), normalize(t)[:80] + "|" + a))
@@ -275,6 +283,21 @@ class ObservancesUI:
             rs = [dict(r) for r in con.execute("SELECT * FROM daybook WHERE md=? AND cat=? AND hidden=? AND owner IN (0, ?) ORDER BY owner DESC, id",
                                                (md, cat, 1 if hidden else 0, int(chat or 0)))]
         return rs
+
+    @staticmethod
+    def db_imp(it):
+        """❗ Важливість пункту: ручна позначка, інакше — автоматично за темою (екологія, здоров'я, агро, енергетика)."""
+        v = it.get("imp")
+        return int(v) if v is not None else (1 if DB.IMPORTANT_RE.search(it.get("text") or "") or DB.VERY_RE.search(it.get("text") or "") else 0)
+
+    def db_line(self, it, notes=None):
+        """Пункт списку дня: ❗ (якщо наша тема) + текст + джерело-гіперпосилання одразу після речення."""
+        mark = "❗ " if self.db_imp(it) else ""
+        src = ""
+        if notes is not None:
+            src = notes.mark(it.get("url"), _src_label(it.get("url"))) if str(it.get("url") or "").startswith("http") else \
+                (" · <i>ваш запис</i>" if it.get("owner") else "")
+        return ("👤 " if it.get("owner") else "") + mark + esc(it["text"]) + src
 
     def db_get(self, iid):
         with closing(self.store.db()) as con:
@@ -421,6 +444,13 @@ class ObservancesUI:
         return n
 
     # ----- екрани
+    def sourced(self, r):
+        """Чи є в теми джерело: посилання, підтвердження з інтернету або це запис людини. Без джерела — не показуємо."""
+        if r.get("owner") or str(r.get("url") or "").startswith("http"):
+            return True
+        v = self.verified(r.get("id"))
+        return bool(v and v.get("urls"))
+
     def obs_line(self, r, with_dates=False, link=False, notes=None):
         span = ""
         if with_dates or r["kind"] != "day":
@@ -447,11 +477,19 @@ class ObservancesUI:
         md = d.strftime("%m-%d")
         out = []
         rs = self.obs_on(d, chat)
+        unsrc = []
+        if notes is not None:  # 🔎 без джерела нічого не показуємо — лише те, що можна перевірити
+            unsrc = [r for r in rs if not self.sourced(r)]
+            rs = [r for r in rs if self.sourced(r)]
+            if unsrc:
+                self.verify_bg(d)
         days = [r for r in rs if r["kind"] == "day"]
         ongoing = [r for r in rs if r["kind"] != "day"]
         lines = [self.obs_line(r, link=with_links, notes=notes) for r in days[:25]]
         if ongoing:
             lines += ["", "<b>Триває:</b>"] + [self.obs_line(r, link=with_links, notes=notes) for r in ongoing[:12]]
+        if notes is not None and unsrc:
+            lines.append(f"<i>🔎 Ще {len(unsrc)} — шукаю джерела, з'являться після перевірки</i>")
         if notes is not None and lines:
             if any(self.verified(r["id"]) for r in days[:25] + ongoing[:12]):
                 lines.append("<i>✅N — скільки незалежних ресурсів підтверджують (посилання — одразу після рядка) · ⚠️1 — лише одне джерело, звіряйте</i>")
@@ -460,21 +498,25 @@ class ObservancesUI:
         for cat in DB.LIST_CATS:
             items = self.db_items(md, cat, chat)
             if items:
-                cap = {"history": 12, "born": 10, "died": 8}.get(cat, 15)
+                cap = {"history": 12, "born": 10, "died": 8, "discover": 10}.get(cat, 15)
+                items = sorted(items, key=lambda it: -self.db_imp(it))  # ❗ важливе за нашими темами — першим
                 per_item = notes is not None and len({it.get("url") or "" for it in items[:cap]}) > 1  # різні джерела — зноска під кожним
                 body = []
                 for it in items[:cap]:
-                    body.append(("👤 " if it.get("owner") else "") + esc(it["text"])
-                                + (notes.mark(it.get("url"), _src_label(it.get("url"))) if notes is not None else ""))
+                    body.append(self.db_line(it, notes))
 
                 if len(items) > cap:
                     body.append(f"… ще {len(items) - cap} — у «📝 Списки»")
                 out.append((cat, DB.CATS[cat][0], [x for x in body if x]))
         astro = DB.astro_lines(d, self.host.tz)
         if notes is not None:
-            astro = [x + (notes.mark("https://gml.noaa.gov/grad/solcalc/", "NOAA") if i == 0 else "") for i, x in enumerate(astro)]
+            astro = [x + notes.mark("https://gml.noaa.gov/grad/solcalc/", "NOAA") for x in astro]  # розрахунок за формулами NOAA
         out.append(("astro", DB.CATS["astro"][0], astro))
-        out.append(("astrol", DB.CATS["astrol"][0], DB.astrol_lines(d)))
+        astrol = DB.astrol_lines(d)
+        if notes is not None:
+            srcs = ["https://uk.wikipedia.org/wiki/Знаки_зодіаку", "https://uk.wikipedia.org/wiki/Місячний_календар", ""]
+            astrol = [x + (notes.mark(u, "Вікіпедія") if u else "") for x, u in zip(astrol, srcs)]
+        out.append(("astrol", DB.CATS["astrol"][0], astrol))
         g = (self.store.get("garden_cache") or {}).get(self.garden_key(d))
         if g:
             body = []
@@ -494,7 +536,7 @@ class ObservancesUI:
         for i in range(1, days + 1):
             x = t0 + dt.timedelta(days=i)
             for r in self.obs_on(x, chat):
-                if r["kind"] == "day" and r["imp_"] >= min_imp and r["id"] not in seen:
+                if r["kind"] == "day" and r["imp_"] >= min_imp and r["id"] not in seen and self.sourced(r):
                     seen.add(r["id"])
                     out.append((x, r))
         return out
@@ -560,7 +602,7 @@ class ObservancesUI:
         if topics:
             rows.append([(f"✍️ Написати на тему · {len(topics)} {'▾' if t_open else '▸'}", self.cb("obh", flip("t")))])
             if t_open:
-                rows += [[(f"✍️ {r['title'][:34]}", self.cb("ob", r["id"]))] for r in topics]
+                rows += [[(f"✍️ {clean_title(r['title'])}", self.cb("ob", r["id"]))] for r in topics]  # скорочує kb() розумно
         rows.append([(f"📝 Списки дня {'▾' if l_open else '▸'}", self.cb("obh", flip("l")))])
         if l_open:
             ymd = d.strftime("%Y%m%d")
@@ -573,7 +615,7 @@ class ObservancesUI:
             rows += [[("📅 Сьогодні", self.cb("obt", "day")), ("🗓 Тиждень", self.cb("obt", "week"))],
                      [("📆 Місяць", self.cb("obt", "month")), ("🎆 Рік", self.cb("obt", "year"))],
                      [("🗓 Календар", self.cb("obc", d.strftime("%Y%m"))), ("➕ Своя тема", self.cb("oba"))],
-                     [("🌱 Поради саду", self.cb("obg")), ("📜 Прикмети", self.cb("obj"))],
+                     [("🌱 Поради саду", self.cb("obg")), ("📜 Усі прикмети з джерелами", self.cb("obj"))],
                      [("🔄 Оновити з інтернету", self.cb("obu")), (("⏰ " + hm) if on else "⏰ вимк.", self.cb("obm"))]]
         rows.append([("« Знайти й написати", self.cb("D"))])  # джерела — зносками під кожною частиною, не кнопками
         return text, rows
@@ -611,6 +653,10 @@ class ObservancesUI:
                     hosts.add(host)
                     urls.append([x["url"], host])
             base = 1 if str(r.get("url", "")).startswith("http") else 0
+            if not base and urls:  # теми без джерела отримують перше знайдене незалежне джерело
+                self.obs_set(r["id"], url=urls[0][0][:500])
+                urls = urls[1:]
+                base = 1
             cache[str(r["id"])] = {"y": year, "n": base + len(urls), "urls": urls[:4]}
             self.store.set("obs_verify", cache)
             await asyncio.sleep(0.5)
@@ -716,9 +762,7 @@ class ObservancesUI:
             items = [(r["id"], self.obs_line(r, notes=notes)) for r in self.obs_on(d, chat)]
             hidden = len(self.obs_on(d, chat, hidden=True))
         else:
-            items = [(it["id"], ("👤 " if it["owner"] else "") + esc(it["text"])
-                      + (notes.mark(it.get("url"), _src_label(it.get("url"))) if it.get("url") else (" · <i>ваш запис</i>" if it.get("owner") else "")))
-                     for it in self.db_items(md, cat, chat)]
+            items = [(it["id"], self.db_line(it, notes)) for it in self.db_items(md, cat, chat)]
             hidden = len(self.db_items(md, cat, chat, hidden=True))
         per = 8
         page = max(0, min(int(page or 0), max(0, (len(items) - 1) // per)))
@@ -767,6 +811,8 @@ class ObservancesUI:
         rows = []
         if self.can_edit(chat, it["owner"]):
             rows.append([("✏️ Змінити", self.cb("obe", f"d{iid}")), ("🌑 Затінити", self.cb("obx", f"d{iid}"))])
+            auto = it.get("imp") is None
+            rows.append([(("❗ Важливе" if self.db_imp(it) else "▫️ Звичайне") + (" (авто)" if auto else "") + " — змінити", self.cb("obq", iid))])
         if not it["owner"]:
             rows.append([("👤 Копію в особисті", self.cb("obp", f"d{iid}"))])
         if it["url"].startswith("http"):
@@ -869,7 +915,7 @@ class ObservancesUI:
         when = "минуло" if x < self.today() else ("сьогодні" if x == self.today() else f"через {(x - self.today()).days} дн.")
         lines = [f'📅 <b><a href="{self.wiki_day_url(x)}">{x.day} {MONTHS_GEN[x.month - 1]}</a> {x.year}</b> · {when}', ""]
         lines += [self.obs_line(r, link=True) for r in rs] or ["Тем немає."]
-        rows = [[(f"✍️ {r['title'][:30]}", self.cb("ob", r["id"]))] for r in rs[:6]]
+        rows = [[(f"✍️ {clean_title(r['title'])}", self.cb("ob", r["id"]))] for r in rs[:6]]
         rows.append([("📝 Список дня", self.cb("obl", f"days.{ymd}")), ("➕ До цього дня", self.cb("obn", f"days.{ymd}", "0"))])
         rows.append([("🗓 Календар", self.cb("obc", ymd[:6])), ("« Теми дня", self.cb("obh"))])
         return "\n".join(lines)[:4000], rows
@@ -1005,6 +1051,13 @@ class ObservancesUI:
         if a == "ob":
             return None, self.obs_card(x, chat)
         if a == "obi":
+            return None, self.db_card(chat, x)
+        if a == "obq":  # ❗ ручна позначка: авто → важливе → звичайне → авто
+            it = self.db_get(x)
+            if it and self.can_edit(chat, it["owner"]):
+                nxt = {None: 1, 1: 0, 0: None}[it.get("imp") if it.get("imp") in (0, 1) else None]
+                with closing(self.store.db()) as con, con:
+                    con.execute("UPDATE daybook SET imp=? WHERE id=?", (nxt, int(x)))
             return None, self.db_card(chat, x)
         if a == "obl":
             return None, self.obs_list(chat, *self._cy(x), y or 0)
