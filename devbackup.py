@@ -80,7 +80,8 @@ def snapshot(reason="старт"):
         with zipfile.ZipFile(store() / name, "w", zipfile.ZIP_DEFLATED) as z:
             for p in files:
                 z.write(p, str(p.relative_to(ROOT)))
-        hist.append({"file": name, "digest": dg, "at": time.time(), "commit": commit, "reason": reason, "n": len(files)})
+        what = (os.environ.get("RAILWAY_GIT_COMMIT_MESSAGE") or "").split("\n")[0][:300]  # що змінилося в цьому оновленні
+        hist.append({"file": name, "digest": dg, "at": time.time(), "commit": commit, "reason": reason, "n": len(files), "what": what})
         for old in hist[:-KEEP]:
             try:
                 (store() / old["file"]).unlink()

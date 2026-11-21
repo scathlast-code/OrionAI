@@ -6235,7 +6235,8 @@ def scr_devbk(chat_id, key=None):
     rows = []
     for i, h in enumerate(hist[:15]):
         when = f"{datetime.fromtimestamp(h['at'], TZ):%d.%m %H:%M}"
-        lines.append(f"{i + 1}. {when} · файлів {h['n']}" + (f" · версія {h['commit']}" if h.get("commit") else "") + f" · {esc(h.get('reason', ''))}")
+        lines.append(f"{i + 1}. {when} · файлів {h['n']}" + (f" · версія {h['commit']}" if h.get("commit") else "") + f" · {esc(h.get('reason', ''))}"
+                     + (f"\n   ✏️ {esc(h['what'][:160])}" if h.get("what") else ""))
         rows.append([(f"{i + 1}. {when}", f"m:devbk:{key}:{i}")])
     if not hist:
         lines.append("Знімків ще немає.")

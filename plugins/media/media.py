@@ -11,6 +11,7 @@ import os
 import ipaddress
 import json
 import mimetypes
+import shutil
 import re
 import socket
 from contextlib import asynccontextmanager
@@ -44,6 +45,21 @@ MEDIA = {
     ".mp4", ".mkv", ".mov", ".webm", ".m4v", ".avi", ".mpeg", ".ts", ".flv", ".3gp",
     ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wav", ".oga", ".mka",
 }
+DOCS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".odt", ".ods", ".odp", ".rtf", ".txt", ".csv",
+        ".epub", ".fb2", ".djvu", ".zip", ".7z", ".rar", ".json", ".xml", ".apk", ".svg"}
+DOC_MIME = {"application/pdf": ".pdf", "application/msword": ".doc", "application/vnd.ms-excel": ".xls",
+            "application/vnd.ms-powerpoint": ".ppt", "application/zip": ".zip", "application/x-7z-compressed": ".7z",
+            "application/vnd.rar": ".rar", "application/x-rar-compressed": ".rar", "application/epub+zip": ".epub",
+            "application/rtf": ".rtf", "text/csv": ".csv", "text/plain": ".txt",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+            "application/vnd.oasis.opendocument.text": ".odt", "application/vnd.oasis.opendocument.spreadsheet": ".ods",
+            "application/vnd.oasis.opendocument.presentation": ".odp"}
+# Документ → у що можна перетворити (LibreOffice)
+DOC_TO = {".doc": ("pdf", "docx", "odt"), ".docx": ("pdf", "odt", "txt"), ".odt": ("pdf", "docx"), ".rtf": ("pdf", "docx"),
+          ".xls": ("xlsx", "pdf", "ods", "csv"), ".xlsx": ("pdf", "ods", "csv"), ".ods": ("xlsx", "pdf", "csv"), ".csv": ("xlsx",),
+          ".ppt": ("pptx", "pdf", "odp"), ".pptx": ("pdf", "odp"), ".odp": ("pptx", "pdf"), ".txt": ("pdf", "docx")}
 SUBTITLES = {".vtt", ".srt", ".ass", ".ttml", ".srv3", ".json3", ".dfxp"}
 YT = (
     "yt-dlp", "--ignore-config", "--no-plugin-dirs", "--no-cache-dir",
@@ -219,6 +235,62 @@ class Options:
     join: bool = False
     post: bool = True
     target: str = "tg"
+    abr: int = 0       # бітрейт звуку, кбіт/с (0 — 192 для MP3; не вище, ніж в оригіналі)
+    fmt: str = ""      # формат файлу: mp4 mov mkv webm · mp3 m4a opus wav flac orig · jpg png webp ("" — як зазвичай)
+
+
+AUDIO_FMTS = {"mp3": "libmp3lame", "m4a": "aac", "opus": "libopus", "wav": "pcm_s16le", "flac": "flac"}
+VIDEO_FMTS = ("mp4", "mov", "mkv", "webm")
+IMAGE_FMTS = ("jpg", "png", "webp")
+BITRATES = (64, 96, 128, 160, 192, 256, 320)
+
+
+def audio_choices(info):
+    """Бітрейти, які має сенс пропонувати: лише до найкращого звуку в оригіналі (без «роздування»)."""
+    fmts = [f for f in (info or {}).get("formats") or [] if isinstance(f, dict)]
+    best = max((f.get("abr") or 0 for f in fmts if f.get("acodec") not in (None, "none")), default=0)
+    if not best:
+        return [], 0
+    return [b for b in BITRATES if b <= best + 8], int(best)
+
+
+def video_heights(info):
+    """Висоти, у яких відео справді є на сайті (від найменшої до найбільшої)."""
+    fmts = [f for f in (info or {}).get("formats") or [] if isinstance(f, dict)]
+    hs = sorted({int(f["height"]) for f in fmts if f.get("height") and f.get("vcodec") not in (None, "none") and f["height"] >= 144})
+    if not hs and (info or {}).get("height"):
+        hs = [int(info["height"])]
+    return hs
+
+
+ID_PATTERNS = (
+    (("youtube.com", "youtu.be"), r"(?:[?&]v=|youtu\.be/|/shorts/|/live/|/embed/)([\w-]{11})"),
+    (("tiktok.com",), r"/(?:video|photo)/(\d{8,})"),
+    (("instagram.com",), r"/(?:p|reel|reels|tv)/([\w-]{5,})"),
+    (("vimeo.com",), r"vimeo\.com/(?:video/)?(\d{5,})"),
+    (("x.com", "twitter.com"), r"/status/(\d{5,})"),
+)
+
+
+def url_media_id(url):
+    """Ідентифікатор відео з самого посилання (YouTube, TikTok, Instagram, Vimeo, X) — щоб звірити з тим, що віддав сайт."""
+    host = (urlsplit(url).hostname or "").lower() if url else ""
+    for hosts, pat in ID_PATTERNS:
+        if domain_matches(host, hosts):
+            m = re.search(pat, url)
+            return m.group(1) if m else ""
+    return ""
+
+
+def same_media(url, info):
+    """False — сайт віддав не те відео, на яке вказує посилання (буває в інших завантажувачів)."""
+    want = url_media_id(url)
+    if not want or not info:
+        return True
+    got = {str(info.get(k) or "") for k in ("id", "display_id")} | {url_media_id(str(info.get("webpage_url") or ""))}
+    if info.get("playlist_id") or info.get("_type") == "playlist":
+        return True
+    return want in got or not any(got - {""})
 
 
 def domain_matches(host, domains):
@@ -240,6 +312,9 @@ async def check_url(url):
         raise URLDenied("Потрібне публічне посилання HTTP або HTTPS.")
     if domain_matches(host, BLOCKED) or "pornhub" in host:
         raise URLDenied("Це джерело вимкнене.")
+    import linktools
+    if linktools.is_bad(host):
+        raise URLDenied("Ресурси держави-агресора та її союзників не завантажую.")
     try:
         addresses = await asyncio.wait_for(
             asyncio.get_running_loop().getaddrinfo(host, None, type=socket.SOCK_STREAM),
@@ -285,7 +360,11 @@ def media_extension(response):
         return aliases.get(mime) or mimetypes.guess_extension(mime) or (
             url_suffix if url_suffix in MEDIA else None
         )
-    if mime in {"", "application/octet-stream"} and url_suffix in MEDIA:
+    if mime in {"", "application/octet-stream"} and url_suffix in MEDIA | DOCS:
+        return url_suffix
+    if mime in DOC_MIME and mime != "text/plain":  # 📄 документи й архіви — теж завантажуємо як є
+        return url_suffix if url_suffix in DOCS else DOC_MIME[mime]
+    if mime == "text/plain" and url_suffix in (".txt", ".csv"):
         return url_suffix
     return None
 
@@ -1113,7 +1192,9 @@ async def fetch(item, source, options, work, progress=None):
     language = f"[language^={options.audio}]" if options.audio != "auto" else ""
     if options.mode == "audio":
         selector = f"ba{language}/b{language}"
-        convert = ["-x", "--audio-format", "mp3", "--audio-quality", "192K"]
+        afmt = options.fmt if options.fmt in AUDIO_FMTS or options.fmt == "orig" else "mp3"
+        convert = ["-x"] + ([] if afmt == "orig" else ["--audio-format", afmt]) \
+            + (["--audio-quality", f"{options.abr or 192}K"] if afmt in ("mp3", "m4a", "opus") else [])
     else:
         selector = f"bv{height}+ba{language}/b{height}{language}"
         if not language:
@@ -1180,6 +1261,9 @@ async def fetch(item, source, options, work, progress=None):
     info_path = work / "media.info.json"
     info = json.loads(info_path.read_text(encoding="utf-8")) if info_path.is_file() else item.info
     allow_extractor(info)
+    if item.index is None and not same_media(source, info):
+        raise JobError("Сайт віддав не те відео, на яке вказує посилання. Нічого стороннього не надсилаю — "
+                       "спробуйте ще раз пізніше або інше посилання на це ж відео.")
     stem = Path(safe_name(ua_title(info.get("title") or item.title)[:70], "media")).stem
     path = files[0].rename(work / (stem + files[0].suffix.lower()))
     tracks = [
@@ -1219,11 +1303,15 @@ async def probe_media(path):
 
 
 async def render(path, options, work, direct):
+    if path.suffix.lower() in DOCS:  # документ/архів — без обробки відео й звуку
+        return [path]
     image = (mimetypes.guess_type(path.name)[0] or "").startswith("image/")
     if options.mode in ("gif", "mute") and not image:
         return await render_special(path, options, work)
     needs_scale = direct and options.height and not image and options.mode == "video"
-    needs_audio = (direct or path.suffix.lower() != ".mp3") and options.mode == "audio" and not image
+    aext = "." + (options.fmt if options.fmt in AUDIO_FMTS else "mp3")
+    keep_orig = options.fmt == "orig"
+    needs_audio = options.mode == "audio" and not image and not keep_orig and (direct or path.suffix.lower() != aext)
     if not (options.cuts or needs_scale or needs_audio):
         return [path]
     data = await probe_media(path)
@@ -1243,9 +1331,11 @@ async def render(path, options, work, direct):
     if options.cuts and duration not in {None, "N/A"}:
         if float(duration) + 0.25 < max(end for _, end in options.cuts):
             raise JobError("Таймкод виходить за тривалість файлу.")
-    ext = ".mp4" if video_output else ".mp3"
+    ext = ".mp4" if video_output else aext
     maps = ["-map", "0:V:0", "-map", "0:a:0?"] if video_output else ["-map", "0:a:0"]
-    codec = ["-c:a", "aac", "-b:a", "160k"] if video_output else ["-c:a", "libmp3lame", "-b:a", "192k"]
+    acodec = AUDIO_FMTS.get(aext[1:], "libmp3lame")
+    codec = ["-c:a", "aac", "-b:a", "160k"] if video_output else (["-c:a", acodec] + (["-b:a", f"{options.abr or 192}k"]
+                                                                                     if aext in (".mp3", ".m4a", ".opus") else []))
     if video_output:
         height = f"min(ih,{options.height})" if needs_scale else "ih"
         codec += [
@@ -1464,3 +1554,62 @@ async def separate(path, work, progress=None):
     if not found[0] or not found[1]:
         raise JobError("Розділювач звуку не повернув результат.")
     return found[0][0], found[1][0]
+
+
+async def convert_final(path, options, work):
+    """Формат файлу на вибір: відео mp4/mov/mkv/webm, фото jpg/png/webp. Без втрат, де можна (перепакування)."""
+    fmt = options.fmt
+    ext = path.suffix.lower().lstrip(".")
+    image = (mimetypes.guess_type(path.name)[0] or "").startswith("image/")
+    if not fmt or fmt == ext or (fmt == "jpg" and ext == "jpeg"):
+        return path
+    out = work / (path.stem + "." + fmt)
+    if path.suffix.lower() in DOC_TO and fmt in DOC_TO[path.suffix.lower()]:
+        office = shutil.which("libreoffice") or shutil.which("soffice")
+        if not office:
+            raise JobError("Перетворення документів недоступне: на сервері немає LibreOffice.")
+        conv = work / "converted"
+        conv.mkdir(exist_ok=True)
+        await run(office, "--headless", "--convert-to", fmt, "--outdir", str(conv), str(path), timeout=300)
+        got = conv / (path.stem + "." + fmt)
+        if not got.is_file():
+            raise JobError(f"Не вдалося перетворити в {fmt.upper()}.")
+        out = got.rename(work / got.name) if not (work / got.name).exists() else got
+        path.unlink(missing_ok=True)
+        return out
+    if image and fmt in IMAGE_FMTS:
+        await run(*FF, "-i", path, *(["-q:v", "2"] if fmt == "jpg" else []), out, timeout=120)
+    elif not image and fmt in VIDEO_FMTS and options.mode not in ("audio", "gif"):
+        if fmt == "webm":
+            codec = ["-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8", "-b:v", "0", "-crf", "33", "-c:a", "libopus"]
+        else:
+            codec = ["-c", "copy"] + (["-movflags", "+faststart"] if fmt == "mov" else [])
+        await run(*FF, "-i", path, "-map", "0", *codec, out, timeout=1800)
+    else:
+        return path
+    if out.is_file() and out.stat().st_size > 0:
+        path.unlink(missing_ok=True)
+        return out
+    return path
+
+
+async def make_thumb(path, work):
+    """Картинка-передперегляд для файлу (кадр відео, обкладинка треку, перша сторінка PDF) — JPEG до 320 px."""
+    ext = path.suffix.lower()
+    out = work / (path.stem + ".thumb.jpg")
+    try:
+        if ext == ".pdf" and shutil.which("pdftoppm"):
+            await run("pdftoppm", "-jpeg", "-f", "1", "-l", "1", "-scale-to", "320", "-singlefile", path, str(out.with_suffix("")), timeout=60)
+        elif ext in MEDIA or ext in (".mkv", ".webm", ".wav", ".flac", ".opus", ".m4a", ".mp3", ".mov"):
+            seek = ["-ss", "1"] if ext in (".mp4", ".mov", ".m4v", ".mkv", ".webm") else []
+            try:
+                await run(*FF, *seek, "-i", path, "-frames:v", "1", "-vf", "scale='min(320,iw)':-2", "-q:v", "5", out, timeout=60)
+            except JobError:
+                if not seek:
+                    raise
+                await run(*FF, "-i", path, "-frames:v", "1", "-vf", "scale='min(320,iw)':-2", "-q:v", "5", out, timeout=60)
+        else:
+            return None
+    except (JobError, OSError):
+        return None
+    return out if out.is_file() and 0 < out.stat().st_size < 200_000 else None

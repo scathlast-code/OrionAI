@@ -49,7 +49,7 @@ class Big:
             self._client = c
             return c
 
-    async def send(self, chat: int, path: Path, caption: str = "", progress=None, video=None, html=False):
+    async def send(self, chat: int, path: Path, caption: str = "", progress=None, video=None, html=False, thumb=None):
         """Надсилає файл (до 2 ГБ): документом або, якщо video (dict з width/height/duration), — відео з плеєром.
         progress(done, total) — для показу відсотків."""
         c = await self.client()
@@ -61,7 +61,7 @@ class Big:
                                             h=int(video.get("height") or 0), supports_streaming=True)]
         await c.send_file(peer, str(path), caption=caption[:4000 if html else 1000], force_document=video is None,
                           supports_streaming=video is not None, part_size_kb=512, progress_callback=progress,
-                          attributes=attrs, parse_mode="html" if html else None)
+                          attributes=attrs, parse_mode="html" if html else None, thumb=str(thumb) if thumb else None)
 
     async def download(self, chat: int, message_id: int, dest: Path, progress=None) -> Path:
         """Завантажує вкладення з повідомлення людини в чаті з ботом (більші за 20 МБ)."""
