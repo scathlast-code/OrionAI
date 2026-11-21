@@ -242,8 +242,14 @@ function msgActions(m){haptic();const who=m.role==='user'?'Ваше повідо
     {label:'🌿 Нова гілка звідси',fn:async()=>{await chatAct({act:'branch',mid:m.id});toast('🌿 Нова розмова з історією до цього повідомлення')}},
     {label:'↪️ Відповісти в іншому чаті…',fn:()=>pickChat('Де відповісти на це повідомлення?',async d=>{await chatAct({act:'reply',mid:m.id,target:d});toast('Відповідь піде в цей чат')})},
     {label:'📋 Копіювати текст',fn:()=>{navigator.clipboard&&navigator.clipboard.writeText(m.text).then(()=>toast('Скопійовано'),()=>toast('Не вдалося скопіювати'))}},
+    {label:'⏰ В завдання',fn:()=>xAct('t',m.id)},{label:'📝 В нотатки',fn:()=>xAct('n',m.id)},
+    {label:'🌅 На сьогодні',fn:()=>xAct('d',m.id)},{label:'🤝 У простір…',fn:()=>open_('m:x:s:m:'+m.id)},
+    {label:'💬 Обговорити окремо з ШІ',fn:()=>xAct('c',m.id)},
     {label:'🗑 Видалити (і в чаті з ботом)',fn:()=>acts('Видалити це повідомлення тут і в чаті з ботом? Telegram дає видаляти лише повідомлення, молодші за 48 год.',[
       {label:'🗑 Так, видалити',fn:async()=>{await chatAct({act:'del',mid:m.id});toast('🗑 Видалено')}},{label:'Скасувати',fn:()=>{}}])}])}
+// ➕ винести повідомлення в інший розділ (завдання, нотатки, «На сьогодні», простір, окрема розмова)
+async function xAct(what,mid){haptic();const r=await call('screen','m:x:'+what+':m:'+mid);if(!r)return;if(r.toast)toast(r.toast);
+  if(what==='c'){const h=await call('history','chat');if(h)renderChat(h)}}
 async function pickChat(title,fn){const r=await call('chats','chat');if(!r)return;const fname={};for(const f of r.folders)fname[f.id]=f.name;
   acts(title,r.dialogs.filter(d=>d.id!==r.current).map(d=>({label:(d.folder?'📁 '+fname[d.folder]+' › ':'💬 ')+d.title,fn:()=>fn(d.id)})))}
 async function openChats(){haptic();const r=await call('chats','chat');if(!r)return;
