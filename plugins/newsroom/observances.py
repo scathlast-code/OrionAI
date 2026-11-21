@@ -24,6 +24,7 @@ from .store import normalize
 log = logging.getLogger("orion.plugins.newsroom.obs")
 MONTHS_GEN = ["січня", "лютого", "березня", "квітня", "травня", "червня", "липня", "серпня", "вересня", "жовтня", "листопада", "грудня"]
 MONTHS = ["Січень", "Лютий", "Березень", "Квітень", "Травень", "Червень", "Липень", "Серпень", "Вересень", "Жовтень", "Листопад", "Грудень"]
+CP_ICON = {"Сайт": "🌐", "Блог": "📝", "Соцмережі": "📣"}
 WD = ["пн", "вт", "ср", "чт", "пт", "сб", "нд"]
 KINDS = {"day": "📌 день", "week": "🗓 тиждень", "month": "📆 місяць / місячник", "year": "🎆 рік"}
 
@@ -357,7 +358,7 @@ class ObservancesUI:
         self.store.set("cplan_status", status)
         return merged
 
-    def cplan_screen(self, chat, ymd=None):
+    def cplan_screen(self, chat, ymd=None):  # noqa: C901
         """🗓 Контент-план як окремий календар (лише теми плану): місяць сіткою, під ним — теми обраного дня."""
         data = self.store.get("cplan_data") or {}
         today = self.today()
@@ -373,8 +374,11 @@ class ObservancesUI:
         week = [(" ", "m:noop")] * dt.date(y, m, 1).weekday()
         for day in range(1, calendar.monthrange(y, m)[1] + 1):
             x = dt.date(y, m, day)
-            n = len(data.get(x.isoformat(), []))
-            label = (f"🟢{day}" if x == today else f"👉{day}" if (day_mode and x == sel) else f"{day}" + ("✍️" if n else ""))
+            its = data.get(x.isoformat(), [])
+            kinds = [CP_ICON[w] for w in ("Сайт", "Блог", "Соцмережі") if any(i.get("where") == w for i in its)]
+            mark = "⭐" if len(kinds) == 3 else "".join(kinds) or ("✍️" if its else "")
+            imp = "❗" if any(self.db_imp_title(i.get("title")) for i in its) else ""
+            label = (f"🟢{day}" if x == today else f"👉{day}" if (day_mode and x == sel) else f"{day}") + imp + mark
             week.append((label, self.cb("obcp", x.strftime("%Y%m%d"))))
             if len(week) == 7:
                 rows.append(week)
@@ -389,7 +393,8 @@ class ObservancesUI:
         rows.append([("🗓 Загальний календар", self.cb("obc", sel.strftime("%Y%m"))), ("« Теми дня", self.cb("obh", "m"))])
         month_n = sum(len(v) for k, v in data.items() if k.startswith(f"{y}-{m:02d}"))
         lines = [f"📋 <b>Контент-план · {MONTHS[m - 1]} {y}</b> · тем {month_n}",
-                 "✍️ — є теми · 🟢 — сьогодні · 👉 — обраний день. Торкніться дня, щоб побачити його план.", ""]
+                 "🌐 — на сайт · 📝 — у блог · 📣 — у соцмережі · ⭐ — усе разом · ✍️ — лише тема дня · ❗ — важлива тема "
+                 "(екологія, здоров'я, агро, енергетика, свята) · 🟢 — сьогодні · 👉 — обраний день. Торкніться дня, щоб побачити план.", ""]
         if day_mode and self.host.is_admin(chat):  # ✏️ правки людини — у саму таблицю, з підтвердженням
             items_ = data.get(sel.isoformat(), [])
             ed = [(f"✏️ {k + 1}", self.cb("obce", f"{sel:%Y%m%d}.{k}")) for k in range(min(len(items_), 8))]
@@ -404,9 +409,12 @@ class ObservancesUI:
                 known = [r for r in self.obs_on(sel) if r.get("source") != "Контент-план" and str(r.get("url") or "").startswith("http")]
             except Exception:  # noqa: BLE001
                 known = []
-            for k, it in enumerate(items, 1):
-                lines.append(f"{k}. {esc(it['title'])}" + (f" · ✍️ {DB.person(it['author'])}" if it.get("author") else "")
-                             + (f" · 📍 {it['where']}" if it.get("where") else "") + self.cplan_sources(it, known, notes))
+            order = sorted(enumerate(items, 1), key=lambda p: -self.db_imp_title(p[1].get("title")))  # ❗ важливе — першим
+            for k, it in order:
+                im = self.db_imp_title(it.get("title"))
+                lines.append(("‼️ " if im == 2 else "❗ " if im else "") + f"{k}. {esc(it['title'])}"
+                             + (f" · ✍️ {DB.person(it['author'])}" if it.get("author") else "")
+                             + (f" · {CP_ICON.get(it['where'], '📍')} {it['where']}" if it.get("where") else "") + self.cplan_sources(it, known, notes))
             if not items:
                 lines.append("На цей день у плані порожньо.")
         t = self.store.get("cplan_t")
@@ -1090,7 +1098,7 @@ class ObservancesUI:
         ymd = f"{d:%Y%m%d}"
         label = self.JUMP.get(key, ("", key))[1]
         if key in ("days", "up"):
-            return label, self.cb("obc", d.strftime("%Y%m"))
+            return label, self.cb("obdy", ymd)
         if key == "wx":
             return label, "m:pl:wx"
         if key == "cplan":
@@ -1125,8 +1133,12 @@ class ObservancesUI:
         bot = self.host.bot()
         msg = await bot.send_message(chat, f"👇 Кнопка <b>{esc(name)}</b> — натисніть, щоб відкрити ({d.day} {MONTHS_GEN[d.month - 1]}).",
                                      parse_mode="HTML", reply_markup=mk(True))
-        for k in range(6):  # блимає: 👉…👈 ↔ ▫️…▫️
+        started = time.time()
+        touched = self.host.extra.get("touched_since", lambda c, t: False)
+        for k in range(6):  # блимає: 👉…👈 ↔ ▫️…▫️ — доки не натиснули (інакше старі кнопки затирали відкритий екран)
             await asyncio.sleep(0.6)
+            if touched(chat, started):
+                break
             try:
                 await bot.edit_message_reply_markup(chat, msg.message_id, reply_markup=mk(k % 2 == 1))
             except Exception:  # noqa: BLE001
@@ -1552,6 +1564,51 @@ class ObservancesUI:
         rows.append([("« Список", self.cb("obl", f"{it['cat']}.{ymd}"))])
         return text, rows
 
+    def obs_days(self, chat, ymd=None):
+        """📅 Дні одним екраном, розділено: 📌 відзначається цього дня · ⏳ уже триває · 🔜 скоро (7 днів) — з джерелами."""
+        try:
+            d = dt.date(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8])) if ymd else self.today()
+        except (ValueError, TypeError):
+            d = self.today()
+        notes = Notes()
+        rs = self.obs_on(d, chat)
+        if any(not self.sourced(r) for r in rs):
+            self.verify_bg(d)
+        rs = [r for r in rs if self.sourced(r)]
+        rs.sort(key=lambda r: -(r.get("imp_") or 0))  # ❗ важливе — першим
+        who = self.plan_who(d)
+        days = [r for r in rs if r["kind"] == "day"]
+        ongoing = [r for r in rs if r["kind"] != "day"]
+        soon, seen = [], {r["id"] for r in rs}
+        for i in range(1, 8):
+            x = d + dt.timedelta(days=i)
+            for r in self.obs_on(x, chat):
+                if r["kind"] == "day" and r["id"] not in seen and self.sourced(r):
+                    seen.add(r["id"])
+                    soon.append((x, r))
+        soon.sort(key=lambda p: (p[0], -(p[1].get("imp_") or 0)))
+        when = "Сьогодні" if d == self.today() else f"{d.day} {MONTHS_GEN[d.month - 1]}"
+        parts = [f"<b>📅 Дні · {when}</b>"]
+
+        def block(head, lines, fold=True):
+            if lines:
+                body = "\n".join(lines)
+                parts.append(f"\n<b>{head} · {len(lines)}</b>\n" + (f"<blockquote expandable>{body}</blockquote>" if fold else body))
+
+        block("📌 Відзначається", [self.obs_line(r, notes=notes) + who(r) for r in days], fold=False)
+        block("⏳ Уже триває", [self.obs_line(r, notes=notes) + who(r) for r in ongoing])
+        block("🔜 Скоро", [f"{x.day:02d}.{x.month:02d} {WD[x.weekday()]} · " + self.obs_line(r, notes=notes) for x, r in soon])
+        if len(parts) == 1:
+            parts.append("\nНа цей день нічого з підтвердженим джерелом не знайшлося — шукаю у фоні, загляньте трохи згодом.")
+        parts.append("\n<i>❗ — наша тема (екологія, здоров'я, агро, енергетика) · «Уже триває» і «Скоро» розгортаються дотиком.</i>")
+        prev, nxt = (d - dt.timedelta(days=1)).strftime("%Y%m%d"), (d + dt.timedelta(days=1)).strftime("%Y%m%d")
+        rows = [[("◀️ Учора" if d == self.today() else "◀️", self.cb("obdy", prev)), ("Сьогодні", self.cb("obdy", self.today().strftime("%Y%m%d"))),
+                 ("Завтра ▶️" if d == self.today() else "▶️", self.cb("obdy", nxt))],
+                [("✏️ Змінити список", self.cb("obl", f"days.{d:%Y%m%d}")), ("⚠️ Важливі попереду", self.cb("obup"))],
+                [("🗓 Календар", self.cb("obc", d.strftime("%Y%m"))), ("« Теми дня", self.cb("obh"))]]
+        from footnotes import html_cut
+        return html_cut("\n".join(parts), 4000), rows
+
     def obs_upcoming(self, chat):
         d = self.today()
         up = self.upcoming(chat, 60)
@@ -1797,6 +1854,8 @@ class ObservancesUI:
             return None, self.obs_shadow(chat, *self._cy(x))
         if a == "obup":
             return None, self.obs_upcoming(chat)
+        if a == "obdy":
+            return None, self.obs_days(chat, x or None)
         if a == "obcp":
             return None, self.cplan_screen(chat, x)
         if a == "obcps":
