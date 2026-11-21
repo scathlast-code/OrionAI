@@ -870,7 +870,7 @@ class ObservancesUI:
     @staticmethod
     def _ahead(items, d):
         """Лише події від цього дня й далі (минулі — не «найближчим часом»)."""
-        return [it for it in (items or []) if not it.get("date") or it["date"] >= d.isoformat()]
+        return DX.dedupe([it for it in (items or []) if not it.get("date") or it["date"] >= d.isoformat()])
 
     def wiki_day_url(self, d):
         return f"https://uk.wikipedia.org/wiki/{d.day}_{MONTHS_GEN[d.month - 1]}"

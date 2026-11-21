@@ -255,3 +255,11 @@ def test_cplan_edit_flow_writes_only_after_confirm(tmp_path, monkeypatch):
     assert "Було" in text and sheet[("Листопад 2026", 5, 6)].startswith("День ТБ")  # ще не записано
     asyncio.run(p.obs_route(1, "obcw", None, None))
     assert sheet[("Листопад 2026", 5, 6)] == "День телебачення - Лариса\nДень привітань - Лариса"
+
+
+def test_astro_no_duplicate_dates():
+    from plugins.newsroom.dayextra import tidy, dedupe
+    assert tidy("Повня настане у вівторок, 24 листопада, о 16:53.", "2026-11-24") == "Повня настане у вівторок о 16:53."
+    assert tidy("📅 24 листопада — Повня та Супермісяць.", "2026-11-24") == "Повня та Супермісяць."
+    assert "з 6 по 30 листопада" in tidy("Потік активний з 6 по 30 листопада.", "2026-11-30")
+    assert len(dedupe([{"date": "2026-11-24", "text": "Повня настане"}, {"date": "2026-11-24", "text": "Повня та Супермісяць"}])) == 1
