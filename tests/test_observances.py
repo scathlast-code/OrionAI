@@ -134,3 +134,15 @@ def test_garden_tips_clean_and_adapt(tmp_path):
     got = asyncio.run(p.adapt_tips([{"text": "a", "url": "https://greenpost.ua/x"}, {"text": "b", "url": "https://b.ua"}], "листопад"))
     assert got == [{"text": "поки ґрунт не замерз.", "url": "https://greenpost.ua/x", "head": "Перекопайте грядки"}]
     assert "11 прикмет" in p.more_line("lore", 11, dt.date(2026, 11, 21))
+
+
+def test_church_feasts_today(tmp_path):
+    p, _sent = news(tmp_path)
+    p.today = lambda: dt.date(2026, 11, 21)
+    p.cplan_bg = lambda: None
+    p.holidays_bg = lambda: None
+    t, _rows = p.obs_home()
+    assert "Введення в храм Пресвятої Богородиці" in t and "‼️" in t
+    p.store.set("church_v", 0)
+    p.ensure_church()
+    assert sum("Введення" in r["title"] for r in p.obs_on(dt.date(2026, 11, 21))) == 1
