@@ -123,6 +123,8 @@ SYSTEM_PROMPT += (
     " Не вставляй окремих слів іншими мовами (англійською, китайською тощо) посеред тексту, якщо в мові відповіді є відповідник; "
     "іншомовними лишай лише назви, бренди, терміни без усталеного перекладу й цитати."
 )
+import botguide as _botguide  # noqa: E402
+SYSTEM_PROMPT += _botguide.PROMPT
 # Режим «спати, коли нічого не відбувається» (Railway Serverless): Telegram сам будить бота вебхуком,
 # а бот не тримає постійного з'єднання з Telegram, тож через 10 хв тиші Railway його присипляє і не рахує гроші.
 TG_WEBHOOK = env("TG_WEBHOOK", "").lower() in ("1", "true", "yes", "так")
@@ -1396,6 +1398,35 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "bot_guide",
+            "description": "Довідка про сам бот OrionAI і його мініапп: які є розділи й функції, де кнопка, як налаштувати, навіщо. "
+                           "Виклич, коли питають про можливості бота, налаштування, як щось зробити в боті. Без теми — огляд усіх розділів.",
+            "parameters": {"type": "object", "properties": {"topic": {"type": "string", "description": "Тема: напр. «UTM-мітки», «завантаження відео», «погода»"}}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "bot_settings",
+            "description": "Переглянути (action=list) або змінити (action=set, key, value) налаштування бота для цієї людини: довжина відповідей, "
+                           "пам'ять, креативність, модель, підпис моделі, режим збору, автовизначення, якість відео за замовчуванням тощо. "
+                           "Змінюй лише на прохання людини.",
+            "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["list", "set"]},
+                                                             "key": {"type": "string"}, "value": {"type": "string"}}, "required": ["action"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "bot_status",
+            "description": "Стан моделей ШІ в боті: які готові, які на паузі й чому (ліміт, ключ, баланс, збій сервісу), що з цим робити. "
+                           "Виклич, коли питають, чому щось не спрацювало, чому модель не відповідає чи що зламалось.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "weather",
             "description": "Погода зараз і прогноз на 3 дні для міста (будь-якої країни). Точні дані з метеосервісу — використовуй для будь-яких питань про погоду.",
             "parameters": {"type": "object", "properties": {"city": {"type": "string", "description": "Місто, напр. «Сеул» або «Kyiv»"}}, "required": ["city"]},
@@ -1501,7 +1532,8 @@ def warn_once(pid, key, every=1800):
 
 async def run_tool(name, args):
     progress_stage({"generate_image": "🎨 Малюю картинку…", "generate_music": "🎵 Створюю музику…", "save_note": "📝 Зберігаю нотатку…",
-                    "search_notes": "🔍 Шукаю в нотатках…", "web_search": "🌐 Шукаю в інтернеті…", "weather": "🌦 Дивлюся погоду…", "external_add": "🔗 Надсилаю в сервіс…", "external_list": "🔗 Дивлюся в сервісі…"}.get(name, "🧰 Працюю з інструментом…"))
+                    "search_notes": "🔍 Шукаю в нотатках…", "web_search": "🌐 Шукаю в інтернеті…", "weather": "🌦 Дивлюся погоду…", "external_add": "🔗 Надсилаю в сервіс…", "external_list": "🔗 Дивлюся в сервісі…",
+                    "bot_guide": "🧭 Дивлюся довідку бота…", "bot_settings": "⚙️ Налаштовую бота…", "bot_status": "🩺 Перевіряю стан моделей…"}.get(name, "🧰 Працюю з інструментом…"))
     if name in ("external_add", "external_list"):
         return await run_svc_tool(name, args)
     cname = canva.tool_name(name)
@@ -1535,6 +1567,16 @@ async def run_tool(name, args):
         if queue is not None:
             queue.append(("audio", data, f"🎵 {media.MUSIC_PROVIDERS[pid]['title']}"))
         return "Музику згенеровано й буде надіслано користувачу разом із відповіддю."
+    if name in ("bot_guide", "bot_settings", "bot_status"):  # 🧭 ШІ знає бота й може його налаштувати
+        import botguide
+        B = sys.modules[__name__]
+        if name == "bot_guide":
+            return botguide.guide(B, str(args.get("topic") or ""))
+        if name == "bot_status":
+            return botguide.status(B)
+        if str(args.get("action") or "list") == "set":
+            return botguide.settings_set(B, CHAT.get(), str(args.get("key") or ""), args.get("value"))
+        return botguide.settings_list(B, CHAT.get())
     if name == "save_note":
         return f"Нотатку збережено, id={add_note_db(args.get('text', ''), args.get('tags', ''), 'telegram', CHAT.get())}"
     if name == "add_day":
