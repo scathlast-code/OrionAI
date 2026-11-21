@@ -23,6 +23,8 @@ class Collect:
                         "delivered INTEGER NOT NULL DEFAULT 0)")
             con.execute("CREATE TABLE IF NOT EXISTS col_state (chat INTEGER PRIMARY KEY, done_id INTEGER NOT NULL DEFAULT 0, "
                         "warned INTEGER NOT NULL DEFAULT 0)")
+            # окремі зведення за темою («зведення про погоду») беруть лише свої репости — решта чекає свого зведення
+            con.execute("CREATE TABLE IF NOT EXISTS col_used (chat INTEGER NOT NULL, item INTEGER NOT NULL, PRIMARY KEY(chat, item))")
 
     def db(self):
         con = sqlite3.connect(self.path, timeout=10)
@@ -87,15 +89,18 @@ class Batches:
     def pending(self, chat):
         done = self._state(chat)["done_id"]
         with closing(self.c.db()) as con:
-            return [dict(r) for r in con.execute("SELECT * FROM collected WHERE chat=? AND id>? ORDER BY id", (int(chat), done))]
+            return [dict(r) for r in con.execute("SELECT * FROM collected WHERE chat=? AND id>? AND id NOT IN "
+                                                 "(SELECT item FROM col_used WHERE chat=?) ORDER BY id", (int(chat), done, int(chat)))]
 
     def pending_chars(self, chat):
         return sum(len(i["text"]) for i in self.pending(chat))
 
-    def take(self, chat, limit=LIMIT):
-        """Непідсумовані повідомлення від найдавнішого, доки вміщається в limit (хоча б одне)."""
+    def take(self, chat, limit=LIMIT, only=None):
+        """Непідсумовані повідомлення від найдавнішого, доки вміщається в limit (хоча б одне). only(item) — фільтр (тема)."""
         out, used = [], 0
         for i in self.pending(chat):
+            if only and not only(i):
+                continue
             if out and used + len(i["text"]) > limit:
                 break
             out.append(i)
@@ -114,7 +119,12 @@ class Batches:
         """Зведення готове: зберегти його й зсунути межу на останнє повідомлення, що в нього увійшло."""
         self._state(chat)
         with closing(self.c.db()) as con, con:
-            con.execute("UPDATE col_state SET done_id=MAX(done_id, ?), warned=0 WHERE chat=?", (items[-1]["id"], int(chat)))
+            con.executemany("INSERT OR IGNORE INTO col_used(chat, item) VALUES (?,?)", [(int(chat), i["id"]) for i in items])
+            left = con.execute("SELECT MIN(id) FROM collected WHERE chat=? AND id NOT IN (SELECT item FROM col_used WHERE chat=?) AND id>"
+                               "(SELECT done_id FROM col_state WHERE chat=?)", (int(chat), int(chat), int(chat))).fetchone()[0]
+            top = (left - 1) if left else con.execute("SELECT COALESCE(MAX(id), 0) FROM collected WHERE chat=?", (int(chat),)).fetchone()[0]
+            con.execute("UPDATE col_state SET done_id=MAX(done_id, ?), warned=0 WHERE chat=?", (top, int(chat)))
+            con.execute("DELETE FROM col_used WHERE chat=? AND item<=?", (int(chat), top))
             return con.execute("INSERT INTO summaries(chat, ts, text, auto, first_id, last_id) VALUES (?,?,?,?,?,?)",
                                (int(chat), time.time(), text, int(bool(auto)), items[0]["id"], items[-1]["id"])).lastrowid
 
@@ -128,6 +138,7 @@ class Batches:
         with closing(self.c.db()) as con, con:
             con.execute("DELETE FROM col_state WHERE chat=?", (int(chat),))
             con.execute("DELETE FROM summaries WHERE chat=?", (int(chat),))
+            con.execute("DELETE FROM col_used WHERE chat=?", (int(chat),))
 
 
 def docx_of(title, sections):
@@ -144,12 +155,18 @@ def docx_of(title, sections):
     return bio.getvalue()
 
 
+TOPIC_PROMPT = ("Ось матеріали на одну тему — «{topic}», які користувач переслав у бот, від давніших до новіших. "
+                "Зроби з них зведення саме на цю тему українською: короткий підсумок, далі події й факти з датами, місцями й цифрами. "
+                "Лише факти з матеріалів, нічого не вигадуй; повтори обʼєднай; суперечності між джерелами познач. "
+                "Сторонні теми, що випадково трапились у матеріалах, не додавай. Без технічних приписок каналів (підписки, адреси, «написати адміну»). "
+                "Посилання на першоджерела збережи. Без markdown-зірочок.\n\nМАТЕРІАЛИ:\n")
+
 SUMMARY_PROMPT = ("Ось матеріали, які користувач переслав у бот (репости з каналів і чатів), від давніших до новіших. "
                   "Зроби з них одне зведення українською: короткий загальний підсумок, далі головні події й факти групами за темами, "
                   "з датами, місцями й цифрами, якщо вони є. Лише факти з матеріалів, нічого не вигадуй; суперечності між джерелами познач. "
                   "Посилання з матеріалів збережи. Без markdown-зірочок.\n\nМАТЕРІАЛИ:\n")
 
-CMD_RE = __import__("re").compile(r"(?i)^\s*(?:будь ласка,?\s*)?(готуй|підготуй|зроби|напиши|склади|давай)\s+(зведення|звіт|підсумок|новину)\b")
+CMD_RE = __import__("re").compile(r"(?i)^\s*(?:будь ласка,?\s*)?(готуй|підготуй|зроби|напиши|склади|давай|роби)\s+(зведення|звіт|підсумок|новину|зведення)\b")
 
 
 def chunks(text, size=3900):

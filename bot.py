@@ -3948,9 +3948,17 @@ def scr_collect(chat_id):
             + f"\n\nЗібрано: <b>{n}</b> · ще не в зведенні: <b>{BATCH.pending_chars(chat_id)}</b> з {collect_mod.LIMIT} знаків"
             + "\n\nПереслане в бот збирається завжди, навіть коли режим вимкнено: я відповідаю лише «ок». Напишіть «готуй зведення» "
               "або «напиши новину» — зроблю з того, що ще не було в зведенні. Заповниться пам'ять — спершу спитаю, а якщо мовчатимете, "
-              "зроблю зведення сам і продовжу збирати.")
+              "зроблю зведення сам і продовжу збирати."
+            + "\n\n🧾 Зведення окремі за темами (війна, погода, енергетика…): сторонні розмови й теми не змішуються; "
+              "новини одразу на дві теми — спершу спитаю, куди їх. «Готуй зведення про погоду» — лише про погоду."
+            + f"\n\n🧭 <b>Автовизначення:</b> {'увімкнено' if prefs(chat_id).get('autocat') else 'вимкнено'} — "
+              "бот сам розпізнає, що ви кинули (посилання, завдання, новина про війну, погоду…), і лише пропонує дії; без вашого вибору нічого не робить."
+            + f"\n🧹 <b>Прибирати технічні приписки каналів</b> (адреси, «підпишись», «написати адміну») під час написання: "
+              f"{'так' if prefs(chat_id).get('strip_junk', True) else 'ні'}.")
     out = prefs(chat_id).get("col_out", "msg")
-    rows = [[("⏹ Зупинити збір", "m:col:off") if on else ("▶️ Почати збір", "m:col:on")]]
+    rows = [[("⏹ Зупинити збір", "m:col:off") if on else ("▶️ Почати збір", "m:col:on")],
+            [("🧭 Автовизначення: " + ("так" if prefs(chat_id).get("autocat") else "ні"), "m:col:ac"),
+             ("🧹 Чистити приписки: " + ("так" if prefs(chat_id).get("strip_junk", True) else "ні"), "m:col:junk")]]
     if n:
         rows += [[("🧾 Зведення", "m:col:sum"), ("✍️ Новина", "m:col:snews")],
                  [(("● " if out == v else "") + lbl, f"m:col:out:{v}") for v, lbl in (("msg", "💬 Текстом"), ("txt", "📄 txt"), ("doc", "📝 Word"))],
@@ -6235,9 +6243,21 @@ def _col_span(items):
     return f"{len(items)} повідомл. · {datetime.fromtimestamp(a, TZ):%d.%m %H:%M} – {datetime.fromtimestamp(b, TZ):%d.%m %H:%M}"
 
 
-async def col_summarize(bot, chat_id, auto=False, kind="summary"):
-    """Зведення по непідсумованих репостах. Межа рухається лише на те, що реально увійшло, тож усе,
-    що прийшло, поки писалось зведення, лишається для наступного. Авто — коли пам'ять (20000 знаків) заповнилась."""
+COL_MIX = {}  # чат -> {(тема, тема): 'both'|'a'|'b'|'join'} — що робити з новинами на дві теми («нема світла через обстріли»)
+COL_ASK = {}  # чат -> (kind, topic) — зведення чекає відповіді про змішані новини
+
+
+def _col_clean(chat_id, text):
+    """🧹 Технічні приписки чужих каналів прибираємо лише тепер, коли пишемо новину/зведення (збереженим лишається оригінал)."""
+    import postclean
+    return postclean.clean(text) if prefs(chat_id).get("strip_junk", True) else text
+
+
+async def col_summarize(bot, chat_id, auto=False, kind="summary", topic=None):
+    """Зведення по непідсумованих репостах — окремо за темами (війна, погода, енергетика…): сторонні розмови й теми
+    не змішуються. Новини на дві теми — спершу питаємо людину. Межа рухається лише на те, що реально увійшло.
+    Авто — коли пам'ять (20000 знаків) заповнилась."""
+    import topicsort as TS
     lock = SUM_LOCKS.setdefault(chat_id, asyncio.Lock())
     if lock.locked():
         if not auto:
@@ -6246,35 +6266,77 @@ async def col_summarize(bot, chat_id, auto=False, kind="summary"):
     async with lock:
         first = True
         while True:
-            items = BATCH.take(chat_id)
+            only = (lambda i: topic in TS.classify(i["text"])) if topic else None
+            items = BATCH.take(chat_id, only=only)
             if not items:
                 if first and not auto:
-                    await bot.send_message(chat_id, "Нових матеріалів після останнього зведення немає.")
+                    await bot.send_message(chat_id, "Нових матеріалів після останнього зведення немає."
+                                           + (f" Про «{TS.label(topic)}» нічого не зібрано." if topic else ""))
                 return
             first = False
-            prompt = collect_mod.NEWS_PROMPT if kind == "news" else collect_mod.SUMMARY_PROMPT
-            text, _m = await _plugin_ai(prompt + "\n\n———\n\n".join(i["text"] for i in items),
-                                        label="📥 " + ("Новина" if kind == "news" else "Зведення") + " з пересланого")
-            text = (text or "").strip()
-            if not text:
-                await bot.send_message(chat_id, "⚠️ Не вдалося написати зведення — моделі зараз недоступні. Матеріали збережено, спробую ще раз пізніше "
-                                       "або напишіть «готуй зведення».")
-                return
-            prev = [] if auto else BATCH.autos_since_manual(chat_id)
-            BATCH.mark(chat_id, items, text, auto)
             what = "Новина" if kind == "news" else "Зведення"
+            if kind == "news":
+                prompt = collect_mod.NEWS_PROMPT
+                text, _m = await _plugin_ai(prompt + "\n\n———\n\n".join(_col_clean(chat_id, i["text"]) for i in items), label="📥 Новина з пересланого")
+                text = (text or "").strip()
+                if not text:
+                    await bot.send_message(chat_id, "⚠️ Не вдалося написати новину — моделі зараз недоступні. Матеріали збережено.")
+                    return
+                sections, used = [(what, text)], items
+            else:
+                pure, mixed = TS.group(items)
+                choices = COL_MIX.setdefault(chat_id, {})
+                ask = [p for p in mixed if p not in choices]
+                if ask and not auto:
+                    COL_ASK[chat_id] = (kind, topic)
+                    lines = ["🧾 <b>Перш ніж робити зведення</b>", "",
+                             "Є новини одразу на дві теми — куди їх віднести?"]
+                    rows = []
+                    for a_, b_ in ask:
+                        ex = mixed[(a_, b_)][0]["text"]
+                        lines.append(f"\n<b>{TS.label(a_)} + {TS.label(b_)}</b> · {len(mixed[(a_, b_)])}\n<i>{esc(short_q(_col_clean(chat_id, ex), 140))}</i>")
+                        pk = f"{a_}-{b_}"
+                        rows += [[("В обидва зведення", f"m:colmix:{pk}:both"), ("Окреме спільне", f"m:colmix:{pk}:join")],
+                                 [(f"Лише {TS.label(a_)}", f"m:colmix:{pk}:a"), (f"Лише {TS.label(b_)}", f"m:colmix:{pk}:b")]]
+                    await bot.send_message(chat_id, "\n".join(lines)[:4000], parse_mode=ParseMode.HTML, reply_markup=kb(rows))
+                    return
+                groups = TS.apply_choices(pure, mixed, {p: choices.get(p, "both") for p in mixed})
+                if topic:
+                    groups = {k: v for k, v in groups.items() if topic in k.split("+")}
+                order = sorted(groups, key=lambda k: (k == "other", -len(groups[k])))
+                sections, used_ids = [], set()
+                for k in order:
+                    its = groups[k]
+                    head = TS.group_title(k) if k != "other" else "📄 Інше"
+                    body, _m = await _plugin_ai(collect_mod.TOPIC_PROMPT.format(topic=head.split(" ", 1)[-1])
+                                                + "\n\n———\n\n".join(_col_clean(chat_id, i["text"]) for i in its),
+                                                label=f"📥 Зведення · {head}")
+                    body = (body or "").strip()
+                    if not body:
+                        await bot.send_message(chat_id, "⚠️ Не вдалося написати зведення — моделі зараз недоступні. Матеріали збережено, спробую ще раз "
+                                               "пізніше або напишіть «готуй зведення».")
+                        return
+                    sections.append((f"{head} · {len(its)}", body))
+                    used_ids.update(i["id"] for i in its)
+                used = [i for i in items if i["id"] in used_ids] or items
+                for p_ in mixed:
+                    choices.pop(p_, None)  # вибір — лише для цього зведення
+            text = "\n\n".join(f"{h}\n{t}" for h, t in sections)
+            prev = [] if auto else BATCH.autos_since_manual(chat_id)
+            BATCH.mark(chat_id, used, text, auto)
+            n_t = f" · тем {len(sections)}" if len(sections) > 1 else ""
             if auto:
-                title = (f"🧾 {what} (зроблено самостійно: пам'ять заповнилась) · {_col_span(items)}\n"
+                title = (f"🧾 {what} (зроблено самостійно: пам'ять заповнилась) · {_col_span(used)}{n_t}\n"
                          "Нові репости й далі зберігаю — вони підуть у наступне зведення.")
-                await _col_deliver(bot, chat_id, title, [(f"{what} · {_col_span(items)}", text)], "zvedennya-avto")
+                await _col_deliver(bot, chat_id, title, sections, "zvedennya-avto")
             elif prev:
-                title = (f"🧾 {what} · {_col_span(items)}\n⚠️ До цього я вже {len(prev)} раз(и) робив зведення сам, бо пам'ять заповнювалась — "
+                title = (f"🧾 {what} · {_col_span(used)}{n_t}\n⚠️ До цього я вже {len(prev)} раз(и) робив зведення сам, бо пам'ять заповнювалась — "
                          "додаю їх разом з новим.")
                 secs = [(f"Самостійне зведення №{n} · {datetime.fromtimestamp(x['ts'], TZ):%d.%m %H:%M}", x["text"]) for n, x in enumerate(prev, 1)]
-                await _col_deliver(bot, chat_id, title, secs + [(f"Нове {what.lower()} · {_col_span(items)}", text)], "zvedennya-vse")
+                await _col_deliver(bot, chat_id, title, secs + sections, "zvedennya-vse")
             else:
-                await _col_deliver(bot, chat_id, f"🧾 {what} · {_col_span(items)}", [(what, text)], "zvedennya")
-            if not BATCH.pending(chat_id):
+                await _col_deliver(bot, chat_id, f"🧾 {what} · {_col_span(used)}{n_t}", sections, "zvedennya")
+            if topic or not BATCH.pending(chat_id):
                 return
             if auto and BATCH.pending_chars(chat_id) < collect_mod.LIMIT:
                 return  # решта ще вміщається — чекаємо нових репостів або команди
@@ -6285,6 +6347,52 @@ async def media_mod_transcribe(data, name):
 
 
 ALBUM_OK = {}  # media_group_id -> час: на альбом (кілька фото/відео одним репостом) — одне «ок»
+
+
+AC_SRC = {}  # токен -> що людина кинула в бот (текст, фото, чи переслане) — чекає, поки людина скаже, що з цим робити
+
+
+def ac_offer(chat_id, text, photo=None, fwd=False):
+    """🧭 Автовизначення: що це (посилання, завдання, тема) — і лише пропозиції. Нічого не робимо, доки людина не обере."""
+    import topicsort as TS
+    tok = secrets.token_hex(4)
+    AC_SRC[tok] = {"text": text or "", "photo": photo, "fwd": fwd}
+    while len(AC_SRC) > 300:
+        AC_SRC.pop(next(iter(AC_SRC)))
+    kind = TS.kind_of(text, bool(photo))
+    tops = TS.classify(text)
+    what = {"link": "🔗 Посилання", "task": "✅ Схоже на завдання", "photo": "🖼 Фото", "text": "📄 Текст"}[kind]
+    lines = [f"🧭 <b>{what}</b>" + (" · " + ", ".join(TS.label(t) for t in tops[:3]) if tops else ""),
+             "Що з цим зробити? Поки ви не оберете, я нічого не роблю."]
+    if kind == "link":
+        url = TS.URL_RE.search(text).group(0).rstrip(").,»")
+        lines.append(f"<code>{esc(short_q(url, 120))}</code>")
+        rows = [[("📰 Зчитати новину для рерайту", f"m:ac:{tok}:rw")], [("🔗 Мітка для переходів із соцмереж", f"m:ac:{tok}:utm")]]
+    elif kind == "task":
+        rows = [[("✅ Записати завданням", f"m:ac:{tok}:task"), ("📝 Нотаткою", f"m:ac:{tok}:note")]]
+    elif kind == "photo":
+        rows = [[("💬 Що на фото", f"m:ac:{tok}:ai"), ("✍️ Новина з фото", f"m:ac:{tok}:rw")]]
+    else:
+        rows = [[("✍️ Новина для рерайту", f"m:ac:{tok}:rw"), ("📝 Нотаткою", f"m:ac:{tok}:note")]]
+    col = f"📥 У зведення «{TS.label(tops[0]).split(' ', 1)[1]}»" if tops else "📥 У зведення"
+    rows.append([(col, f"m:ac:{tok}:col")] + ([("💬 Відповісти", f"m:ac:{tok}:ai")] if kind != "photo" else []))
+    if text and kind != "link":
+        rows.append([("🌐 Перекласти", f"m:ac:{tok}:tr")])
+    rows.append([("⚙️ Вимкнути автовизначення", "m:col:acoff")])
+    return "\n".join(lines), rows
+
+
+def ac_wanted(chat_id, msg):
+    """Автовизначення — лише коли людина його ввімкнула; коротке питання ШІ (зі знаком питання, без посилань) — звичайна розмова."""
+    if not prefs(chat_id).get("autocat"):
+        return False
+    t = (msg.text or msg.caption or "").strip()
+    if t.startswith("/"):
+        return False
+    if msg.photo or getattr(msg, "forward_origin", None) is not None:
+        return True
+    import topicsort as TS
+    return not (t.endswith("?") and len(t) < 300 and not TS.URL_RE.search(t))
 
 
 async def take_forward(update, ctx, text, fwd=True):
@@ -8840,9 +8948,74 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
             screen = (f"📌 <b>На сьогодні</b> · {agenda_mod.KIND_ICON.get(it['kind'], '•')} з {X_SRC.get(it['kind'], 'бота')}\n\n{esc(it['text'])}", rows_)
     elif a == "today":  # 🌅 зведення дня — будь-коли
         screen = await scr_today(chat_id)
+    elif a == "ac":  # 🧭 людина обрала, що зробити з тим, що кинула в бот
+        src = AC_SRC.get(arg or "")
+        act = parts[3] if len(parts) > 3 else ""
+        import topicsort as TS
+        if not src:
+            toast, screen = "Це повідомлення вже застаріло — надішліть ще раз", None
+        elif act == "col":
+            COLLECT.add(chat_id, src["text"] or "[фото без підпису]", src["fwd"])
+            toast, screen = f"📥 У зведенні: {BATCH.pending_chars(chat_id)} знаків · напишіть «готуй зведення», коли час", None
+        elif act == "task":
+            create_planned_task(chat_id, src["text"][:1000])
+            toast, screen = "✅ Записано в завдання", None
+        elif act == "note":
+            add_note_db(src["text"][:4000], "", "autocat", chat_id)
+            toast, screen = "📝 Записано в нотатки", None
+        elif act == "tr":
+            screen = tr_screen(tr_token(src["text"]))
+        elif act == "utm":
+            url = TS.URL_RE.search(src["text"]).group(0).rstrip(").,»")
+            screen = scr_utm_tags(chat_id, url, await page_title(url))
+        elif act == "rw":
+            news_ = PLUGINS.get("news")
+            if not news_:
+                toast, screen = "Новинарня вимкнена", None
+            else:
+                m_ = TS.URL_RE.search(src["text"])
+                url = m_.group(0).rstrip(").,»") if m_ and TS.kind_of(src["text"]) == "link" else ""
+                _iid, status, _x = news_.ingest("manual", _col_clean(chat_id, src["text"]), source_url=url, photo=src.get("photo") or "", requested_by=chat_id)
+                toast = {"queued": "✍️ Взяв у новинарню — чернетка прийде сюди", "duplicate": "Такий матеріал уже є в новинарні",
+                         "blocked": "Відсіяно фільтром новинарні"}.get(status, "✍️ Взяв у новинарню")
+                screen = None
+        elif act == "ai":
+            AC_SRC.pop(arg, None)
+            if src.get("photo"):
+                f_ = await ctx.bot.get_file(src["photo"])
+                data_ = base64.b64encode(bytes(await f_.download_as_bytearray())).decode()
+                cap = src["text"] or "Що на цьому фото?"
+                await answer(update, ctx, [{"type": "text", "text": cap}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{data_}"}}],
+                             f"[фото] {cap}", None)
+            else:
+                await answer(update, ctx, src["text"], src["text"], None)
+            return
+        else:
+            screen = None
+    elif a == "colmix":  # 🧾 новини на дві теми: куди віднести — і одразу далі зі зведенням
+        pk, _, ch = (arg or "").partition(":") if ":" in (arg or "") else (arg or "", "", parts[3] if len(parts) > 3 else "")
+        ch = ch or (parts[3] if len(parts) > 3 else "both")
+        a_, _, b_ = pk.partition("-")
+        COL_MIX.setdefault(chat_id, {})[(a_, b_)] = ch if ch in ("both", "a", "b", "join") else "both"
+        kind_, topic_ = COL_ASK.get(chat_id, ("summary", None))
+        import topicsort
+        items_ = BATCH.take(chat_id, only=(lambda i: topic_ in topicsort.classify(i["text"])) if topic_ else None)
+        left = [p_ for p_ in topicsort.group(items_)[1] if p_ not in COL_MIX[chat_id]]
+        toast = "✅ Враховано" + ("" if left else " — готую зведення")
+        if not left:
+            COL_ASK.pop(chat_id, None)
+            asyncio.get_running_loop().create_task(col_summarize(ctx.bot, chat_id, kind=kind_, topic=topic_))
+        screen = None
     elif a == "col":  # 📥 режим збору текстів
         sub = arg or ""
-        if sub == "on":
+        if sub == "ac":
+            set_pref(chat_id, "autocat", not prefs(chat_id).get("autocat"))
+        elif sub == "acoff":
+            set_pref(chat_id, "autocat", False)
+            toast = "🧭 Автовизначення вимкнено — увімкнути можна в «📥 Збір текстів»"
+        elif sub == "junk":
+            set_pref(chat_id, "strip_junk", not prefs(chat_id).get("strip_junk", True))
+        elif sub == "on":
             set_pref(chat_id, "collect", True)
         elif sub == "off":
             set_pref(chat_id, "collect", False)
@@ -10971,8 +11144,10 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         is_wish = bool(bug and bug.group("wish")) or bool(re.search(r"(?i)\b(ідея|побажання|пропоную|хочу|додати б)\b|💡", note))
         is_bug = bool(bug and bug.group("bug")) or bool(re.search(r"(?i)\b(баг|помилк\w*|не працює|зламал\w*)\b|🐞", note)) or not bug
         return await bug_mark(update, ctx, note, wish=is_wish, bug=is_bug)
-    if getattr(msg, "forward_origin", None) is not None and chat_id not in AWAIT:  # 📥 переслане — завжди лише «ок» і в зведення
+    if getattr(msg, "forward_origin", None) is not None and chat_id not in AWAIT:  # 📥 переслане — «ок» і в зведення (або 🧭 пропозиції)
         body = msg.text or msg.caption or ("[фото без підпису]" if msg.photo else "[переслане без тексту]")
+        if ac_wanted(chat_id, msg):
+            return await show(update, *ac_offer(chat_id, msg.text or msg.caption or "", msg.photo[-1].file_id if msg.photo else None, True), edit=False)
         return await take_forward(update, ctx, body)
     if msg.text and chat_id not in AWAIT and not CM.wants_text(chat_id):  # 🌐 «переклади …» — саме переклад, а не відповідь ШІ
         r0 = msg.reply_to_message
@@ -10991,9 +11166,13 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if msg.text and chat_id in AWAIT:
         return await handle_awaited(update, ctx, msg.text.strip())
     cm = collect_mod.CMD_RE.match(msg.text or "")
-    if cm and (BATCH.pending(chat_id) or BATCH.autos_since_manual(chat_id)):  # «готуй зведення» / «напиши новину» по пересланому
-        asyncio.get_running_loop().create_task(col_summarize(ctx.bot, chat_id, kind="news" if cm.group(2).lower() == "новину" else "summary"))
+    if cm and (BATCH.pending(chat_id) or BATCH.autos_since_manual(chat_id)):  # «готуй зведення (про погоду)» / «напиши новину» по пересланому
+        import topicsort
+        asyncio.get_running_loop().create_task(col_summarize(ctx.bot, chat_id, kind="news" if cm.group(2).lower() == "новину" else "summary",
+                                                             topic=topicsort.find_topic(msg.text)))
         return await msg.reply_text("🧾 Готую — надішлю, щойно буде.")
+    if (msg.text or msg.photo) and ac_wanted(chat_id, msg):  # 🧭 автовизначення: лише пропонуємо, нічого не робимо самі
+        return await show(update, *ac_offer(chat_id, msg.text or msg.caption or "", msg.photo[-1].file_id if msg.photo else None), edit=False)
     if prefs(chat_id).get("collect") and (msg.text or msg.caption) and not (msg.text or "").startswith("/"):
         return await take_forward(update, ctx, msg.text or msg.caption, False)  # 📥 режим збору: мовчки складаємо
     choice = get_choice(chat_id)
