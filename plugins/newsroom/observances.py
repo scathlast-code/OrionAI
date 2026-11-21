@@ -1168,18 +1168,22 @@ class ObservancesUI:
                 limit = 60000
         except Exception:  # noqa: BLE001
             pass
+        # Telegram виконує лише ~100 елементів розмітки (посилання, жирний, цитати) — далі все пласке, тому рахуємо і їх
+        ent = lambda x: len(re.findall(r"<(?:a|b|i|u|s|code|blockquote|tg-spoiler)\b", x))  # noqa: E731
+        elim = 100 if limit < 10000 else 10 ** 6
         full = [(p + (5,) if len(p) == 2 else p) if isinstance(p, tuple) else (p, p, 5) for p in parts]  # (повна, коротка, пріоритет)
         order = sorted(range(len(full)), key=lambda i: (full[i][2], i))  # спершу важливіше; показуємо — у звичному порядку
         pick = [None] * len(full)
-        used = vis(head) + vis(tail)
+        used, ue = vis(head) + vis(tail), ent(head) + ent(tail)
         for i in order:  # 1) кожен розділ — хоча б коротко
             f, sh, _p = full[i]
-            if used + vis(sh) + 1 <= limit and len(sh) < 30000:
-                pick[i], used = sh, used + vis(sh) + 1
+            if used + vis(sh) + 1 <= limit and ue + ent(sh) <= elim and len(sh) < 30000:
+                pick[i], used, ue = sh, used + vis(sh) + 1, ue + ent(sh)
         for i in order:  # 2) розгортаємо за важливістю
             f, sh, _p = full[i]
-            if pick[i] is not None and f != sh and used - vis(sh) + vis(f) <= limit:
+            if pick[i] is not None and f != sh and used - vis(sh) + vis(f) <= limit and ue - ent(sh) + ent(f) <= elim:
                 used += vis(f) - vis(sh)
+                ue += ent(f) - ent(sh)
                 pick[i] = f
         return head + "".join("\n" + p for p in pick if p is not None) + tail
 
