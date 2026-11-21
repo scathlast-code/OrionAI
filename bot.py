@@ -914,6 +914,28 @@ def link_msg(db_id, chat_id, tg_ids):
         con.executemany("INSERT INTO msg_links(db_id, chat_id, tg_id) VALUES (?,?,?)", [(db_id, chat_id, t) for t in ids])
 
 
+CLEAN_SRC = {}  # чат -> HTML останнього екрана (для «📋 чистого тексту»)
+
+
+def clean_text(html_text):
+    """Чистий текст для копіювання: лише текст і емоджі — без посилань-джерел, «відкрити …», ✅N/⚠️1, підписів бота."""
+    t = html_text or ""
+    t = re.sub(r"<blockquote[^>]*>|</blockquote>", "\n", t)
+    t = re.sub(r"(?:\s*·\s*)?<a [^>]*>[^<]*</a>(?=\s*(?:·|\n|$|<))", lambda m: "" if "·" in m.group(0) else m.group(0), t)
+    t = re.sub(r"\s*·\s*<a [^>]*>[^<]*</a>", "", t)  # джерела після « · »
+    t = re.sub(r"<a [^>]*>([^<]*)</a>", r"\1", t)  # посилання всередині речення — лише текст
+    lines = []
+    for ln in t.split("\n"):
+        raw = re.sub(r"<[^>]+>", "", ln).strip()
+        if re.match(r"^(?:↗️|✅N|Підготував|Торкніться|<i>?Відповіла|Відповіла:|Деталі:|ℹ️)", raw) or re.match(r"^<i>\s*(?:Підготував|✅N|Таблиця:|Свято:)", ln.strip()) and "Свято:" not in ln:
+            continue
+        raw = re.sub(r"\s*(?:✅\d+|⚠️1|◽)(?=\s|$)", "", raw)
+        raw = re.sub(r"\s*·\s*(?:контент-план|Вікіпедія)\s*$", "", raw)
+        lines.append(raw.rstrip(" ·"))
+    out = html_lib.unescape("\n".join(lines))
+    return re.sub(r"\n{3,}", "\n\n", out).strip()
+
+
 def dialog_of_tg(chat_id, tg_id):
     """У якій розмові було це повідомлення Telegram (щоб відповідь на нього продовжувала саме ту тему)."""
     with closing(db()) as con:
@@ -2972,6 +2994,10 @@ async def show(update: Update, text, rows, edit=True, nav=True):
     if cap is not None:  # запит із Mini App: віддаємо екран застосунку, а не в чат
         cap.screen = (text, rows)
         return
+    if SCREEN.get() != "m:clean" and len(re.sub(r"<[^>]+>", "", text or "")) > 160:
+        CLEAN_SRC[chat] = text  # 📋 «чистий текст» цього екрана — без посилань і технічних приписок
+        rows = [list(r) for r in rows] or [[]]
+        rows[-1].append(("📋", "m:clean"))
     if rows and prefs(chat).get("improve_btn", True):
         rows = [list(r) for r in rows]
         rows[-1].append(("💡", "imp:s"))  # непомітна позначка «Покращити» на кожному екрані
@@ -8459,6 +8485,9 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
             return
         else:
             screen = tr_screen(tok)
+    elif a == "clean":  # 📋 чистий текст останнього екрана — для копіювання
+        txt = clean_text(CLEAN_SRC.get(chat_id, ""))
+        screen = (esc(txt[:4000]) or "Немає що копіювати.", [])
     elif a == "ct":  # ✉️ зв'язок з адміном та іншими користувачами (ID й профілі не показуємо)
         screen = scr_contact(chat_id, parts[2:] if len(parts) > 2 else [])
     elif a == "cto" and arg.isdigit():

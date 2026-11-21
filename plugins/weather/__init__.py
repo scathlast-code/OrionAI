@@ -151,10 +151,22 @@ class WeatherPlugin(Plugin):
             "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,wind_speed_10m_max",
             "timezone": tz, "forecast_days": 7, "wind_speed_unit": "ms",
         }
-        async with httpx.AsyncClient(timeout=25, trust_env=False) as client:
-            r = await client.get(API, params=params)
-            r.raise_for_status()
-            data = r.json()
+        data, err = None, None
+        for attempt in range(3):  # 🔁 Open-Meteo іноді не відповідає вчасно — пробуємо ще, а потім віддаємо останній відомий прогноз
+            try:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(30, connect=15), trust_env=False) as client:
+                    r = await client.get(API, params=params)
+                    r.raise_for_status()
+                    data = r.json()
+                break
+            except Exception as exc:  # noqa: BLE001
+                err = exc
+                await asyncio.sleep(1.5 * (attempt + 1))
+        if data is None:
+            if hit and time.time() - hit[0] < 12 * 3600:  # старіший, але справжній прогноз — краще, ніж помилка
+                log.warning("погода: Open-Meteo не відповідає (%s) — показую прогноз від %s", err, time.strftime("%H:%M", time.localtime(hit[0])))
+                return hit[1]
+            raise err
         data = data if isinstance(data, list) else [data]
         self._cache[key] = (time.time(), data)
         if len(pts) == len(UA_POINTS):
