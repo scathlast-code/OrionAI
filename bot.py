@@ -2802,7 +2802,8 @@ async def show(update: Update, text, rows, edit=True, nav=True):
         rows[-1].append(("💡", "imp:s"))  # непомітна позначка «Покращити» на кожному екрані
     markup = kb(rows) if rows else None
     from footnotes import html_cut
-    text = html_cut(text or "", 4096)  # довгий екран — обрізаємо, не розриваючи HTML-теги
+    text = re.sub(r"&amp;(?:nbsp|#160|#xa0);", " ", text or "")  # 🧹 видимі «&nbsp;» з чужих текстів — у пробіл
+    text = html_cut(text, 4096)  # довгий екран — обрізаємо, не розриваючи HTML-теги
     q = update.callback_query
     if q and edit:
         try:

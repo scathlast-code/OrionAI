@@ -1243,6 +1243,17 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
                 return "Спочатку підженіть довжину (📏)", self.card(d["id"])
             if d["status"] not in ("draft",):
                 return "Вже вирішено", self.card(d["id"])
+            from .engine import blocking
+            if not d.get("check_report"):  # 🔎 неперевірене не схвалюємо — спершу звірка
+                self._autocheck(d["id"])
+                return "🔎 Чернетку ще перевіряють (факти, цитати, унікальність) — за хвилину відкрийте знову", self.card(d["id"])
+            probs = blocking(d["check_report"])
+            if probs and y != "force":
+                text, rows = self.card(d["id"])
+                rows = [[("🔁 Переписати з урахуванням звірки", self.cb("rw", d["id"]))],
+                        [("⚠️ Схвалити попри зауваження", self.cb("ok", d["id"], "force"))]] + rows
+                return "⛔ Є незвірені факти чи цитати — див. 🔎 звіт", ("⛔ <b>Схвалення заблоковано перевіркою</b>\n"
+                                                                         + "\n".join(esc(p) for p in probs[:6]) + "\n\n" + text, rows)
             st.update_draft(d["id"], keep_version=True, status="approved", decided_by=chat)
             if st.get("publish_on_approve") and st.get("publish_chat"):
                 ok, msg = await self.publish(d["id"])
@@ -1478,10 +1489,11 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
             d = self.store.draft(did)
             if not d:
                 return
+            it = self.store.item(d["item_id"]) if d.get("item_id") else None
             try:
-                report = await self.engine.check(d, self.host.search)
+                report = await self.engine.check(d, self.host.search, (it or {}).get("raw_text") or "")
             except Exception as exc:  # noqa: BLE001
-                report = f"⚠️ Автоматична звірка не вдалася: {exc}"
+                report = f"⚠️ Автоматична звірка не вдалася: {exc} — факти не звірено"
             import langguard
             bits = langguard.foreign((d.get("headline") or "") + "\n" + (d.get("body") or ""))
             if bits:
@@ -1496,8 +1508,9 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
 
     async def _check(self, chat, did):
         d = self.store.draft(did)
+        it = self.store.item(d["item_id"]) if d.get("item_id") else None
         try:
-            report = await self.engine.check(d, self.host.search)
+            report = await self.engine.check(d, self.host.search, (it or {}).get("raw_text") or "")
         except Exception as exc:  # noqa: BLE001
             report = f"⚠️ Звірка не вдалася: {exc}"
         self.store.update_draft(did, keep_version=True, check_report=report)

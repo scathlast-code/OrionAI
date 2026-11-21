@@ -102,6 +102,13 @@ def test_full_flow_publish(tmp_path):
     assert "Схвалити" in str(rows) and "У Києві" in text
     toast, _ = run(p.route(None, None, 1, ["pub", str(did)]))
     assert "лише схвалене" in toast.lower()
+    p.store.update_draft(did, keep_version=True, check_report="")  # ще не перевірено — схвалити не можна
+    toast, _ = run(p.route(None, None, 1, ["ok", str(did)]))
+    assert "перевіряють" in toast and p.store.draft(did)["status"] == "draft"
+    p.store.update_draft(did, keep_version=True, check_report="❌ Цитату не знайдено в першоджерелі: «…»")
+    toast, _ = run(p.route(None, None, 1, ["ok", str(did)]))
+    assert "⛔" in toast and p.store.draft(did)["status"] == "draft"
+    p.store.update_draft(did, keep_version=True, check_report="✅ підтверджено (suspilne.media)")
     run(p.route(None, None, 1, ["ok", str(did)]))
     toast, _ = run(p.route(None, None, 1, ["pub", str(did)]))
     assert p.store.draft(did)["status"] == "published"
@@ -180,3 +187,10 @@ def test_http_routes(tmp_path, monkeypatch):
     sig = "sha256=" + hmac.new(b"as", body, hashlib.sha256).hexdigest()
     assert c.post("/sekret/newsroom/whatsapp", content=body, headers={"x-hub-signature-256": sig}).status_code == 200
     assert p.store.count("items", "origin='whatsapp'") == 1
+
+
+
+def test_check_quotes_and_overlap():
+    from plugins.newsroom.engine import overlap, norm, blocking
+    assert overlap("один два три чотири п'ять шість", "один два три чотири п'ять шість") == 1.0
+    assert blocking("✅ ок\n❌ Цитату не знайдено в першоджерелі: «x»") and not blocking("✅ ок")
