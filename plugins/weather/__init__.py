@@ -355,7 +355,14 @@ class WeatherPlugin(Plugin):
         snow = [r["name"] for r in rows if 71 <= int(r["code"]) <= 86 and int(r["code"]) not in (80, 81, 82)]
         storm = [r["name"] for r in rows if int(r["code"]) >= 95]
         windy = [r["name"] for r in rows if r["wind"] >= 12]
-        most = lambda names: "майже по всій країні" if len(names) >= len(rows) * 0.7 else ", ".join(city(n) for n in names)  # noqa: E731
+        def most(names):  # більшість — «майже по всій країні»; довгий список — перші 5 і «ще N»
+            if len(names) >= len(rows) * 0.7:
+                return "майже по всій країні"
+            if len(names) > 6:
+                k = len(names) - 5
+                word = "місто" if k % 10 == 1 and k % 100 != 11 else "міста" if 2 <= k % 10 <= 4 and not 12 <= k % 100 <= 14 else "міст"
+                return ", ".join(city(n) for n in names[:5]) + f" і ще {k} {word}"
+            return ", ".join(city(n) for n in names)
         if storm:
             lines.append("⛈ Гроза: " + most(storm))
         if snow:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from html import escape
+import re
 
 
 def esc(s):
@@ -38,13 +39,41 @@ import re as _re
 _TAG = _re.compile(r"<(/?)([a-zA-Z]+)[^>]*>")
 
 
+def visible_len(text):
+    import html as _h
+    return len(_h.unescape(re.sub(r"<[^>]+>", "", text or "")))
+
+
+def _raw_pos(text, room):
+    """Позиція в HTML, де видимого тексту набирається room символів."""
+    import html as _h
+    vis, i, n = 0, 0, len(text)
+    while i < n:
+        if text[i] == "<":
+            j = text.find(">", i)
+            i = n if j < 0 else j + 1
+            continue
+        if text[i] == "&":
+            m = re.match(r"&(?:#\d+|#x[0-9a-fA-F]+|\w+);", text[i:])
+            step = len(m.group(0)) if m else 1
+            w = len(_h.unescape(m.group(0))) if m else 1
+        else:
+            step, w = 1, 1
+        if vis + w > room:
+            break
+        vis += w
+        i += step
+    return i
+
+
 def html_cut(text, limit=4000, tail=""):
     """Обрізає HTML для Telegram, не розриваючи теги: ріже по рядку, закриває відкриті <b>, <i>, <a>, <blockquote>."""
     text = text or ""
-    room = limit - len(tail)
-    if len(text) <= room:
+    room = limit - visible_len(tail)
+    if visible_len(text) <= room:  # ліміт Telegram рахує видимий текст — теги й адреси посилань не враховуються
         return text + tail
-    cut = text[:room]
+    cut = text[:_raw_pos(text, room)]
+    room = len(cut)
     nl = cut.rfind("\n")
     if nl > room * 0.5:
         cut = cut[:nl]
