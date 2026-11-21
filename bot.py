@@ -2617,8 +2617,8 @@ DEFAULT_GROUPS = {
     "settings": "⚙️ Налаштування",
 }
 DEFAULT_LAYOUT = [
-    ["today", "home"], ["g:work", "home"], ["g:news", "home"], ["g:settings", "home"],
-    ["dl", "g:work"], ["zap", "g:work"], ["sp", "g:work"], ["pins", "g:work"], ["inbox", "g:work"], ["wx", "g:work"], ["cr", "g:work"],
+    ["today", "home"], ["g:work", "home"], ["g:settings", "home"],
+    ["dl", "g:work"], ["zap", "g:work"], ["g:news", "g:work"], ["sp", "g:work"], ["pins", "g:work"], ["inbox", "g:work"], ["wx", "g:work"], ["cr", "g:work"],
     ["red", "g:news"], ["news", "g:news"], ["utm", "g:news"], ["col", "g:news"],
     ["md", "g:settings"], ["st", "g:settings"], ["acc", "g:settings"], ["backup", "g:settings"], ["svc", "g:settings"],
     ["btns", "g:settings"], ["diag", "g:settings"], ["help", "g:settings"],
@@ -2639,6 +2639,23 @@ def _migrate_compact_menu(chat_id):
     finally:
         _migrate_menu_v8(chat_id)
         _migrate_menu_v9(chat_id)
+        _migrate_menu_v10(chat_id)
+
+
+def _migrate_menu_v10(chat_id):
+    """«📰 Новинарня» — усередині «💬 Роботи» (одразу після Записника)."""
+    p = prefs(chat_id)
+    if p.get("menu_v10"):
+        return
+    saved = [list(x) for x in (p.get("layout") or [])]
+    if saved:
+        out = [x for x in saved if x[0] != "g:news"]
+        pos = next((k + 1 for k, x in enumerate(out) if x[0] == "zap"), None)
+        if pos is None:
+            pos = next((k + 1 for k, x in enumerate(out) if x[1] == "g:work"), len(out))
+        out[pos:pos] = [["g:news", "g:work"]]
+        set_pref(chat_id, "layout", out)
+    set_pref(chat_id, "menu_v10", True)
 
 
 def _migrate_menu_v9(chat_id):
@@ -8050,7 +8067,9 @@ async def scr_hub(chat_id, key):
     """Об'єднаний розділ: короткий підсумок кожної частини + її кнопки на одному екрані."""
     import miniapp
     title, intro, parts = HUBS[key]
-    blocks, rows, seen, titles, secs = [], [], {f"m:hub:{key}"}, [], []
+    class _Rows(list):
+        _open_tail = False
+    blocks, rows, seen, titles, secs = [], _Rows(), {f"m:hub:{key}"}, [], []
     tok = HUB_BUILDING.set(True)
     try:
         for head, data, nlines, mode in parts:
@@ -8061,8 +8080,12 @@ async def scr_hub(chat_id, key):
             seen.add(data.replace(":show", ""))
             short = _cut_html(body, nlines) if body and nlines else ""
             blocks.append(f"<b>{head}</b>" + (("\n" + short) if short else ""))
-            if mode == "open":
-                rows.append([(f"{head} ›", data)])
+            if mode == "open":  # компактно: розділи-посилання по два в ряд
+                if rows and rows[-1] and len(rows[-1]) == 1 and rows[-1][0][0].endswith(" ›") and getattr(rows, "_open_tail", False):
+                    rows[-1].append((f"{head} ›", data))
+                else:
+                    rows.append([(f"{head} ›", data)])
+                rows._open_tail = len(rows[-1]) == 1
                 secs.append({"head": head, "body": short, "rows": [[("Відкрити повністю ›", data)]]})
                 continue
             part = []
@@ -8073,6 +8096,7 @@ async def scr_hub(chat_id, key):
                 if rr:
                     part.append(rr)
             secs.append({"head": head, "body": short, "rows": part})
+            rows._open_tail = False
             if part:
                 rows.append([(f"— {head} —", "m:noop")])
                 rows += part
