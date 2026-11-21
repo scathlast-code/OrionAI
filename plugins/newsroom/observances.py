@@ -867,6 +867,34 @@ class ObservancesUI:
             title = f'<a href="{esc(r["url"])}">{title}</a>'
         return f"{KINDS.get(r['kind'], '•').split()[0]}{marks} {title}{span}"
 
+    def plan_who(self, d):
+        """✍️ Хто й де пише цей день за контент-планом (і за призначеннями в «🗞 Редакції»); ◽ — ніхто не відповідає."""
+        by_t = {}
+        for it in self.cplan_on(d):
+            by_t.setdefault(self._tkey(it["title"]), []).append(it)
+        red = self.host.extra.get("plugin", lambda pid: None)("red")
+        try:
+            extra_who = red.assigned(d.isoformat()) if red else {}
+        except Exception:  # noqa: BLE001
+            extra_who = {}
+        for title, pairs in extra_who.items():  # призначені в «🗞 Редакції» — як автори з плану
+            for w, where in pairs:
+                by_t.setdefault(self._tkey(title), []).append({"title": title, "author": w, "where": where})
+
+        def who(r):
+            k = self._tkey(r["title"])
+            hit = by_t.get(k) or next((v for kk, v in by_t.items() if len(kk) > 8 and (kk in k or k in kk)), None)
+            if not hit:
+                return ""
+            hit = [i for i in hit if i.get("author")] or hit
+            seen_ = set()
+            hit = [i for i in hit if not ((i.get("author"), i.get("where")) in seen_ or seen_.add((i.get("author"), i.get("where"))))]
+            ref = "" if r.get("source") == "Контент-план" else " · " + self.cplan_ref(d)
+            if not any(i.get("author") for i in hit):  # ◽ сірий — за день ніхто не відповідає (призначити — у «🗞 Редакція»)
+                return " · ◽" + ref
+            return " · ✍️ " + ", ".join(DB.person(i["author"]) + (f" ({esc(i['where'])})" if i.get("where") else "") for i in hit if i.get("author")) + ref
+        return who
+
     @staticmethod
     def _ahead(items, d):
         """Лише події від цього дня й далі (минулі — не «найближчим часом»)."""
@@ -889,42 +917,15 @@ class ObservancesUI:
         days = [r for r in rs if r["kind"] == "day"]
         ongoing = [r for r in rs if r["kind"] != "day"]
         plan = self.cplan_on(d) if notes is not None else []
-        by_t = {}
-        for it in plan:
-            by_t.setdefault(self._tkey(it["title"]), []).append(it)
-        used = set()
-
-        red = self.host.extra.get("plugin", lambda pid: None)("red")
-        try:
-            extra_who = red.assigned(d.isoformat()) if red and plan else {}
-        except Exception:  # noqa: BLE001
-            extra_who = {}
-        for title, pairs in extra_who.items():  # призначені в «🗞 Редакції» — як автори з плану
-            for w, where in pairs:
-                by_t.setdefault(self._tkey(title), []).append({"title": title, "author": w, "where": where})
-
-        def who(r):  # день уже є в плані — дописуємо, хто й де пише (без дубля в розділі плану)
-            k = self._tkey(r["title"])
-            hit = by_t.get(k) or next((v for kk, v in by_t.items() if len(kk) > 8 and (kk in k or k in kk)), None)
-            if not hit:
-                return ""
-            used.update(id(i) for i in hit)
-            hit = [i for i in hit if i.get("author")] or hit
-            seen_ = set()
-            hit = [i for i in hit if not ((i.get("author"), i.get("where")) in seen_ or seen_.add((i.get("author"), i.get("where"))))]
-            if not any(i.get("author") for i in hit):  # ◽ сірий — за день ніхто не відповідає (призначити — у «🗞 Редакція»)
-                return " · ◽" + ("" if r.get("source") == "Контент-план" else " · " + self.cplan_ref(d))
-            return (" · ✍️ " + ", ".join((DB.person(i["author"]) if i.get("author") else "у плані") + (f" ({esc(i['where'])})" if i.get("where") else "") for i in hit)
-                    + ("" if r.get("source") == "Контент-план" else " · " + self.cplan_ref(d)))
-        lines = [self.obs_line(r, link=with_links, notes=notes) + (who(r) if plan else "") for r in days[:25]]
+        who = self.plan_who(d) if plan else (lambda r: "")
+        lines = [self.obs_line(r, link=with_links, notes=notes) + who(r) for r in days[:25]]
         if ongoing:  # скільки триває — лише в підзаголовку «Триває», не в загальному рядку
-            lines += (["", f"<b>⏳ Триває · {len(ongoing)}</b>"] if days else []) + [self.obs_line(r, link=with_links, notes=notes) for r in ongoing[:12]]
+            lines += (["", f"<b>⏳ Триває · {len(ongoing)}</b>"] if days else []) + [self.obs_line(r, link=with_links, notes=notes) + who(r) for r in ongoing[:12]]
         if notes is not None and lines:
             if any(self.verified(r["id"]) for r in days[:25] + ongoing[:12]):
                 lines.append("<i>✅N — скільки незалежних ресурсів підтверджують (посилання — одразу після рядка) · ⚠️1 — лише одне джерело, звіряйте</i>")
         if lines:
             out.append(("days", f"📌 {'Сьогодні відзначається' if d == self.today() else 'Цього дня відзначається'} · {len(days)}" if days else f"⏳ Триває · {len(ongoing)}", lines))
-        rest = [i for i in plan if id(i) not in used]
         for cat in DB.LIST_CATS:
             items = self.db_items(md, cat, chat)
             if items:
@@ -1145,7 +1146,7 @@ class ObservancesUI:
         if up:
             more = (f"\n… ще {len(up) - 10} · " if len(up) > 10 else "\n↗️ ") + self.jump_link("up", d)
             tail += f"\n<b>⚠️ Найближчі важливі дні · {len(up)}</b>\n<blockquote expandable>" + "\n".join(
-                f"{x.day:02d}.{x.month:02d} · {(x - d).days} дн. · {self.obs_line(r, notes=notes)}" for x, r in up[:10]) + more + "</blockquote>"
+                f"{x.day:02d}.{x.month:02d} · {(x - d).days} дн. · {self.obs_line(r, notes=notes)}{self.plan_who(x)(r)}" for x, r in up[:10]) + more + "</blockquote>"
         on = self.store.get("obs_morning") is not False
         cov = self.obs_coverage()
         hm = self.store.get("obs_time") or "07:30"
@@ -1454,7 +1455,7 @@ class ObservancesUI:
         d = self.today()
         up = self.upcoming(chat, 60)
         lines = [f"⚠️ <b>Важливі дні попереду · {len(up)} за 60 днів</b>", "‼️ дуже важливі · ❗ важливі", ""]
-        lines += [f"{x.day:02d}.{x.month:02d} {WD[x.weekday()]} · через {(x - d).days} дн. · {self.obs_line(r, link=True)}" for x, r in up[:40]] or ["Немає."]
+        lines += [f"{x.day:02d}.{x.month:02d} {WD[x.weekday()]} · через {(x - d).days} дн. · {self.obs_line(r, link=True)}{self.plan_who(x)(r)}" for x, r in up[:40]] or ["Немає."]
         rows = [[("🔔 Коли попереджати", self.cb("obws"))], [("« Теми дня", self.cb("obh", "l"))]]
         return "\n".join(lines)[:4000], rows
 
