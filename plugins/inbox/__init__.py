@@ -76,8 +76,8 @@ KIND_ICON = {"text": "💬", "photo": "🖼", "video": "🎬", "voice": "🎙", 
 
 class Plugin(Base):
     id = "inb"
-    icon = "📮"
-    title = "Скринька"
+    icon = "📬"
+    title = "Пошта"
     version = "1.0"
     admin_only = False
     summary = ("Люди пишуть вам прямо в бот — текст, фото, голосові, файли, новини. Вам приходить сповіщення з підписом, хто це, "

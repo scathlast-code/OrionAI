@@ -33,8 +33,8 @@ def test_menu_migration_adds_plugins_category(tmp_path):
     out = subprocess.run([sys.executable, "-c", SCRIPT], cwd=ROOT, env=env, capture_output=True, text=True, timeout=120)
     assert out.returncode == 0, out.stderr[-2000:]
     res = json.loads(out.stdout.strip().splitlines()[-1])
-    # меню v8: «🌅 Сьогодні» — першим на головному; «Медіа» влилося в «💬 Робота»
+    # меню v8–v9: «🌅 Сьогодні» — першим на головному
     assert res["order"][:2] == ["today", "g:work"]
-    assert res["places"] == {"news": "g:work", "stk": "g:work", "plg": "off"}
+    assert res["places"] == {"news": "g:news", "stk": "off", "plg": "off"}  # v9: «Новинарня» й «Медійка»
     assert res["view"] == [True, True, False]
     assert res["group"] is None
