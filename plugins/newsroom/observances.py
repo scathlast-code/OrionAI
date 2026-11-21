@@ -501,7 +501,8 @@ class ObservancesUI:
         sheets = self.store.get("cplan_sheets") or []
         if sheets:
             lines += ["", "<b>Аркуші</b>:"] + [esc(x) for x in sheets[-40:]]
-        return html_cut("\n".join(lines), 4000), [[("🔄 Завантажити зараз", self.cb("obcpr"))], [("« Контент-план", self.cb("obcp"))]]
+        return html_cut("\n".join(lines), 4000), [[("🔄 Завантажити зараз", self.cb("obcpr")), ("🔗 Змінити посилання", self.cb("obcu"))],
+                                                    [("« Контент-план", self.cb("obcp"))]]
 
     DAYLIKE_RE = re.compile(r"(?i)\b(?:день|дня|тиждень|місяць|місячник|рік|свято|декада|ніч|година)\b")
 
@@ -1688,6 +1689,11 @@ class ObservancesUI:
             return None, self.cplan_screen(chat, x)
         if a == "obcps":
             return None, self.cplan_status(chat)
+        if a == "obcu":
+            if not self.host.is_admin(chat):
+                return "Лише адміністратори", None
+            self.ask(chat, "obcu")
+            return None, ("🔗 Надішліть посилання на контент-план (Google Таблицю або файл у Google Диску).", [[("« Стан", self.cb("obcps"))]])
         if a in ("obce", "obca", "obcd", "obcw", "obcx"):
             return await self.cplan_edit_route(chat, a, x)
         if a == "obsec":
@@ -1792,6 +1798,15 @@ class ObservancesUI:
 
     async def obs_text(self, chat, key, data, text):
         t = text.strip()
+        if key == "obcu":
+            from . import contentplan as CP
+            m = re.search(r"https://(?:docs|drive)\.google\.com/\S+", t)
+            if not m or not CP.file_id(m.group(0)):
+                return "Це не схоже на посилання Google Таблиці чи Диску", None
+            self.store.set("cplan_urls", [m.group(0)])
+            self.store.set("cplan_data", {})
+            await self.ensure_cplan(force=True)
+            return "🔗 Посилання збережено", self.cplan_status(chat)
         if key == "obce":  # ✏️ текст правки контент-плану — спершу перегляд, запис лише після «✅ Зберегти»
             return None, self.cplan_preview(chat, {**(data or {}), "new": t[:500]})
         if key == "obm":
