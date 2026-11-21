@@ -135,13 +135,36 @@ function split(label){
   let icon=m?m[1]:'', rest=m?label.slice(m[0].length):label, badge='';
   const b=rest.match(/\s·\s*(\d+)$/); if(b){badge=b[1];rest=rest.slice(0,b.index)}
   return {icon,rest,badge}}
+// ⏳ Що саме зараз робить ШІ: етап, модель, час, смужка, текст, що вже пишеться
+function liveText(p){const L=[];
+  L.push('⏳ '+(p.job||'Працюю')+' · '+(p.total||p.sec||0)+' с'+(p.bar?'  '+p.bar:''));
+  if(p.stage)L.push((p.step?p.step+': ':'')+p.stage);
+  if(p.title)L.push('🤖 '+p.title+(p.model?' ('+p.model+')':'')+' · '+p.sec+' с'+(p.limit?' з '+p.limit:'')+(p.of>1?' · спроба '+p.try+' з '+p.of:''));
+  if(p.prev)L.push('↪️ '+p.prev);
+  if(p.partial)L.push('\n✍️ '+p.partial.slice(-600));
+  return L.join('\n')}
+let lastCall=null;
 async function call(op, data, extra, quiet){
   if(!init){render({text:'<b>Відкрийте з Telegram</b>\nЗастосунок працює всередині бота: синя кнопка ліворуч від поля вводу або ⚙️ → 📱 Чат і застосунок.',rows:[]},true);return null}
   busy=true;
-  try{const r=await fetch(API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({initData:init,op,data},extra||{}))});
+  // Сервер оновлюється чи перезапускається (≈1 хв після кожного оновлення) — не кидаємо людину з сірими плашками:
+  // повторюємо самі й чесно пишемо, що відбувається.
+  const body=JSON.stringify(Object.assign({initData:init,op,data},extra||{}));const waits=quiet?[]:[1,2,3,4,5,5,5,5,5,5,5,5];
+  for(let k=0;;k++){let r=null,err=null;
+    try{r=await fetch(API,{method:'POST',headers:{'Content-Type':'application/json'},body})}catch(e){err=e}
+    if((err||(r&&[502,503,504].includes(r.status)))&&k<waits.length){
+      if(k===0||k%3===0)toast('⏳ Сервер бота перезапускається (так буває ~1 хв після оновлення) — повторюю сам…');
+      const m=document.getElementById('main');if(m&&m.querySelector('.skel'))m.innerHTML='<div class="card">⏳ <b>Сервер бота перезапускається</b><br>Так буває приблизно хвилину після кожного оновлення. Застосунок повторює запит сам — спроба '+(k+1)+' з '+waits.length+'.</div>';
+      await new Promise(res=>setTimeout(res,waits[k]*1000));continue}
+    if(err&&!quiet){busy=false;lastCall=[op,data,extra];
+      const m=document.getElementById('main');if(m&&(m.querySelector('.skel')||m.textContent.includes('перезапускається')))render({text:'<b>⚠️ Сервер бота не відповідає</b>\nМожливі причини: оновлення ще триває, сервер Railway перезапускається або немає інтернету.\nЩо зробити: зачекайте хвилину й натисніть «🔄 Спробувати ще раз». Якщо не минає 5+ хв — напишіть боту в чат: там видно, чи він живий.',rows:[[['🔄 Спробувати ще раз','app:retry']]]},true);
+      else toast('Сервер бота не відповідає — спробуйте ще раз за хвилину');return null}
+    if(err){busy=false;return null}
+    return await finish(r)}
+  async function finish(r){try{
     if(r.status===403){render({text:'<b>Немає доступу</b>\nЦей застосунок відкривається лише для учасників бота.\nЯкщо вас запросили — поверніться в чат із ботом і натисніть «✅ Згоден(-на)», потім відкрийте застосунок знову.',rows:[]},true);return null}
-    if(!r.ok){if(!quiet)toast('Помилка API: HTTP '+r.status);return null}
-    return await r.json()}catch(e){if(!quiet)toast(e instanceof SyntaxError?'Некоректна відповідь сервера':'Сервер API недоступний');return null}finally{busy=false}}
+    if(!r.ok){if(!quiet)toast('Помилка сервера (HTTP '+r.status+') — спробуйте ще раз; якщо повторюється, натисніть 🐞');return null}
+    return await r.json()}catch(e){if(!quiet)toast(e instanceof SyntaxError?'Сервер відповів незрозуміло — спробуйте ще раз':'Сервер бота не відповідає — спробуйте ще раз за хвилину');return null}finally{busy=false}}}
 function loading(){const m=document.getElementById('main');m.innerHTML='<div class="skel"></div><div class="skel"></div><div class="skel"></div>';const c=document.getElementById('composer');if(c)c.style.display='none';const mb=document.getElementById('mbar');if(mb)mb.remove()}
 async function open_(data, push=true){
   if(data==='m:home'||data==='m:nav:home') return openMenu(push);
@@ -229,8 +252,8 @@ async function openChats(){haptic();const r=await call('chats','chat');if(!r)ret
   acts('Чати й теки. Кожна модель бачить лише історію відкритого чату; щоб узяти інші — напишіть «бери з сусідніх чатів» або «з усіх чатів».',items)}
 async function say(){const ta=document.querySelector('#composer textarea');const t=ta.value.trim();if(!t||busy)return;ta.value='';
   const h=await call('history','chat');if(h){h.messages.push({role:'user',text:t});renderChat(h,true)}
-  const tick=setInterval(async()=>{const p=await call('progress','chat');const el=document.getElementById('typing');if(!el||!p||!p.title)return;
-    el.textContent='🤖 '+p.title+' ('+p.model+') думає · '+p.sec+' с з '+p.limit+(p.of>1?' · спроба '+p.try+' з '+p.of:'')+(p.prev?'\n↪️ '+p.prev:'')+(p.partial?'\n\n✍️ '+p.partial.slice(-600):'')},1000);
+  const tick=setInterval(async()=>{const p=await call('progress','chat',null,true);const el=document.getElementById('typing');if(!el||!p||!(p.title||p.stage))return;
+    el.textContent=liveText(p)},1000);
   const res=await call('say','chat',{text:t,user:userInfo()});clearInterval(tick);if(!res)return;showResult(res)}
 function showResult(res){
   if(res.text){hist.push('chat');cur=null;render(res);return}   // плагін показав екран (ньюзрум, стікери, імпорт…)
@@ -448,6 +471,7 @@ function press(label, d){
   if(marking){mark('кнопка «'+label+'»',d,'');return}
   haptic();
   if(d.startsWith('url:')){try{TG.openLink(d.slice(4))}catch(_){window.open(d.slice(4))}return}
+  if(d==='app:retry'){if(lastCall){const [o,dd,ex]=lastCall;lastCall=null;if(o==='screen'||o==='menu'){o==='menu'?openMenu(false):open_(dd,false)}else call(o,dd,ex).then(res=>res&&render(res))}else openMenu(false);return}
   if(d.startsWith('app:')){toast('Ви вже в застосунку');return}
   if(d==='m:cancel'){cancelInput();return}
   if(d==='feed'){openFeed();return}
@@ -490,7 +514,10 @@ function bugOpen(){haptic();bugImg='';bugKind('bug',true);document.getElementByI
   f.addEventListener('pointerdown',e=>{y0=e.clientY;top0=f.getBoundingClientRect().top;moved=false;f.setPointerCapture(e.pointerId)});
   f.addEventListener('pointermove',e=>{if(y0===null)return;const dy=e.clientY-y0;if(Math.abs(dy)>6)moved=true;
     if(moved){const t=Math.max(60,Math.min(innerHeight-180,top0+dy));f.style.top=t+'px'}});
-  f.addEventListener('pointerup',()=>{if(y0===null)return;y0=null;if(moved){try{localStorage.setItem('bugfab_top',f.style.top)}catch(_){}}else bugOpen()});})();
+  const end=()=>{if(y0===null)return;y0=null;if(moved){try{localStorage.setItem('bugfab_top',f.style.top)}catch(_){}}};
+  f.addEventListener('pointerup',end);f.addEventListener('pointercancel',end);
+  // Відкриваємо по звичайному «click»: на iPhone pointerup у Telegram інколи губиться, і кнопка «не натискалась»
+  f.addEventListener('click',e=>{e.preventDefault();if(moved){moved=false;return}bugOpen()});})();
 function bugClose(){document.getElementById('bugsheet').classList.remove('on')}
 document.getElementById('bugfile').addEventListener('change',e=>{const f=e.target.files[0];if(!f)return;
   if(f.size>20*1048576){toast('Файл завеликий (до 20 МБ) — запишіть коротше');return}

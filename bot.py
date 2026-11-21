@@ -4638,10 +4638,18 @@ STICKY_FOR = float(env("STICKY_MINUTES", "10")) * 60
 
 
 def live_info(chat_id):
+    """Що зараз робить ШІ для людини: модель, етап («шукаю в інтернеті», «збираю контекст»…), смужка, текст, що пишеться."""
     v = LIVE.get(chat_id)
-    if not v:
+    pr = next((p for p in list(RUNNING.values()) if p.chat_id == chat_id), None)
+    if not v and not pr:
         return None
-    return {**v, "sec": int(time.time() - v["t0"])}
+    out = {**v, "sec": int(time.time() - v["t0"])} if v else {"title": "", "model": "", "sec": int(time.time() - pr.started), "limit": 0}
+    if pr:
+        out.update(job=pr.title, stage=re.sub(r"<[^>]+>", "", pr.stage or ""), bar=pr._bar(),
+                   step=(f"Крок {pr.step_i} з {pr.step_n}" if pr.step_n else ""), total=int(time.time() - pr.started))
+        if pr.partial and not out.get("partial"):
+            out["partial"] = pr.partial[-1500:]
+    return out
 
 
 def progress_stage(text, step=None, of=None):
