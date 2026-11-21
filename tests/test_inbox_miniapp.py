@@ -160,3 +160,19 @@ def test_orion_is_the_hub(tmp_path):
     assert r.returncode == 0, r.stderr[-1500:]
     out = json.loads(r.stdout.strip().splitlines()[-1])
     assert out == {"home": out["home"], "all_translated": True, "has_bots": True, "handled": True, "hb": True, "in": True}
+
+
+def test_thread_shows_messages_whoever_owns_copy(tmp_path):
+    """Лічильник «Повідомлень: 2» і сама розмова збігаються, навіть якщо копії лягли не першому власнику."""
+    bot = Bot()
+    admins = [1, 2]
+    h = Host(data_dir=tmp_path, admins=lambda: admins, is_admin=lambda u: u in admins, is_allowed=lambda u: u in admins, bot=lambda: bot)
+    p = Inbox(h)
+    ctx = types.SimpleNamespace(bot=bot)
+    for i, t in enumerate(("Перше", "Друге"), 2):
+        m, _ = msg(55, t, i)
+        asyncio.run(p.on_private(upd(55, m), ctx))
+    admins[:] = [3]  # список власників змінився — старі копії не повинні «зникати»
+    text, _rows = p.thread(55)
+    assert "Перше" in text and "Друге" in text and "ще немає" not in text
+    assert text.count("Перше") == 1  # копія на кожного власника — показуємо один раз

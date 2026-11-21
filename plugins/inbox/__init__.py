@@ -458,9 +458,10 @@ class Plugin(Base):
         p = self.person(uid)
         if not p:
             return "Розмову не знайдено.", [[("« Скринька", self.cb())]]
-        owners = (self.host.admins() or [0])[:1]  # «вхідне» записане по копії на кожного власника — беремо копії першого
-        q = ("FROM msgs WHERE user=? AND (dir='out' OR owner_chat IN (%s) OR owner_chat IS NULL)" % ",".join("?" * len(owners)))
-        args = (int(uid), *owners)
+        # «вхідне» записане по копії на кожного власника — показуємо кожне повідомлення один раз, хоч би чия копія лишилась
+        q = ("FROM msgs WHERE user=? AND (dir!='in' OR id IN (SELECT MIN(id) FROM msgs WHERE user=? AND dir='in' "
+             "GROUP BY COALESCE(src_msg, -id), at))")
+        args = (int(uid), int(uid))
         with closing(self.db()) as con:
             total = con.execute("SELECT COUNT(*) " + q, args).fetchone()[0]
             pages = max(1, (total + self.PAGE - 1) // self.PAGE)
