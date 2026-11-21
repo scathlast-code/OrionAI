@@ -127,7 +127,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
     VIEWS = {"ls", "d", "src", "dg", "so", "set", "q", "help", "ver", "len", "rules",
              "L", "Lo", "Ls", "Lsort", "Lbulk", "Le", "Lacc", "Lhelp", "Elst", "Lmerge",
              "H1", "H2", "H3", "H4", "H5", "D", "Dm", "Fl", "Fo", "Ff", "Fi", "Fmv", "Fbl", "Tg", "Tgi", "Tp", "Bk", "Bkl",
-             "Sp", "Ou", "Ours", "Sl", "St", "Wt", "more", "acs", "ace", "sch", "fld", "flds", "echo", "eci", "cls", "ctp", "cte", "cmk", "csl", "obh", "obt", "obc", "obd", "ob", "obi", "obl", "obs", "obup", "obws", "obdy", "obcp"}
+             "Sp", "Ou", "Ours", "Sl", "St", "Wt", "more", "acs", "ace", "sch", "fld", "flds", "echo", "eci", "cls", "ctp", "cte", "cmk", "csl", "obh", "obt", "obc", "obd", "ob", "obi", "obl", "obs", "obup", "obws", "obdy", "obcp", "obcm"}
 
     def __init__(self, host):
         super().__init__(host)

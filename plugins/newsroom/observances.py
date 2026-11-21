@@ -370,7 +370,12 @@ class ObservancesUI:
                 pass
         day_mode = bool(ymd and len(ymd) == 8) or not ymd
         y, m = sel.year, sel.month
-        rows = [[(w, "m:noop") for w in WD]]
+        prev = (dt.date(y, m, 1) - dt.timedelta(days=1)).strftime("%Y%m")
+        nxt = (dt.date(y, m, 28) + dt.timedelta(days=5)).strftime("%Y%m")
+        rows = [[("◀️ " + MONTHS[int(prev[4:]) - 1].lower(), self.cb("obcp", prev)),  # місяці — нагорі, щоб не ховались під «Показати ще»
+                 (f"📆 {MONTHS[m - 1]} {y} ▾", self.cb("obcm", y)),
+                 (MONTHS[int(nxt[4:]) - 1].lower() + " ▶️", self.cb("obcp", nxt))],
+                [(w, "m:noop") for w in WD]]
         week = [(" ", "m:noop")] * dt.date(y, m, 1).weekday()
         for day in range(1, calendar.monthrange(y, m)[1] + 1):
             x = dt.date(y, m, day)
@@ -385,10 +390,6 @@ class ObservancesUI:
                 week = []
         if week:
             rows.append(week + [(" ", "m:noop")] * (7 - len(week)))
-        prev = (dt.date(y, m, 1) - dt.timedelta(days=1)).strftime("%Y%m")
-        nxt = (dt.date(y, m, 28) + dt.timedelta(days=5)).strftime("%Y%m")
-        rows.append([("◀️ План: " + MONTHS[int(prev[4:]) - 1].lower(), self.cb("obcp", prev)),
-                     ("План: " + MONTHS[int(nxt[4:]) - 1].lower() + " ▶️", self.cb("obcp", nxt))])
         rows.append([("📄 Відкрити оригінал", "url:" + self.cplan_urls()[0]), ("ℹ️ Стан", self.cb("obcps"))])
         rows.append([("🗓 Загальний календар", self.cb("obc", sel.strftime("%Y%m"))), ("« Теми дня", self.cb("obh", "m"))])
         month_n = sum(len(v) for k, v in data.items() if k.startswith(f"{y}-{m:02d}"))
@@ -398,7 +399,7 @@ class ObservancesUI:
         if day_mode and self.host.is_admin(chat):  # ✏️ правки людини — у саму таблицю, з підтвердженням
             items_ = data.get(sel.isoformat(), [])
             ed = [(f"✏️ {k + 1}", self.cb("obce", f"{sel:%Y%m%d}.{k}")) for k in range(min(len(items_), 8))]
-            rows[-3:-3] = [ed[i:i + 4] for i in range(0, len(ed), 4)] + [
+            rows[-2:-2] = [ed[i:i + 4] for i in range(0, len(ed), 4)] + [
                 [("➕ Тема дня", self.cb("obca", f"{sel:%Y%m%d}.topics")), ("➕ Сайт", self.cb("obca", f"{sel:%Y%m%d}.site"))],
                 [("➕ Блог", self.cb("obca", f"{sel:%Y%m%d}.blog")), ("➕ Соцмережі", self.cb("obca", f"{sel:%Y%m%d}.smm"))]]
         if day_mode:
@@ -421,6 +422,27 @@ class ObservancesUI:
         lines += ["", f"<i>Таблиця: оновлено {dt.datetime.fromtimestamp(t, self.host.tz).strftime('%d.%m %H:%M') if t else '—'}, "
                       "перевіряю щопівгодини. У загальному календарі ці теми — разом з усіма днями.</i>"]
         return html_cut("\n".join(lines), 4000), rows
+
+    def cplan_months(self, chat, year):
+        """📆 Будь-який місяць контент-плану: 12 місяців року (✍️ N — скільки тем), рік — стрілками."""
+        try:
+            year = int(year)
+        except (TypeError, ValueError):
+            year = self.today().year
+        data = self.store.get("cplan_data") or {}
+        rows, line = [], []
+        for mo in range(1, 13):
+            n = sum(len(v) for k, v in data.items() if k.startswith(f"{year}-{mo:02d}"))
+            line.append((MONTHS[mo - 1] + (f" ✍️{n}" if n else ""), self.cb("obcp", f"{year}{mo:02d}")))
+            if len(line) == 3:
+                rows.append(line)
+                line = []
+        rows.append([(f"◀️ {year - 1}", self.cb("obcm", year - 1)), ("Сьогодні", self.cb("obcp")), (f"{year + 1} ▶️", self.cb("obcm", year + 1))])
+        have = sorted({k[:7] for k in data})
+        lines = [f"📆 <b>Контент-план · {year}</b>", "Оберіть місяць. ✍️N — скільки тем у плані на цей місяць.",
+                 (f"У таблиці є місяці: {MONTHS[int(have[0][5:]) - 1].lower()} {have[0][:4]} — {MONTHS[int(have[-1][5:]) - 1].lower()} {have[-1][:4]}."
+                  if have else "У таблиці поки немає жодного місяця.")]
+        return "\n".join(lines), rows
 
     def cplan_sources(self, it, known, notes):
         """Джерела теми плану, як у «Сьогодні»: сайт, що підтверджує день (і ще до двох), плюс сама клітинка таблиці."""
@@ -1858,6 +1880,8 @@ class ObservancesUI:
             return None, self.obs_days(chat, x or None)
         if a == "obcp":
             return None, self.cplan_screen(chat, x)
+        if a == "obcm":
+            return None, self.cplan_months(chat, x)
         if a == "obcps":
             return None, self.cplan_status(chat)
         if a == "obcu":
