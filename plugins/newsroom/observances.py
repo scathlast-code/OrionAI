@@ -350,8 +350,15 @@ class ObservancesUI:
         imp = r.get("imp_", DB.importance(r))
         marks = DB.IMP_MARK.get(imp, "") + ("⭐" if r.get("fav") else "") + ("👤" if r.get("owner") else "")
         title = esc(r["title"])
-        if notes is not None:  # 📎 джерело — зноскою [n] біля рядка, а не посиланням на весь текст
-            return f"{KINDS.get(r['kind'], '•').split()[0]}{marks} {title}{span}" + notes.mark(r.get("url"), _src_label(r.get("url"), r.get("source") or ""))
+        if notes is not None:  # 📎 джерела — у зносці під списком; ✅/⚠️ — скільки незалежних ресурсів підтверджують
+            v = self.verified(r.get("id")) if r.get("kind") == "day" and not r.get("owner") else None
+            check = ""
+            if v:
+                check = f" ✅{v['n']}" if v["n"] >= 2 else " ⚠️1"
+                for u, host in v.get("urls") or []:
+                    notes.mark(u, host)
+            notes.mark(r.get("url"), _src_label(r.get("url"), r.get("source") or ""))
+            return f"{KINDS.get(r['kind'], '•').split()[0]}{marks} {title}{span}{check}"
         if link and str(r.get("url", "")).startswith("http"):
             title = f'<a href="{esc(r["url"])}">{title}</a>'
         return f"{KINDS.get(r['kind'], '•').split()[0]}{marks} {title}{span}"
@@ -370,6 +377,8 @@ class ObservancesUI:
         if ongoing:
             lines += ["", "<b>Триває:</b>"] + [self.obs_line(r, link=with_links, notes=notes) for r in ongoing[:12]]
         if notes is not None and lines:
+            if any(self.verified(r["id"]) for r in days[:25]):
+                lines.append("<i>✅N — підтверджено N незалежними джерелами · ⚠️1 — знайдено лише в одному, звіряйте</i>")
             lines.append(notes.flush())
         if lines:
             out.append(("days", f"📌 Дні · {len(days)}" + (f" · триває {len(ongoing)}" if ongoing else ""), lines))
@@ -496,6 +505,43 @@ class ObservancesUI:
         rows.append([("« Знайти й написати", self.cb("D"))])  # джерела — зносками під кожною частиною, не кнопками
         return text, rows
 
+    # ----- 🔎 перевірка днів кількома незалежними джерелами
+    def verified(self, rid):
+        return (self.store.get("obs_verify") or {}).get(str(rid))
+
+    async def verify_days(self, d, limit=12):
+        """Кожен день зі списку дати шукаємо в інтернеті: скільки незалежних ресурсів (крім Вікіпедії, без .ru/.by/.ir)
+        згадують його. Результат — «✅ підтверджено N джерелами» або «⚠️ лише одне джерело», посилання — у зносці.
+        Кеш на рік (дні повторюються щороку)."""
+        import websearch
+        cache = self.store.get("obs_verify") or {}
+        year, done = str(d.year), 0
+        for r in self.obs_on(d):
+            if r["kind"] != "day" or r.get("owner") or done >= limit:
+                continue
+            c = cache.get(str(r["id"]))
+            if c and c.get("y") == year:
+                continue
+            done += 1
+            title = re.sub(r"\s*\(\d{4}\)\s*$", "", r["title"])
+            words = [w for w in re.findall(r"[а-яіїєґa-z]{4,}", title.lower()) if w not in ("день", "всесвітній", "міжнародний")]
+            try:
+                rows = await websearch.search_items(f"«{title}» {d.day} {MONTHS_GEN[d.month - 1]}")
+            except Exception:  # noqa: BLE001
+                continue
+            urls, hosts = [], set()
+            for x in rows:
+                host = (x["url"].split("/")[2] if "//" in x["url"] else "").removeprefix("www.")
+                hay = (x.get("title", "") + " " + x.get("snippet", "")).lower()
+                hit = sum(1 for w in words if w[:-2] in hay) >= max(1, round(len(words) * 0.6))
+                if hit and host and "wikipedia.org" not in host and host not in hosts:
+                    hosts.add(host)
+                    urls.append([x["url"], host])
+            base = 1 if str(r.get("url", "")).startswith("http") else 0
+            cache[str(r["id"])] = {"y": year, "n": base + len(urls), "urls": urls[:4]}
+            self.store.set("obs_verify", cache)
+            await asyncio.sleep(0.5)
+
     async def obs_digest(self, chat):
         """Ранкове зведення: як головний екран, але з погодою одразу після днів і з довантаженими прикметами/порадами."""
         d = self.today()
@@ -513,7 +559,23 @@ class ObservancesUI:
                 log.info("obs digest: weather failed", exc_info=True)
         await self.ensure_lore(d)
         await self.ensure_garden(d)
+        self.verify_bg(d)  # перевірка джерелами — у фоні, щоб зведення відкривалось одразу
         return self.obs_home(chat, weather=wx_text)
+
+    def verify_bg(self, d):
+        t = getattr(self, "_verify_task", None)
+        if t and not t.done():
+            return
+
+        async def go():
+            try:
+                await self.verify_days(d)
+            except Exception:  # noqa: BLE001
+                log.info("перевірка днів не вдалася", exc_info=True)
+        try:
+            self._verify_task = asyncio.get_running_loop().create_task(go())
+        except RuntimeError:
+            pass
 
     async def ensure_lore(self, d):
         """Народні прикмети: розділ Вікіпедії; якщо там порожньо — дослівні уривки з українських сайтів із посиланнями
@@ -815,6 +877,10 @@ class ObservancesUI:
         """Кожному — своє зведення (зі своїми особистими темами й обраним) і, окремо, попередження про важливі дні."""
         import notify
         d = self.today()
+        try:  # ранкова розсилка — уже з перевіркою днів кількома джерелами
+            await self.verify_days(d)
+        except Exception:  # noqa: BLE001
+            log.info("перевірка днів не вдалася", exc_info=True)
         for uid in dict.fromkeys(self.host.admins()):
             try:
                 with notify.kind("morning"):
