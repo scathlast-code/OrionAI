@@ -43,8 +43,8 @@ def _split(cell):
     return out
 
 
-def parse(data: bytes):
-    """→ {"YYYY-MM-DD": [{"title", "author", "where"}]} з усіх аркушів-місяців."""
+def parse(data: bytes, report: list | None = None):
+    """→ {"YYYY-MM-DD": [{"title", "author", "where"}]} з усіх аркушів-місяців. report — сюди підсумок по кожному аркушу."""
     import openpyxl
     wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     plan = {}
@@ -64,7 +64,10 @@ def parse(data: bytes):
         ym = re.search(r"20\d\d", ws.title or "")
         year = year or (int(ym.group(0)) if ym else None)
         if not (year and month):
+            if report is not None:
+                report.append(f"{ws.title}: не знайшов рік/місяць — пропущено")
             continue
+        before = {k: len(v) for k, v in plan.items()}
         cols = {}  # колонка → дата поточного тижня
         prev_day = 0
         for r in rows:
@@ -100,5 +103,13 @@ def parse(data: bytes):
                 for title, author in _split(txt):
                     if title.lower() in WHERE:
                         continue
-                    plan.setdefault(cols[i].isoformat(), []).append({"title": title, "author": author, "where": where})
+                    day = cols[i]
+                    if abs((day.year * 12 + day.month) - (year * 12 + month)) > 1:  # дата далеко від місяця аркуша — помилка розбору
+                        continue
+                    plan.setdefault(day.isoformat(), []).append({"title": title, "author": author, "where": where})
+        if report is not None:
+            got = {k: len(v) - before.get(k, 0) for k, v in plan.items() if len(v) > before.get(k, 0)}
+            ks = sorted(got)
+            report.append(f"{ws.title}: {month:02d}.{year} · днів {len(ks)}, тем {sum(got.values())}"
+                          + (f" ({ks[0][8:]}.{ks[0][5:7]}–{ks[-1][8:]}.{ks[-1][5:7]}.{ks[-1][:4]})" if ks else ""))
     return plan

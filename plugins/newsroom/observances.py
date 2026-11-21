@@ -298,11 +298,14 @@ class ObservancesUI:
                             keep.write_bytes(r.content)
                         except Exception:  # noqa: BLE001
                             log.info("контент-план: копію не збережено", exc_info=True)
-                        for day, items in CP.parse(r.content).items():
+                        rep = []
+                        for day, items in CP.parse(r.content, rep).items():
                             for it in items:
                                 it["src"] = url
                             merged.setdefault(day, []).extend(items)
                         status.append(f"{dl.split('/')[2]}: ✅ завантажено, тем {sum(len(v) for v in merged.values()) - n0}")
+                        self.store.set("cplan_sheets", rep[-40:])
+                        log.warning("контент-план, аркуші: %s", " | ".join(rep))
                         break
                     except Exception as exc:  # noqa: BLE001
                         log.warning("контент-план: не вдалось завантажити %s", dl, exc_info=True)
@@ -338,6 +341,9 @@ class ObservancesUI:
         days = sorted(data)
         lines.append(f"Розібрано днів: {len(days)}, тем: {sum(len(v) for v in data.values())}"
                      + (f" ({days[0][8:]}.{days[0][5:7]}.{days[0][:4]} – {days[-1][8:]}.{days[-1][5:7]}.{days[-1][:4]})" if days else ""))
+        sheets = self.store.get("cplan_sheets") or []
+        if sheets:
+            lines += ["", "<b>Аркуші</b> (як я їх прочитав):"] + [esc(x) for x in sheets[-24:]]
         hist = self.store.get("cplan_hist") or []
         if hist:
             last = hist[-1]
