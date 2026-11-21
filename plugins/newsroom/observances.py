@@ -251,6 +251,14 @@ class ObservancesUI:
                 k += 1
             c.update(trad=trad, trad_day=tday.isoformat() if trad else "", astro=await X.astro_news(websearch.search_items, d),
                      astrol=await X.astrol_news(websearch.search_items, d), done=1)
+        if c.get("trad") and c.get("trad_v") != 2:  # 🪔 пояснюємо: до якого свята, що роблять і чому
+            tday = dt.date.fromisoformat(c["trad_day"]) if c.get("trad_day") else d
+            c["trad_name"] = self.holiday_of(tday)
+            try:
+                c["trad"] = await self.adapt_tips(c["trad"], MONTHS_NOM[tday.month - 1], kind="trad", topic=c["trad_name"], limit=8)
+            except Exception:  # noqa: BLE001
+                log.info("традиції: пояснення не вдалося", exc_info=True)
+            c["trad_v"] = 2
         if time.time() - (c.get("aurora_t") or 0) > 3 * 3600:
             async def get(url):
                 async with httpx.AsyncClient(timeout=15) as cl:
@@ -895,6 +903,16 @@ class ObservancesUI:
             return " · ✍️ " + ", ".join(DB.person(i["author"]) + (f" ({esc(i['where'])})" if i.get("where") else "") for i in hit if i.get("author")) + ref
         return who
 
+    def holiday_of(self, d):
+        """Яке свято цього дня — щоб пояснити, до чого традиції (найважливіше з днів, що мають джерело)."""
+        rs = [r for r in self.obs_on(d) if r["kind"] == "day" and self.sourced(r)]
+        rs.sort(key=lambda r: -self.db_imp_title(r["title"]))
+        return clean_title(rs[0]["title"]) if rs else ""
+
+    @staticmethod
+    def db_imp_title(title):
+        return 2 if DB.HOLIDAYS_RE.search(title or "") else 1 if DB.IMPORTANT_RE.search(title or "") else 0
+
     @staticmethod
     def _ahead(items, d):
         """Лише події від цього дня й далі (минулі — не «найближчим часом»)."""
@@ -942,10 +960,16 @@ class ObservancesUI:
                     body.append(self.more_line(cat, len(items) - cap, d))
                 out.append((cat, DB.CATS[cat][0], [x for x in body if x]))
         x = self.store.get(f"dayx:{d.isoformat()}") or {}
+        if notes is not None and x.get("trad") and x.get("trad_v") != 2:
+            self.extras_bg(d)  # пояснення традицій (свято, що й чому) — у фоні
         if notes is not None and x.get("trad"):  # 🪔 традиції з джерел (якщо в списку дня їх ще немає)
             same = x.get("trad_day") == d.isoformat()
             tday = dt.date.fromisoformat(x["trad_day"]) if x.get("trad_day") else d
-            body = [f"• {esc(DX.tidy(it['text']))}" + notes.mark(it["url"], it["host"]) for it in x["trad"][:3 if compact else 8]]
+            nm = x.get("trad_name") or self.holiday_of(tday)
+            when = "сьогодні" if tday == self.today() else f"{tday.day} {MONTHS_GEN[tday.month - 1]}"
+            body = ([f"<i>Свято: <b>{esc(nm)}</b> · {when}</i>"] if nm else []) + [
+                "• " + (f"<b>{esc(it['head'])}</b> — " if it.get("head") else "") + esc(DX.tidy(it["text"])) + notes.mark(it["url"], it["host"])
+                for it in x["trad"][:3 if compact else 8]]
             head_ = DB.CATS["trad"][0] + ("" if same else f" · на {tday.day} {MONTHS_GEN[tday.month - 1]} (не на сьогодні)")
             if not any(k == "trad" for k, _t, _l in out):
                 out.insert(1 if out and out[0][0] == "days" else 0, ("trad", head_, body))
@@ -971,6 +995,9 @@ class ObservancesUI:
             if notes is not None:
                 astrol = [(f"📅 {it['date'][8:10]}.{it['date'][5:7]} · " if it.get("date") else "• ") + esc(DX.tidy(it["text"], it.get("date") or "")) + notes.mark(it["url"], it["host"])
                           for it in self._ahead(x.get("astrol"), d)[:3]]
+                if not astrol:  # найближчих подій немає — знак Сонця й місячна доба (для розваги)
+                    srcs = ["https://uk.wikipedia.org/wiki/Знаки_зодіаку", "https://uk.wikipedia.org/wiki/Місячний_календар", ""]
+                    astrol = [ln + (notes.mark(u, "Вікіпедія") if u else "") for ln, u in zip(DB.astrol_lines(d), srcs)]
         elif notes is not None:
             srcs = ["https://uk.wikipedia.org/wiki/Знаки_зодіаку", "https://uk.wikipedia.org/wiki/Місячний_календар", ""]
             astrol = [ln + (notes.mark(u, "Вікіпедія") if u else "") for ln, u in zip(astrol, srcs)]
@@ -1344,16 +1371,23 @@ class ObservancesUI:
             self.store.set("garden_cache3", cache)
         return items
 
-    async def adapt_tips(self, items, mon):
-        """ШІ скорочує й пояснює кожен уривок: «Що робити — навіщо, коли». Лише факти з уривка; не вдалося — охайний уривок."""
+    async def adapt_tips(self, items, mon, kind="garden", topic="", limit=3):
+        """ШІ скорочує й пояснює кожен уривок: «Що робити — навіщо, коли» (традиції: «Що роблять — чому»). Лише факти з уривка;
+        не вдалося — охайний уривок."""
         src = "\n".join(f"{i}. {it['text']}" for i, it in enumerate(items, 1))
-        prompt = ("Ось уривки з українських сайтів про роботи в саду й на городі (" + mon + "). Для КОЖНОГО уривку напиши один рядок "
-                  "у форматі «N. Коротка назва дії — пояснення: що саме зробити, навіщо й коли (якщо це є в уривку)». "
-                  "До 200 символів, українською, своїми словами, без Markdown. Використовуй ЛИШЕ факти з уривку, нічого не додавай. "
-                  "Якщо в уривку немає корисної поради або вона повторює пораду з попереднього уривку — напиши «N. —».\n\n" + src)
+        if kind == "trad":
+            prompt = ("Ось уривки з українських сайтів про народні традиції" + (f" свята «{topic}»" if topic else "") + f" ({mon}). "
+                      "Для КОЖНОГО уривку напиши один рядок у форматі «N. Що роблять або чого не роблять — чому так заведено "
+                      "(якщо пояснення є в уривку)». До 200 символів, українською, своїми словами, без Markdown. ЛИШЕ факти з уривку. "
+                      "Якщо уривок не про традицію або повторює попередній — «N. —».\n\n" + src)
+        else:
+            prompt = ("Ось уривки з українських сайтів про роботи в саду й на городі (" + mon + "). Для КОЖНОГО уривку напиши один рядок "
+                      "у форматі «N. Коротка назва дії — пояснення: що саме зробити, навіщо й коли (якщо це є в уривку)». "
+                      "До 200 символів, українською, своїми словами, без Markdown. Використовуй ЛИШЕ факти з уривку, нічого не додавай. "
+                      "Якщо в уривку немає корисної поради або вона повторює пораду з попереднього уривку — напиши «N. —».\n\n" + src)
         try:
             ask = getattr(self.host, "ask_ai", None)
-            text, _m = await ask(prompt, label="🌱 Поради городникам") if ask else ("", None)
+            text, _m = await ask(prompt, label="🪔 Традиції" if kind == "trad" else "🌱 Поради городникам") if ask else ("", None)
         except Exception:  # noqa: BLE001
             text = ""
         got = dict(re.findall(r"(?m)^\s*(\d+)[.)]\s*(.+?)\s*$", text or ""))
@@ -1373,7 +1407,7 @@ class ObservancesUI:
             if any(len(w & self._stems(u.get("head", "") + " " + u["text"])) >= 0.5 * max(1, min(len(w), len(self._stems(u.get("head", "") + " " + u["text"])))) for u in uniq):
                 continue
             uniq.append(it)
-        return uniq[:3]
+        return uniq[:limit]
 
     @staticmethod
     def _stems(text):
