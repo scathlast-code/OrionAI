@@ -2574,10 +2574,10 @@ ITEMS = {
     "nr": ("📰 Новинарня", "Уся робота з новинами в одному місці: редакція (чати, завдання, люди, звіт), публікації й чернетки, "
                           "контент-план, UTM-мітки та збір текстів.", [
         ("🗞 Редакція", "m:pl:red", 6, "all"),
-        ("✍️ Публікації", "m:pl:news", 4, "open"),
-        ("📋 Контент-план", "m:pl:news:obcp", 2, "open"),
-        ("🔗 UTM-мітки", "m:utm", 2, "open"),
-        ("📥 Збір текстів", "m:col", 3, "open"),
+        ("✍️ Публікації", "m:pl:news", 0, "open"),
+        ("📋 Контент-план", "m:pl:news:obcp", 0, "open"),
+        ("🔗 UTM-мітки", "m:utm", 0, "open"),
+        ("📥 Збір текстів", "m:col", 0, "open"),
     ]),
     "zap": ("📓 Записник", "m:hub:zap"),
     "nr": ("📰 Новинарня", "m:hub:nr"),
@@ -2621,12 +2621,11 @@ ITEMS = {
     "app": ("📱 Чат і застосунок", "m:appm"),
 }
 DEFAULT_GROUPS = {
-    "work": "💬 Робота",
     "settings": "⚙️ Налаштування",
 }
 DEFAULT_LAYOUT = [
-    ["today", "home"], ["g:work", "home"], ["g:settings", "home"],
-    ["dl", "g:work"], ["zap", "g:work"], ["nr", "g:work"], ["sp", "g:work"], ["inbox", "g:work"], ["wx", "g:work"], ["cr", "g:work"],
+    ["today", "home"], ["dl", "home"], ["zap", "home"], ["nr", "home"], ["sp", "home"], ["inbox", "home"], ["cr", "home"],
+    ["g:settings", "home"], ["wx", "off"],  # 🌤 погода — у «🌅 Сьогодні»
     ["red", "off"], ["news", "off"], ["utm", "off"], ["col", "off"],  # усе — в одній «📰 Новинарні»
     ["md", "g:settings"], ["pins", "g:settings"], ["acc", "g:settings"], ["backup", "g:settings"], ["svc", "g:settings"],
     ["btns", "g:settings"], ["diag", "g:settings"], ["help", "g:settings"],
@@ -2650,6 +2649,31 @@ def _migrate_compact_menu(chat_id):
         _migrate_menu_v10(chat_id)
         _migrate_menu_v11(chat_id)
         _migrate_menu_v12(chat_id)
+        _migrate_menu_v13(chat_id)
+
+
+def _migrate_menu_v13(chat_id):
+    """Без теки «💬 Робота»: її кнопки — прямо на головному (сіткою по два), «⚙️ Налаштування» — теж у сітці; погода — лише в «Сьогодні»."""
+    p = prefs(chat_id)
+    if p.get("menu_v13"):
+        return
+    saved = [list(x) for x in (p.get("layout") or [])]
+    if saved:
+        out = []
+        for i, pl in saved:
+            if i == "g:work":
+                continue
+            if i == "wx":
+                out.append([i, "off"])
+                continue
+            out.append([i, "home" if pl == "g:work" else pl])
+        sett = [x for x in out if x[0] == "g:settings"]  # налаштування — останньою клітинкою головного
+        out = [x for x in out if x[0] != "g:settings"] + (sett or [["g:settings", "home"]])
+        set_pref(chat_id, "layout", out)
+    groups = {k: v for k, v in (p.get("groups") or DEFAULT_GROUPS).items() if k != "work"}
+    groups.setdefault("settings", "⚙️ Налаштування")
+    set_pref(chat_id, "groups", groups)
+    set_pref(chat_id, "menu_v13", True)
 
 
 def _migrate_menu_v12(chat_id):
@@ -2883,7 +2907,7 @@ def _migrate_menu_v8(chat_id):
         out[pos:pos] = [["md", "g:settings"]] if md else []
         set_pref(chat_id, "layout", [["today", "home"]] + out)
     groups = {k: v for k, v in (p.get("groups") or DEFAULT_GROUPS).items() if k not in ("plugins", "ai")}
-    groups.setdefault("work", DEFAULT_GROUPS["work"])
+    groups.setdefault("work", "💬 Робота")
     groups.setdefault("settings", DEFAULT_GROUPS["settings"])
     set_pref(chat_id, "groups", groups)
     labels = dict(p.get("labels") or {})
@@ -8134,7 +8158,22 @@ async def scr_hub(chat_id, key):
     tok = HUB_BUILDING.set(True)
     try:
         for head, data, nlines, mode in parts:
-            r = await miniapp.run(sys.modules[__name__], chat_id, "screen", data)
+            if mode == "open" and not nlines:  # лише перехід — екран не будуємо (швидко, без зайвих запитів)
+                titles.append(head)
+                blocks.append(f"<b>{head}</b>")
+                if rows and len(rows[-1]) == 1 and rows[-1][0][0].endswith(" ›") and rows._open_tail:
+                    rows[-1].append((f"{head} ›", data))
+                else:
+                    rows.append([(f"{head} ›", data)])
+                rows._open_tail = len(rows[-1]) == 1
+                secs.append({"head": head, "body": "", "rows": [[("Відкрити повністю ›", data)]]})
+                continue
+            try:
+                r = await asyncio.wait_for(miniapp.run(sys.modules[__name__], chat_id, "screen", data), 12)
+            except Exception:  # noqa: BLE001 — частина не встигла: показуємо перехід, а не ламаємо весь розділ
+                log.warning("розділ %s: частина %s не відкрилась вчасно", key, data, exc_info=True)
+                r = {"text": head, "rows": []}
+                mode = "open"
             text = r.get("text") or ""
             titles.append(_title_key(text))
             body = "\n".join(text.split("\n")[1:]).strip()
@@ -8154,8 +8193,11 @@ async def scr_hub(chat_id, key):
                 rr = [(t, d) for t, d in row if d not in seen and not d.startswith(("m:why", "help:g", "m:hub:"))
                       and not t.startswith(("«", "◀️", "ℹ️", "▶️ Відкрити")) and t.strip() not in ("ℹ️",)]
                 seen.update(d for _, d in rr)
-                if rr:
-                    part.append(rr)
+                if rr:  # компактно: короткі одиночні кнопки — по дві в ряд
+                    if len(rr) == 1 and part and len(part[-1]) == 1 and len(rr[0][0]) <= 24 and len(part[-1][0][0]) <= 24:
+                        part[-1].append(rr[0])
+                    else:
+                        part.append(rr)
             secs.append({"head": head, "body": short, "rows": part})
             rows._open_tail = False
             if part:

@@ -34,7 +34,7 @@ def test_menu_migration_adds_plugins_category(tmp_path):
     assert out.returncode == 0, out.stderr[-2000:]
     res = json.loads(out.stdout.strip().splitlines()[-1])
     # меню v8–v9: «🌅 Сьогодні» — першим на головному
-    assert res["order"][:2] == ["today", "g:work"]
+    assert res["order"][0] == "today" and "g:work" not in res["order"]  # v13: без теки «Робота»
     assert res["places"] == {"news": "off", "stk": "off", "plg": "off"}  # v9–v12: усе в «📰 Новинарні» й «🎬 Медійці»
     assert res["view"] == [True, True, False]
     assert res["group"] is None
