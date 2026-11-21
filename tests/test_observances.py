@@ -218,3 +218,12 @@ def test_seed_topics_have_sources(tmp_path):
     rs = [r for r in p.obs_on(dt.date(2026, 11, 21)) if "(ООН)" in r["title"] or "Movember" in r["title"]]
     assert rs and all(r["url"].startswith("https://") for r in rs)
     assert all("<a href" in p.obs_line(r) for r in rs)
+
+
+def test_list_lines_emoji_quote_and_no_cjk(tmp_path):
+    from plugins.newsroom import daybook as DB
+    from footnotes import Notes
+    p, _sent = news(tmp_path)
+    line = p.db_line({"id": 1, "cat": "died", "text": "1282 — Нітірен (яп. 日蓮), японський буддистський монах", "url": "https://uk.wikipedia.org/wiki/x", "owner": 0}, Notes())
+    assert "日" not in line and line.startswith("⛪")
+    assert not DB.IMPORTANT_RE.search("у Вільнюсі вийшов перший номер газети")
