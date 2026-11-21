@@ -914,6 +914,37 @@ def link_msg(db_id, chat_id, tg_ids):
         con.executemany("INSERT INTO msg_links(db_id, chat_id, tg_id) VALUES (?,?,?)", [(db_id, chat_id, t) for t in ids])
 
 
+def dialog_of_tg(chat_id, tg_id):
+    """У якій розмові було це повідомлення Telegram (щоб відповідь на нього продовжувала саме ту тему)."""
+    with closing(db()) as con:
+        r = con.execute("SELECT m.dialog_id FROM msg_links l JOIN messages m ON m.id=l.db_id WHERE l.chat_id=? AND l.tg_id=? LIMIT 1",
+                        (chat_id, int(tg_id))).fetchone()
+    return r[0] if r and r[0] else None
+
+
+def _stems(text):
+    return {w[:5] for w in re.findall(r"[а-яіїєґa-z']{5,}", (text or "").lower())} - {"який", "якщо", "тільки", "потрі", "можна", "будьл", "дякую"}
+
+
+def topic_match(chat_id, text):
+    """🧵 Паралельні теми: до якої з недавніх розмов це повідомлення ближче (за спільними словами). → (id, збіг) або (None, 0)."""
+    w = _stems(text)
+    if len(w) < 2:
+        return None, 0
+    best, score = None, 0
+    cur = current_dialog(chat_id)
+    cur_score = 0
+    with closing(db()) as con:
+        for d in dialogs_list(chat_id, limit=8):
+            rows = con.execute("SELECT text FROM messages WHERE dialog_id=? ORDER BY id DESC LIMIT 12", (d["id"],)).fetchall()
+            sc = len(w & _stems(" ".join(r[0] for r in rows) + " " + (d.get("title") or "")))
+            if d["id"] == cur:
+                cur_score = sc
+            elif sc > score:
+                best, score = d["id"], sc
+    return (best, score) if best and score >= 3 and score >= 2 * max(1, cur_score) else (None, 0)
+
+
 async def delete_everywhere(bot, chat_id, db_ids=(), tg_ids=()):
     """🗑 Прибрати повідомлення з розмови (і з застосунку) та з чату з ботом. Telegram дозволяє видаляти лише свіже (до 48 год)."""
     db_ids, tg_ids = {int(x) for x in db_ids}, {int(x) for x in tg_ids}
@@ -10741,6 +10772,21 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             new = dialog_create(chat_id, "🌿 " + short_q(quote.replace("\n", " "), 40), (dialog_get(did) or {}).get("folder_id"))
             save_message(chat_id, "assistant", quote, dialog_id=new)
             await msg.reply_text(f"🌿 Нова гілка «{dialog_name(new)}» — продовжую в ній. Попередня розмова лишилась як була.")
+        # 🧵 кілька тем паралельно: відповідь на повідомлення — у його розмову; інакше — у ближчу за змістом недавню розмову
+        if r is not None and not BRANCH_RE.match(msg.text or ""):
+            rd = dialog_of_tg(chat_id, r.message_id)
+            if rd and rd != current_dialog(chat_id) and (dialog_get(rd) or {}).get("state", "active") == "active":
+                prev = current_dialog(chat_id)
+                set_pref(chat_id, "dialog", rd)
+                await msg.reply_text(f"🧵 Продовжую тему «{short_q(dialog_name(rd), 40)}».",
+                                     reply_markup=kb([[(f"↩️ Ні, у «{short_q(dialog_name(prev), 22)}»", f"m:dsw:{prev}")]]))
+        elif r is None and prefs(chat_id).get("topic_auto", True):
+            md, _sc = topic_match(chat_id, text)
+            if md:
+                prev = current_dialog(chat_id)
+                set_pref(chat_id, "dialog", md)
+                await msg.reply_text(f"🧵 Схоже, це до теми «{short_q(dialog_name(md), 40)}» — веду там, щоб не змішувати.",
+                                     reply_markup=kb([[(f"↩️ Ні, лишитись у «{short_q(dialog_name(prev), 22)}»", f"m:dsw:{prev}")]]))
         content = text
         scope = cross_scope(text)
         if scope:
