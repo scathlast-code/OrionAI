@@ -191,6 +191,12 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
             return
         self.store.set_item(iid, status="processing", attempts=item["attempts"] + 1)
         raw, url = item["raw_text"], item["source_url"]
+        if self.store.get("strip_junk") is not False:  # 🧹 «підпишись», адреси каналів, «написати адміну» — прибираємо, коли пишемо новину
+            try:
+                import postclean
+                raw = postclean.clean(raw)
+            except Exception:  # noqa: BLE001
+                pass
         try:
             only_url = URL_RE.fullmatch(raw.strip()) if raw else None
             if (only_url or (not raw.strip() and url)) and self.host.browse:
