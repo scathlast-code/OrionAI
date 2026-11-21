@@ -3043,9 +3043,9 @@ def scr_tasks(chat_id):
     red = PLUGINS.get("red")
     if red and hasattr(red, "my_open"):  # 🗞 редакційні завдання (контент-план, чати) — тут же, окремим рядком
         try:
-            n_all, n_me = red.my_open(chat_id)
+            n_all, _n_me = red.my_open(chat_id)
             if n_all:
-                text += f"\n🗞 Редакційні: <b>{n_all}</b>" + (f" (ваші — {n_me})" if n_me else "")
+                text += f"\n🗞 Редакційні: <b>{n_all}</b>"
                 rows.insert(1, [(f"🗞 Редакційні завдання · {n_all}", "m:pl:red:l:task")])
         except Exception:  # noqa: BLE001
             log.info("редакційні завдання не прочитано", exc_info=True)
