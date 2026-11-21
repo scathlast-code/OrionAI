@@ -14,7 +14,7 @@ import time
 import httpx
 
 from plugins import Plugin, esc
-from footnotes import Notes  # 📎 джерела — зносками в кінці кожної частини
+from footnotes import Notes, html_cut  # 📎 джерела — зносками в кінці кожної частини
 
 log = logging.getLogger("orion.weather")
 
@@ -277,7 +277,7 @@ class WeatherPlugin(Plugin):
         head = ("Сьогодні", "Завтра")[i] if i < 2 else WD[d.weekday()].capitalize()  # noqa: E501
         return f"{head}, {d.day} {MONTHS[d.month - 1]}"
 
-    def ua_day(self, data, i, notes=None):
+    def ua_day(self, data, i, notes=None, flush=True):
         """Підсумок дня по Україні: діапазон температур, найтепліше/найхолодніше, де опади й сильний вітер."""
         rows = []
         for (name, _la, _lo, region), f in zip(UA_POINTS, data):
@@ -320,7 +320,7 @@ class WeatherPlugin(Plugin):
             lines.append("🌂 Без істотних опадів")
         if windy:
             lines.append("💨 Сильний вітер (12+ м/с): " + most(windy))
-        if notes is not None:  # 📎 джерело — зноскою під цим зведенням (по регіонах)
+        if notes is not None and flush:  # 📎 джерело — зноскою під цим зведенням (по регіонах)
             lines.append(notes.flush())
         return "\n".join(x for x in lines if x)
 
@@ -371,10 +371,12 @@ class WeatherPlugin(Plugin):
         times = (data[0].get("daily") or {}).get("time") or []
         parts = []
         for i in range(start, min(days, len(times))):
-            body = self.ua_day(data, i, notes)
+            body = self.ua_day(data, i, notes, flush=False)
             if body:
                 parts.append(f"<b>{self.day_title(times[i], i)}</b>\n{body}")
-        return "\n\n".join(parts)
+        if notes is not None and parts:  # одна зноска-джерело на весь блок днів, а не під кожним днем
+            parts.append(notes.flush())
+        return "\n\n".join(p for p in parts if p)
 
     async def ua_week_tail(self, start=3):
         """Дні 4–7 — коротко, по рядку."""
@@ -389,7 +391,7 @@ class WeatherPlugin(Plugin):
         data = await self.fetch([(c["lat"], c["lon"]) for c in items])
         return "\n".join(self.city_line(c["name"], f, full) for c, f in zip(items, data))
 
-    async def forecast_text(self, chat=None, today_only=False, notes=None):
+    async def forecast_text(self, chat=None, today_only=False, notes=None, week=False):
         """3 дні докладно; 5 і 7 днів — згорнуто (розгортаються торканням)."""
         data = await self.fetch([(la, lo) for _n, la, lo, _r in UA_POINTS])
         n = len((data[0].get("daily") or {}).get("time") or [])
@@ -402,9 +404,14 @@ class WeatherPlugin(Plugin):
             if nxt:
                 text += "\n\n📅 <b>3 дні</b>\n<blockquote expandable>" + nxt + "</blockquote>"
         times = (data[0].get("daily") or {}).get("time") or []
-        full = lambda i: (f"<b>{self.day_title(times[i], i)}</b>\n" + self.ua_day(data, i, notes)) if i < len(times) and self.ua_day(data, i) else ""  # noqa: E731
+        full = lambda i: (f"<b>{self.day_title(times[i], i)}</b>\n" + self.ua_day(data, i, notes, flush=False)) if i < len(times) and self.ua_day(data, i) else ""  # noqa: E731
+        foot = lambda: ("\n" + notes.flush()) if notes is not None else ""  # noqa: E731
         d5 = "\n\n".join(x for x in (full(i) for i in range(3, min(5, n))) if x)
+        d5 += foot() if d5 else ""
         d7 = "\n\n".join(x for x in (full(i) for i in range(5, min(7, n))) if x)
+        d7 += foot() if d7 else ""
+        if not week:  # дні 4–7 — окремим екраном «📅 Дні 4–7», щоб усе вмістилось детально
+            return text
         if d5:
             text += "\n🗓 <b>5 днів</b>\n<blockquote expandable>" + d5 + "</blockquote>"
         if d7:
@@ -419,8 +426,7 @@ class WeatherPlugin(Plugin):
             co = await self.countries_text(chat, notes=notes)
         except Exception:  # noqa: BLE001
             pass
-        tail = verify_line(notes)
-        return ("🌤 <b>Погода по всій Україні</b>\n\n" + body + (("\n\n" + co) if co else ""))[:4000 - len(tail)] + tail
+        return html_cut("🌤 <b>Погода по всій Україні</b>\n\n" + body + (("\n\n" + co) if co else ""), 4000, verify_line(notes))
 
     async def send_morning(self, only=None):
         """Ранковий звіт кожному, хто його хоче, — у його час (only — список, кому саме зараз)."""
@@ -483,11 +489,10 @@ class WeatherPlugin(Plugin):
             co = ""
         if co:
             text += "\n\n" + co
-        rows = [[("📜 Прикмети дня", self.cb("lore")), ("📅 Тиждень", self.cb("d3"))],
+        rows = [[("📜 Прикмети дня", self.cb("lore")), ("📅 Дні 4–7 детально", self.cb("d3"))],
                 [("📍 Мої міста", self.cb("my")), ("➕ Місто", self.cb("add")), ("🌍 Країни", self.cb("co"))],
                 [(self.morning_label(chat), self.cb("mt")), ("🔄 Оновити прогноз", self.cb())]] + src_rows()
-        tail = verify_line(notes) + "\n<i>Температура в °C</i>"
-        return text[:4000 - len(tail)] + tail, rows
+        return html_cut(text, 4000, verify_line(notes) + "\n<i>Температура в °C</i>"), rows
 
     async def _ask_text(self, prompt, avoid=None):
         try:
@@ -537,11 +542,10 @@ class WeatherPlugin(Plugin):
         if a == "d3":
             notes = Notes()
             try:
-                text = await self.ua_text(7, notes=notes)
+                text = await self.ua_text(7, start=3, notes=notes)
             except Exception as exc:  # noqa: BLE001
                 return f"⚠️ {type(exc).__name__}", await self.home(chat)
-            tail = verify_line(notes)
-            return None, (("📅 <b>Погода по всій Україні на тиждень</b>\n\n" + text)[:4000 - len(tail)] + tail, [[("« Погода", self.cb())]])
+            return None, (html_cut("📅 <b>Погода по всій Україні · дні 4–7</b>\n\n" + text, 4000, verify_line(notes)), [[("« Погода", self.cb())]])
         if a == "lore":
             now = dt.datetime.now(self.host.tz) if getattr(self.host, "tz", None) else dt.datetime.now()
             try:

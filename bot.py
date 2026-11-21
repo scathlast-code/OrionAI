@@ -74,6 +74,7 @@ import scenarios
 import orion_modes
 import lifetime_stats
 import sys
+import html as html_lib
 import tempfile
 from pathlib import Path
 from community import Community
@@ -2780,6 +2781,8 @@ async def show(update: Update, text, rows, edit=True, nav=True):
         rows = [list(r) for r in rows]
         rows[-1].append(("💡", "imp:s"))  # непомітна позначка «Покращити» на кожному екрані
     markup = kb(rows) if rows else None
+    from footnotes import html_cut
+    text = html_cut(text or "", 4096)  # довгий екран — обрізаємо, не розриваючи HTML-теги
     q = update.callback_query
     if q and edit:
         try:
@@ -2788,7 +2791,22 @@ async def show(update: Update, text, rows, edit=True, nav=True):
         except BadRequest as e:
             if "not modified" in str(e).lower():
                 return
-    await update.effective_chat.send_message(text, parse_mode=ParseMode.HTML, reply_markup=markup, link_preview_options=NO_PREVIEW)
+            if "parse entities" in str(e).lower():  # зламана розмітка — показуємо простим текстом, а не помилкою
+                log.warning("екран %s: %s — показую без розмітки", SCREEN.get(), e)
+                plain = html_lib.unescape(re.sub(r"<[^>]+>", "", text))[:4096]
+                try:
+                    await q.edit_message_text(plain, reply_markup=markup, link_preview_options=NO_PREVIEW)
+                    return
+                except BadRequest:
+                    pass
+    try:
+        await update.effective_chat.send_message(text, parse_mode=ParseMode.HTML, reply_markup=markup, link_preview_options=NO_PREVIEW)
+    except BadRequest as e:
+        if "parse entities" not in str(e).lower():
+            raise
+        log.warning("екран %s: %s — показую без розмітки", SCREEN.get(), e)
+        await update.effective_chat.send_message(html_lib.unescape(re.sub(r"<[^>]+>", "", text))[:4096], reply_markup=markup,
+                                                 link_preview_options=NO_PREVIEW)
 
 
 def ask_input(chat_id, action, data=None):
