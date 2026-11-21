@@ -4735,7 +4735,13 @@ def _fit_button_rows(rows):
                 out.append(row)
         else:
             budget = max(4, ROW_MAX // len(row))
-            out.append([(short_label(t, budget), d) for t, d in row])
+            vlen = lambda t: len(re.sub("[\ufe0f\u200d]", "", t))  # noqa: E731
+            if len(row) >= 5:  # сітки (календар, дні тижня) — як були
+                out.append([(short_label(t, budget), d) for t, d in row])
+            elif any(vlen(t) > budget for t, _ in row):  # не вміщається — ділимо ряд по дві, щоб назви не обрізались до «Перевіри…»
+                out.extend(_fit_button_rows([row[i:i + 2] for i in range(0, len(row), 2)]))
+            else:
+                out.append(row)
     return out
 
 
@@ -8974,7 +8980,7 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
             toast = "Прибрано з «На сьогодні»"
             screen = await scr_today(chat_id)
         else:
-            open_ = {"t": f"m:t:{it['ref']}", "n": f"m:n:{it['ref']}", "s": "m:sp"}.get(it["kind"])
+            open_ = {"t": f"m:t:{it['ref']}", "n": f"m:note:{it['ref']}", "s": "m:sp"}.get(it["kind"])
             rows_ = [[("✅ Виконано" if not it["done"] else "↩️ Не виконано", f"m:ag:{it['id']}:done"), ("🗑 Прибрати", f"m:ag:{it['id']}:rm")],
                      [("➕ Дії", f"m:xs:a:{it['id']}")] + ([("↗️ Відкрити оригінал", open_)] if open_ else []),
                      [("« Сьогодні", "m:today")]]
