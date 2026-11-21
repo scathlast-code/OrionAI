@@ -152,17 +152,20 @@ class WeatherPlugin(Plugin):
             "timezone": tz, "forecast_days": 7, "wind_speed_unit": "ms",
         }
         data, err = None, None
-        for attempt in range(3):  # 🔁 Open-Meteo іноді не відповідає вчасно — пробуємо ще, а потім віддаємо останній відомий прогноз
+        if hit and time.time() - hit[0] < 12 * 3600 and getattr(self, "_om_down", 0) > time.time():
+            return hit[1]  # Open-Meteo щойно не відповідав — не чекаємо знову, віддаємо останній прогноз
+        for attempt in range(2):  # 🔁 Open-Meteo іноді не відповідає вчасно — пробуємо ще, а потім віддаємо останній відомий прогноз
             try:
-                async with httpx.AsyncClient(timeout=httpx.Timeout(30, connect=15), trust_env=False) as client:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(20, connect=8), trust_env=False) as client:
                     r = await client.get(API, params=params)
                     r.raise_for_status()
                     data = r.json()
                 break
             except Exception as exc:  # noqa: BLE001
                 err = exc
-                await asyncio.sleep(1.5 * (attempt + 1))
+                await asyncio.sleep(1)
         if data is None:
+            self._om_down = time.time() + 600
             if hit and time.time() - hit[0] < 12 * 3600:  # старіший, але справжній прогноз — краще, ніж помилка
                 log.warning("погода: Open-Meteo не відповідає (%s) — показую прогноз від %s", err, time.strftime("%H:%M", time.localtime(hit[0])))
                 return hit[1]

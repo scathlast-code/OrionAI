@@ -138,6 +138,9 @@ class Layout:
             plain.clear()
 
         for i in self.in_place(chat, place):
+            if i.startswith("g:") and i not in chain and not depth:  # згорнута тека на головному — звичайна клітинка сітки
+                plain.append((self.label(chat, i) + badges.get(i, "") + " ▼", f"m:grp:{i[2:]}"))
+                continue
             if i.startswith("g:"):
                 flush()
                 is_open = i in chain
