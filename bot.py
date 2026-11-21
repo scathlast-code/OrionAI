@@ -8385,6 +8385,14 @@ def _cut_html(body, n):
     return t + ("…" if k >= n and len(lines) > len(out) else "")
 
 
+def part_what(data):
+    """Одне речення «що це» для кнопки-переходу в об'єднаному розділі (з довідки «❔ Що це»)."""
+    key = data.removeprefix("m:pl:").removeprefix("m:").split(":")[0]
+    import explain
+    e = explain.E.get(key) or {}
+    return (e.get("what") or "").strip() if isinstance(e, dict) else ""
+
+
 async def scr_hub(chat_id, key):
     """Об'єднаний розділ: короткий підсумок кожної частини + її кнопки на одному екрані."""
     import miniapp
@@ -8396,13 +8404,14 @@ async def scr_hub(chat_id, key):
     try:
         for head, data, nlines, mode in parts:
             if mode == "open" and not nlines:  # лише перехід — екран не будуємо (швидко, без зайвих запитів)
-                blocks.append(f"<b>{head}</b>")
+                what = part_what(data)
+                blocks.append(f"<b>{head}</b>" + (f"\n{esc(what)}" if what else ""))
                 if rows and len(rows[-1]) == 1 and rows[-1][0][0].endswith(" ›") and rows._open_tail:
                     rows[-1].append((f"{head} ›", data))
                 else:
                     rows.append([(f"{head} ›", data)])
                 rows._open_tail = len(rows[-1]) == 1
-                secs.append({"head": head, "body": "", "rows": [[("Відкрити повністю ›", data)]]})
+                secs.append({"head": head, "body": esc(what), "rows": [[("Відкрити повністю ›", data)]]})
                 continue
             try:
                 r = await asyncio.wait_for(miniapp.run(sys.modules[__name__], chat_id, "screen", data), 12)
@@ -8416,6 +8425,8 @@ async def scr_hub(chat_id, key):
             body = "\n".join(text.split("\n")[1:]).strip()
             seen.add(data.replace(":show", ""))
             short = _cut_html(body, nlines) if body and nlines else ""
+            if not short and mode == "open":
+                short = esc(part_what(data))
             blocks.append(f"<b>{head}</b>" + (("\n" + short) if short else ""))
             if mode == "open":  # компактно: розділи-посилання по два в ряд
                 if rows and rows[-1] and len(rows[-1]) == 1 and rows[-1][0][0].endswith(" ›") and getattr(rows, "_open_tail", False):
@@ -8427,7 +8438,7 @@ async def scr_hub(chat_id, key):
                 continue
             part = []
             for row in r.get("rows") or []:
-                rr = [(t, d) for t, d in row if d not in seen and not d.startswith(("m:why", "help:g", "m:hub:"))
+                rr = [(t, d) for t, d in row if d not in seen and d != "m:clean" and not d.startswith(("m:why", "help:g", "m:hub:"))
                       and not t.startswith(("«", "◀️", "ℹ️", "▶️ Відкрити")) and t.strip() not in ("ℹ️",)]
                 seen.update(d for _, d in rr)
                 if rr:  # компактно: короткі одиночні кнопки — по дві в ряд
@@ -8446,6 +8457,20 @@ async def scr_hub(chat_id, key):
     set_pref(chat_id, "hub_ctx", {"key": key, "titles": [t for t in titles if t]})
     HUB_LAST[chat_id] = secs
     text = f"<b>{title}</b>\n<i>{intro}</i>\n\n" + "\n\n".join(blocks)
+    import button_hints as _BH
+    legend, met = [], set()
+    for row in rows:
+        for t, d in row:
+            h = _BH.hint(d)
+            if h and d not in met and d != "m:noop":
+                met.add(d)
+                legend.append(f"• {esc(re.sub(r'\s*[·›]\s*\d*\s*$', '', t).strip())} — {esc(h)}")
+    while legend:  # ℹ️ що робить кожна кнопка — згорнуто, щоб не захаращувати; не вміщається — коротше
+        add = "\n\n<blockquote expandable>ℹ️ Що роблять кнопки\n" + "\n".join(legend) + "</blockquote>"
+        if len(text) + len(add) <= 4000:
+            text += add
+            break
+        legend.pop()
     if len(text) > 4000:
         text = text[:3990] + "…"
     return text, rows[:90]
