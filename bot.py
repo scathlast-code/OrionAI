@@ -3799,9 +3799,7 @@ def agenda_block(chat_id):
         rows.append([(("✅" if it["done"] else "▫️") + " " + short_q(it["text"], 26), f"m:ag:{it['id']}")])
     for t in planned[:6]:
         lines.append(f"🕒 {datetime.fromtimestamp(t['run_at'], TZ):%H:%M} · {esc(short_q(t['history_text'], 80))}")
-    head = "<b>📌 На сьогодні</b>\n" + ("\n".join(lines) if lines else
-                                         "<i>Порожньо. Додайте завдання чи нотатку кнопками нижче або винесіть сюди будь-що з розмови, "
-                                         "завдань, нотаток і просторів (кнопка «➕ Дії»).</i>")
+    head = ("<b>📌 На сьогодні</b>\n" + "\n".join(lines) + "\n\n") if lines else ""  # порожнього списку не показуємо
     rows.append([("➕ Завдання", "m:tnew"), ("📝 Нотатка", "m:nadd")])
     rows.append([("🤝 Простори", "m:sp"), ("💬 Розмови", "m:dl")])
     return head, rows
@@ -3815,16 +3813,16 @@ async def scr_today(chat_id):
     if news and is_admin_id(chat_id) and hasattr(news, "obs_digest"):
         try:
             text, rows = await news.obs_digest(chat_id)
-            return ag_text + "\n\n🌅 " + text, rows + extra
+            return ag_text + "🌅 " + text, rows + extra
         except Exception:  # noqa: BLE001
             log.exception("today: зведення днів")
     if wx:
         try:
-            return (ag_text + "\n\n" + await wx.morning_text(chat_id),
+            return (ag_text + await wx.morning_text(chat_id),
                     [[("📜 Прикмети й звичаї дня", "m:pl:wx:lore")]] + extra)
         except Exception as exc:  # noqa: BLE001
-            return ag_text + f"\n\n🌅 ⚠️ Зведення дня зараз недоступне ({esc(type(exc).__name__)}) — спробуйте за хвилину.", extra
-    return ag_text + "\n\n🌅 Погода й календар днів вимкнені в 🔌 Плагінах.", extra + [[HOME]]
+            return ag_text + f"🌅 ⚠️ Зведення дня зараз недоступне ({esc(type(exc).__name__)}) — спробуйте за хвилину.", extra
+    return ag_text + "🌅 Погода й календар днів вимкнені в 🔌 Плагінах.", extra + [[HOME]]
 
 
 # ---------------------------------------------------------------- 🔗 зв'язки між розділами: «➕ Дії»
