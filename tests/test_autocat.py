@@ -43,3 +43,9 @@ def test_topic_batches_leave_others(tmp_path):
     assert [i["text"] for i in left] == ["Сніг і мороз"]
     b.mark(1, left, "погода", False)
     assert not b.pending(1)
+
+
+def test_dialog_not_hijacked():
+    assert T.is_talk("Добре, дякую") and T.is_talk("Як мене звати?")
+    assert not T.is_talk("Подія. " * 60) and not T.is_talk("https://a.ua")
+    assert T.ASKS_RE.search("що тут?") and T.ASKS_RE.search("перекажи") and not T.ASKS_RE.search("")
