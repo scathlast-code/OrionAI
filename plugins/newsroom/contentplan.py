@@ -15,7 +15,8 @@ MONTHS = {"січ": 1, "лют": 2, "бер": 3, "квіт": 4, "трав": 5, "
           "jän": 1, "mär": 3, "mai": 5, "okt": 10, "dez": 12, "janv": 1, "févr": 2, "fevr": 2, "mars": 3, "avr": 4, "juin": 6, "juil": 7,
           "août": 8, "aout": 8, "déc": 12, "ene": 1, "abr": 4, "ago": 8, "dic": 12, "gen": 1, "giu": 6, "lug": 7, "ott": 10}
 WEEKDAYS = {"пн": 0, "вт": 1, "ср": 2, "чт": 3, "пт": 4, "сб": 5, "нд": 6, "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
-WHERE = {"сайт": "Сайт", "smm": "SMM", "смм": "SMM", "соцмережі": "SMM"}
+WHERE = {"сайт": "Сайт", "блог": "Блог", "blog": "Блог", "smm": "Соцмережі", "смм": "Соцмережі", "соцмереж": "Соцмережі",
+         "соц. мереж": "Соцмережі", "social": "Соцмережі"}
 
 
 def file_id(url):
@@ -156,7 +157,7 @@ def parse(data: bytes, report: list | None = None, cells: dict | None = None):
             label = str(r[0] or "").strip().lower() if r else ""
             where = next((v for k, v in WHERE.items() if label.startswith(k)), "")
             if cells is not None:  # 📍 де в таблиці клітинка кожного дня — щоб людина могла правити план із бота
-                slot = "topics" if ri == date_row + 1 else ("site" if where == "Сайт" else "smm" if where == "SMM" else "")
+                slot = "topics" if ri == date_row + 1 else {"Сайт": "site", "Блог": "blog", "Соцмережі": "smm"}.get(where, "")
                 if slot:
                     for i, day0 in cols.items():
                         if abs((day0.year * 12 + day0.month) - (year * 12 + month)) <= 0 and not (slot == "topics" and where):
@@ -166,7 +167,7 @@ def parse(data: bytes, report: list | None = None, cells: dict | None = None):
                     continue
                 txt = str(c)
                 if i == 0 and where:
-                    txt = re.sub(r"(?i)^\s*(?:сайт|smm|смм)\s*", "", txt)
+                    txt = re.sub(r"(?i)^\s*(?:сайт|блог|blog|smm|смм|соцмереж\w*)\s*", "", txt)
                 for (title, author), orig in zip(_split(txt), _lines(txt)):
                     if title.lower() in WHERE:
                         continue
