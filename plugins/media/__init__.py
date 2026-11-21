@@ -117,7 +117,8 @@ class Plugin(Base):
         self.commands = [("media", self.cmd_media, "Медіа: завантажити за посиланням")]
 
     # ================================================================ особисті налаштування
-    DQ = (("ask", "Питати щоразу"), ("360", "360p"), ("480", "480p"), ("720", "720p"), ("1080", "1080p"), ("0", "Найкраща"), ("a", "Лише звук (MP3)"))
+    DQ = (("ask", "Питати щоразу"), ("360", "до 360p"), ("480", "до 480p"), ("720", "до 720p"), ("1080", "до 1080p"),
+          ("1440", "до 1440p"), ("2160", "до 4K"), ("0", "Найкраща, що є"), ("a", "Лише звук (MP3)"))
 
     def _prefs(self):
         try:
@@ -139,8 +140,9 @@ class Plugin(Base):
     def dq_screen(self, chat, back=None):
         cur = self.pref(chat, "q", "ask")
         t = ("⭐ <b>Якість за замовчуванням</b>\n<blockquote expandable>ℹ️ Як це працює\n«Питати щоразу» — на кожне відео YouTube "
-             "бот показує меню з розмірами (144p–4K, MP3, превʼю). Якщо обрати якість, бот одразу завантажує саме її, без меню; "
-             "якщо такої якості немає — найближчу нижчу. Інший формат завжди можна взяти кнопкою під готовим файлом. "
+             "бот показує меню лише з тими якостями, які це відео справді має на сайті (з розмірами), звук із бітрейтами "
+             "оригіналу й вибір формату файлу. Якщо обрати межу (напр. «до 720p»), бот одразу бере найкращу якість, що є, "
+             "але не вище межі; якщо відео має лише 360p — буде 360p (нічого не «роздуваємо»). Інший формат завжди можна взяти кнопкою під готовим файлом. "
              "Налаштування особисте — лише для вас.</blockquote>")
         rows, line = [], []
         for k, label in self.DQ:
@@ -322,10 +324,16 @@ class Plugin(Base):
         if a == "off" and x in self.offers:  # старі кнопки «Знайти й завантажити» з попередньої версії
             c, url = self.offers.pop(x)
             return self.start_quick(chat, url) or "🔎 Шукаю…", (self.live_screen(chat) if self.in_app() else None)
-        if a in ("og", "ox", "oa", "os", "osv", "oso", "osm", "opt"):
+        if a in ("og", "ox", "oa", "os", "osv", "oso", "osm", "opt", "ofm"):
             job = self.job_by(chat, x)
             if not job:
                 return "Посилання застаріло — надішліть його ще раз", None
+            if a == "ofm":  # 📦 формат файлу — по колу з тих, що підходять до цих файлів
+                vis, _aud, imgs = self.parts(job)
+                fm = self.file_formats(job, len(vis) - len(imgs), imgs)
+                cur = job.options.fmt if job.options.fmt in fm else ""
+                job.options.fmt = fm[(fm.index(cur) + 1) % len(fm)]
+                return None, self.options_screen(chat, job)
             if a == "ox":  # перемикач — лише оновлюємо екран налаштувань
                 xs = job.__dict__.setdefault("x", set())
                 xs.symmetric_difference_update({y})
@@ -346,6 +354,11 @@ class Plugin(Base):
             else:
                 self._bg(chat, self.sep_go(chat, job, a[-1] if a != "osv" else "v"))
             return "⬇️ Починаю", (self.live_screen(chat) if self.in_app() else None)
+        if a in ("fau", "fab", "fvf", "fvs"):
+            job = self.job_by(chat, x)
+            if not job:
+                return "Посилання застаріло — надішліть його ще раз", None
+            return await self.fmt_extra(chat, job, a, y)
         if a in ("fq", "fa", "fp", "ff", "fr", "fall", "sp", "spn"):
             job = self.job_by(chat, x)
             if not job:
@@ -406,8 +419,10 @@ class Plugin(Base):
             return f"📥 Завантажую: {len(nums)}", None
         if a == "pg":
             job.page = max(0, min(int(y or 0), (len(job.items) - 1) // PAGE))
-        elif a == "q":
-            o.height = HEIGHTS[(HEIGHTS.index(o.height) + 1) % len(HEIGHTS)] if o.height in HEIGHTS else 0
+        elif a == "q":  # лише ті якості, що справді є на сайті (для одного відео); інакше — загальний ряд
+            real = M.video_heights(job.items[0].info) if len(job.items) == 1 else []
+            seq = [0] + real if real else list(HEIGHTS)
+            o.height = seq[(seq.index(o.height) + 1) % len(seq)] if o.height in seq else 0
         elif a == "md":
             keys = list(MODES)
             o.mode = keys[(keys.index(o.mode) + 1) % len(keys)]
@@ -897,11 +912,26 @@ class Plugin(Base):
             rows.append([("🗣 Чистий звук автора ▸", self.cb("os", tok))] + ([] if song else [("🔎 Розпізнати", self.cb("fr", tok))]))
         elif aud:
             rows.append([("🔊 Лише звук", self.cb("oa", tok))])
+        fmts = self.file_formats(job, vids, imgs)
+        if len(fmts) > 1:
+            cur = job.options.fmt if job.options.fmt in fmts else ""
+            rows.append([(f"📦 Формат файлу: {(cur or 'як є').upper()} ▸", self.cb("ofm", tok))])
         if len(vis) > 1:
             rows.append([("🔢 Вибрати окремі", self.cb("menu", tok))])
         lines += ["", "<i>☑️ — додати до завантаження. «🎵 Музика окремо» — доріжка саме з цього допису; "
                   "«🎶 Повна пісня» — повна версія з YouTube/SoundCloud.</i>", self.limits_line()]
         return "\n".join(lines)[:4000], rows
+
+    def file_formats(self, job, vids=0, imgs=()):
+        """У які формати має сенс перетворити саме ці файли: фото, відео чи документ."""
+        if vids:
+            return ["", *M.VIDEO_FMTS[1:]]
+        if imgs:
+            return ["", *M.IMAGE_FMTS]
+        ext = Path(M.urlsplit(str(job.items[0].url if job.items else "")).path).suffix.lower() if job.items else ""
+        if ext in M.DOC_TO:
+            return ["", *M.DOC_TO[ext]]
+        return [""]
 
     def sep_screen(self, job):
         tok = job.token
@@ -994,6 +1024,52 @@ class Plugin(Base):
         lim = self.tg_limit()
         return f"ℹ️ Ліміт Telegram: файл до {'2 ГБ' if lim >= 1024 ** 3 else mb(lim)}" + ("" if self.big.ready() else " (більше — з TELEGRAM_API_ID)")
 
+    async def fmt_extra(self, chat, job, a, y):
+        """🔊 Звук: лише бітрейти до оригінального, формати mp3/m4a/opus/wav/flac/оригінал; 📦 формат відео mp4/mov/mkv/webm."""
+        tok, info = job.token, job.items[0].info
+        back = [("« Усі формати", self.cb("opt", tok))]
+        if a == "fau":
+            rates, best = M.audio_choices(info)
+            lines = ["🔊 <b>Звук</b>", f"В оригіналі: до {best} кбіт/с" if best else "Бітрейт оригіналу сайт не повідомив.",
+                     "Більшого, ніж в оригіналі, не пропоную — якість від цього не зросте.", "",
+                     "<b>MP3</b> — грає всюди · <b>M4A</b> — менший файл · <b>OPUS</b> — найменший · <b>WAV/FLAC</b> — без стиснення · "
+                     "<b>Оригінал</b> — як на сайті, без перекодування."]
+            rows, line = [], []
+            for r in rates or [192]:
+                line.append((f"MP3 {r}", self.cb("fab", tok, f"mp3-{r}")))
+                if len(line) == 4:
+                    rows.append(line)
+                    line = []
+            if line:
+                rows.append(line)
+            top = rates[-1] if rates else 160
+            rows.append([(f"M4A {min(top, 256)}", self.cb("fab", tok, f"m4a-{min(top, 256)}")), (f"OPUS {min(top, 160)}", self.cb("fab", tok, f"opus-{min(top, 160)}"))])
+            rows.append([("WAV", self.cb("fab", tok, "wav-0")), ("FLAC", self.cb("fab", tok, "flac-0")), ("Оригінал", self.cb("fab", tok, "orig-0"))])
+            rows.append(back)
+            return None, ("\n".join(lines), rows)
+        if a == "fab":
+            fmt, _, abr = (y or "mp3-192").partition("-")
+            if fmt not in (*M.AUDIO_FMTS, "orig"):
+                return "Невідомий формат", None
+            if self.busy(chat):
+                return "⏳ Ще завантажую попереднє", None
+            self._bg(chat, self.fmt_go(chat, job, [1], mode="audio", cuts=(), fmt=fmt, abr=int(abr or 0)))
+            return "⬇️ Починаю", None
+        if a == "fvf":
+            cur = job.options.fmt if job.options.fmt in M.VIDEO_FMTS else "mp4"
+            lines = ["📦 <b>Формат відеофайлу</b>", "<b>MP4</b> — грає всюди, з плеєром у Telegram · <b>MOV</b> — для iPhone і монтажу · "
+                     "<b>MKV</b> — усі доріжки й субтитри · <b>WEBM</b> — для сайтів (перекодування, довше).",
+                     "Після вибору — оберіть якість (лише ті, що є в цього відео)."]
+            rows = [[(("✅ " if f == cur else "") + f.upper(), self.cb("fvs", tok, f)) for f in M.VIDEO_FMTS], back]
+            return None, ("\n".join(lines), rows)
+        if a == "fvs" and y in M.VIDEO_FMTS:
+            job.options.fmt = "" if y == "mp4" else y
+            hs = M.video_heights(info)
+            rows = [[(f"🎬 {h}p", self.cb("fq", tok, h)) for h in hs[i:i + 4]] for i in range(0, len(hs), 4)] or [[("🎬 Відео", self.cb("fq", tok, 0))]]
+            rows.append(back)
+            return f"📦 {y.upper()}", (f"📦 Формат: <b>{y.upper()}</b>. Тепер якість — лише наявні в цього відео:", rows)
+        return None, None
+
     @staticmethod
     def author_url(info):
         for k in ("channel_url", "uploader_url"):
@@ -1026,7 +1102,8 @@ class Plugin(Base):
                 rows.append(line)
         else:
             rows.append([("🎬 Відео", self.cb("fq", tok, 0))])
-        rows.append([("🔊 Звук (MP3)" + (f" · {mb(a_size)}" if a_size else ""), self.cb("fa", tok)), ("🖼 Превʼю", self.cb("fp", tok))])
+        rows.append([("🔊 Звук: бітрейт і формат ▸" + (f" · {mb(a_size)}" if a_size else ""), self.cb("fau", tok)), ("🖼 Превʼю", self.cb("fp", tok))])
+        rows.append([(f"📦 Формат відео: {(job.options.fmt or 'mp4').upper()} ▸", self.cb("fvf", tok))])
         song = self.song_of(job) or self.music(info)
         if song:
             artist, track, added = song
@@ -1220,6 +1297,8 @@ class Plugin(Base):
                     song = job.__dict__.get("song")
                     song_html = f"\n🎵 {esc(self.song_name(song))}" if song and song[2] else ""
                     outs = await M.render(path, opts, work, item.engine == "direct") if path else []
+                    if opts.fmt:  # 📦 обраний формат файлу (mov, mkv, webm, png…)
+                        outs = [await M.convert_final(o, opts, Path(work)) for o in outs]
                     # Опис і автор — у підписі самого файлу (Telegram дозволяє 1024 символи); довший текст — ще й окремо
                     # Підпис HTML: довгі адреси — короткими посиланнями «Автор» / «Допис»; ліміт Telegram — 1024 видимі символи
                     who_html = (f'<a href="{esc(link)}">{esc(who)}</a>' if link else esc(who)) if who else ""
@@ -1355,6 +1434,8 @@ class Plugin(Base):
         bot = self.host.bot()
         kw = dict(caption=caption_html, parse_mode="HTML", read_timeout=300, write_timeout=300)
         meta = {}
+        thumb = await M.make_thumb(path, path.parent)  # 🖼 передперегляд — щоб видно, що це за файл, і в чаті, і в завантаженому
+        tkw = {"thumbnail": thumb.read_bytes()} if thumb else {}
         if ext in (".mp4", ".mov", ".m4v"):
             try:
                 data = await M.probe_media(path)
@@ -1367,16 +1448,16 @@ class Plugin(Base):
             if size <= TELEGRAM_OUT - 512 * 1024:
                 with path.open("rb") as fh:
                     if ext in (".mp4", ".mov", ".m4v"):
-                        return await bot.send_video(chat, fh, filename=path.name, supports_streaming=True, **meta, **kw)
+                        return await bot.send_video(chat, fh, filename=path.name, supports_streaming=True, **meta, **tkw, **kw)
                     if ext in (".jpg", ".jpeg", ".png", ".webp") and size <= 10_000_000:
                         return await bot.send_photo(chat, fh, **kw)
                     if ext == ".gif":
                         return await bot.send_animation(chat, fh, filename=path.name, **kw)
                     if ext in (".mp3", ".m4a", ".ogg", ".opus", ".aac"):
-                        return await bot.send_audio(chat, fh, filename=path.name, **kw)
+                        return await bot.send_audio(chat, fh, filename=path.name, **tkw, **kw)
             elif ext in (".mp4", ".mov", ".m4v") and self.big.ready() and size <= BIG_LIMIT:
                 try:
-                    return await self.big.send(chat, path, caption_html, progress=on_progress, video=meta or {}, html=True)
+                    return await self.big.send(chat, path, caption_html, progress=on_progress, video=meta or {}, html=True, thumb=thumb)
                 except Exception as exc:  # noqa: BLE001
                     raise JobError(f"Не вдалося надіслати велике відео: {type(exc).__name__}: {str(exc)[:200]}") from None
         except JobError:
@@ -1389,8 +1470,10 @@ class Plugin(Base):
         """До 50 МБ — звичайно; більше (до 2 ГБ) — через пряме з'єднання з Telegram від імені бота."""
         size = path.stat().st_size
         if size <= TELEGRAM_OUT - 512 * 1024:
+            thumb = await M.make_thumb(path, path.parent)
             with path.open("rb") as fh:
-                return await self.host.bot().send_document(chat, fh, filename=path.name, caption=caption, read_timeout=180, write_timeout=180)
+                return await self.host.bot().send_document(chat, fh, filename=path.name, caption=caption, read_timeout=180, write_timeout=180,
+                                                           **({"thumbnail": thumb.read_bytes()} if thumb else {}))
         if not self.big.ready():
             raise JobError(f"{path.name}: {mb(size)}. Звичайний Telegram-бот надсилає лише до 50 МБ. Щоб до 2 ГБ — додайте "
                            "TELEGRAM_API_ID і TELEGRAM_API_HASH у Railway (my.telegram.org → API development tools), "
@@ -1401,7 +1484,7 @@ class Plugin(Base):
         if prog:
             await prog.start()
         try:
-            await self.big.send(chat, path, caption, progress=on_progress or prog)
+            await self.big.send(chat, path, caption, progress=on_progress or prog, thumb=await M.make_thumb(path, path.parent))
         except Exception as exc:  # noqa: BLE001
             raise JobError(f"Не вдалося надіслати великий файл: {type(exc).__name__}: {str(exc)[:200]}") from None
         finally:
