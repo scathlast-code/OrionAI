@@ -211,3 +211,10 @@ def test_jump_blinks_target_button(tmp_path):
 def test_tidy_astro_lines():
     from plugins.newsroom.dayextra import tidy
     assert tidy("] 14 листопада Меркурій рушає вперед, петлі— у «тіні».", "2026-11-14") == "Меркурій рушає вперед, петлі — у «тіні»."
+
+
+def test_seed_topics_have_sources(tmp_path):
+    p, _sent = news(tmp_path)
+    rs = [r for r in p.obs_on(dt.date(2026, 11, 21)) if "(ООН)" in r["title"] or "Movember" in r["title"]]
+    assert rs and all(r["url"].startswith("https://") for r in rs)
+    assert all("<a href" in p.obs_line(r) for r in rs)
