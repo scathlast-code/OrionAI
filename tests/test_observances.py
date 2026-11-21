@@ -82,7 +82,7 @@ def test_lists_edit_shadow_personal(tmp_path):
     p.obs_add("Всесвітній день довкілля", "day", "11-20", "11-20", 1, "Вікіпедія", "https://uk.wikipedia.org/wiki/20_листопада")
     p.db_add("11-20", "history", "1945 — почався процес", "https://x")
     t, rows = p.obs_home(1, "l")
-    assert "Історія" in t and "‼️" in t and "Підготував" in t
+    assert "Історія" not in t and "‼️" in t and "Підготував" in t  # історія — лише в «📝 Списки дня»
     it = p.db_items("11-20", "history", 1)[0]
     asyncio.run(p.route(None, None, 1, ["obx", f"d{it['id']}"]))
     assert not p.db_items("11-20", "history", 1)

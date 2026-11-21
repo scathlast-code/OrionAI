@@ -963,11 +963,11 @@ class ObservancesUI:
         ongoing = [r for r in rs if r["kind"] != "day"]
         plan = self.cplan_on(d) if notes is not None else []
         who = self.plan_who(d) if plan else (lambda r: "")
-        lines = [self.obs_line(r, link=with_links, notes=notes) + who(r) for r in days[:25]]
+        lines = [self.obs_line(r, link=with_links, notes=notes) + who(r) for r in days[:60]]
         if ongoing:  # скільки триває — лише в підзаголовку «Триває», не в загальному рядку
-            lines += (["", f"<b>⏳ Триває · {len(ongoing)}</b>"] if days else []) + [self.obs_line(r, link=with_links, notes=notes) + who(r) for r in ongoing[:12]]
+            lines += (["", f"<b>⏳ Триває · {len(ongoing)}</b>"] if days else []) + [self.obs_line(r, link=with_links, notes=notes) + who(r) for r in ongoing[:40]]
         if notes is not None and lines:
-            if any(self.verified(r["id"]) for r in days[:25] + ongoing[:12]):
+            if any(self.verified(r["id"]) for r in days[:60] + ongoing[:40]):
                 lines.append("<i>✅N — скільки незалежних ресурсів підтверджують (посилання — одразу після рядка) · ⚠️1 — лише одне джерело, звіряйте</i>")
         if lines:
             out.append(("days", f"📌 {'Сьогодні відзначається' if d == self.today() else 'Цього дня відзначається'} · {len(days)}" if days else f"⏳ Триває · {len(ongoing)}", lines))
@@ -1168,13 +1168,16 @@ class ObservancesUI:
                 limit = 60000
         except Exception:  # noqa: BLE001
             pass
-        full = [p if isinstance(p, tuple) else (p, p) for p in parts]
+        full = [(p + (5,) if len(p) == 2 else p) if isinstance(p, tuple) else (p, p, 5) for p in parts]  # (повна, коротка, пріоритет)
+        order = sorted(range(len(full)), key=lambda i: (full[i][2], i))  # спершу важливіше; показуємо — у звичному порядку
         pick = [None] * len(full)
         used = vis(head) + vis(tail)
-        for i, (f, sh) in enumerate(full):  # 1) кожен розділ — хоча б коротко
+        for i in order:  # 1) кожен розділ — хоча б коротко
+            f, sh, _p = full[i]
             if used + vis(sh) + 1 <= limit and len(sh) < 30000:
                 pick[i], used = sh, used + vis(sh) + 1
-        for i, (f, sh) in enumerate(full):  # 2) розгортаємо по черзі
+        for i in order:  # 2) розгортаємо за важливістю
+            f, sh, _p = full[i]
             if pick[i] is not None and f != sh and used - vis(sh) + vis(f) <= limit:
                 used += vis(f) - vis(sh)
                 pick[i] = f
@@ -1196,7 +1199,8 @@ class ObservancesUI:
         self.cplan_bg()
         notes = Notes()
         head = f"📅 <b>Теми дня · {d.day} {MONTHS_GEN[d.month - 1]}, {WD[d.weekday()]}</b>\n"
-        secs = [x for x in self.sections(d, chat, notes=notes, compact=True) if x[0] not in ("names", "born", "died")]  # іменини, народились, померли — лише в «📝 Списки дня»
+        secs = [x for x in self.sections(d, chat, notes=notes, compact=True)
+                if x[0] in ("days", "lore", "garden", "astro", "astrol", "trad")]  # іменини, народились, історія, відкриття… — лише в «📝 Списки дня»
         if callable(weather):  # погода сама додає свою зноску (Open-Meteo) у спільний список
             weather = weather(notes)
         order = ["days", "wx", "lore", "garden", "astro", "astrol", "trad", "cplan"]  # дні → погода → прикмети, городникам, небо, традиції
@@ -1207,14 +1211,18 @@ class ObservancesUI:
             link = self.jump_link(key, d)
             if key == "wx":  # посилання — всередині розгортного блоку погоди
                 w = lines[0]
-                parts.append(w.replace("</blockquote>", f"\n↗️ {link}</blockquote>", 1) if link and "</blockquote>" in w else w + (f"\n↗️ {link}" if link else ""))
+                w = w.replace("</blockquote>", f"\n↗️ {link}</blockquote>", 1) if link and "</blockquote>" in w else w + (f"\n↗️ {link}" if link else "")
+                parts.append((w, w, 2))
             else:
                 if link and not any("відкрити " in ln for ln in lines[-1:]):
                     lines = lines + [f"↗️ {link}"]
                 body = [ln for ln in lines if "відкрити " not in ln and not ln.startswith("… ще")]
                 short = body[:2] + ([f"… ще {len(body) - 2} · {link}"] if len(body) > 2 and link else [f"↗️ {link}"] if link else [])
-                parts.append((f"<b>{title}</b>\n<blockquote expandable>" + "\n".join(lines) + "</blockquote>",
-                              f"<b>{title}</b>\n<blockquote expandable>" + "\n".join(short) + "</blockquote>"))
+                full_ = f"<b>{title}</b>\n<blockquote expandable>" + "\n".join(lines) + "</blockquote>"
+                if key == "days":  # усі дні, що відзначаються сьогодні, і всі, що тривають, — завжди повністю
+                    parts.append((full_, full_, 0))
+                else:
+                    parts.append((full_, f"<b>{title}</b>\n<blockquote expandable>" + "\n".join(short) + "</blockquote>", 3))
         up = self.upcoming(chat, 30)
         tail = ""
         if up:
@@ -1222,7 +1230,7 @@ class ObservancesUI:
             ul = [f"{x.day:02d}.{x.month:02d} · {(x - d).days} дн. · {self.obs_line(r, notes=notes)}{self.plan_who(x)(r)}" for x, r in up[:10]]
             head_u = f"<b>⚠️ Найближчі важливі дні · {len(up)}</b>\n<blockquote expandable>"
             parts.append((head_u + "\n".join(ul) + more + "</blockquote>",
-                          head_u + "\n".join(ul[:2]) + (f"\n… ще {len(up) - 2} · " if len(up) > 2 else "\n↗️ ") + self.jump_link("up", d) + "</blockquote>"))
+                          head_u + "\n".join(ul[:3]) + (f"\n… ще {len(up) - 3} · " if len(up) > 3 else "\n↗️ ") + self.jump_link("up", d) + "</blockquote>", 1))
         on = self.store.get("obs_morning") is not False
         cov = self.obs_coverage()
         hm = self.store.get("obs_time") or "07:30"
