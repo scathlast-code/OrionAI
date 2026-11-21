@@ -114,3 +114,31 @@ def test_news_screen_has_topics(tmp_path):
     labels = " ".join(b[0] for r in rows for b in r)
     for w in ("Гарячі", "Екологія", "Агро", "Здоров", "Енергетика", "Нові чернетки", "Джерела", "Звіт"):
         assert w in labels, w
+
+
+def test_personal_settings_are_per_user(tmp_path):
+    import asyncio as aio
+    from plugins import Host as H
+    from plugins.editorial import Plugin
+    sent = []
+
+    async def notify(uid, text, rows=None):
+        sent.append((uid, text))
+    h = H(data_dir=str(tmp_path), admins=lambda: [1], is_admin=lambda u: True)
+    h.notify = notify
+    p = Plugin(h)
+    aio.run(p.route(None, None, 1, ["mef", "only_mine"]))
+    assert p.up(1)["only_mine"] and not p.up(2)["only_mine"]
+    aio.run(p.route(None, None, 2, ["men", "tasks"]))
+    with p.db() as con:
+        con.execute("INSERT INTO accounts(name, uid) VALUES('Лариса', 2)")
+        con.execute("INSERT INTO items(chat,msg,kind,text,who,at,key) VALUES(0,0,'task','Про ліси','',0,'k1')")
+    iid = 1
+    aio.run(p.route(None, None, 1, ["set", str(iid), "-"]))
+    p.set_who(iid, "Лариса")
+    aio.run(p.notify_assigned(iid, "Лариса", by=1))
+    assert any(u == 2 and "призначено" in t for u, t in sent)
+    aio.run(p.notify_new("task", "Нове завдання", "", "Чат"))
+    assert any(u == 2 and "Нове завдання" in t for u, t in sent) and not any(u == 1 and "Нове завдання" in t for u, t in sent)
+    t, _ = p.me_screen(2)
+    assert "ЛАРИСА" in t and "лише нові завдання" in t
