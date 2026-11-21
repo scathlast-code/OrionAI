@@ -1078,7 +1078,18 @@ def note_owner(chat_id=None):
     return chat_id or CHAT.get() or owner_id()
 
 
+def _norm_note(t):
+    return re.sub(r"[^\w]+", " ", (t or "").lower()).strip()
+
+
 def add_note_db(text, tags, source, chat_id=None):
+    owner = note_owner(chat_id)
+    with closing(db()) as con:  # те саме вже записано (за останню добу) — другий раз не записуємо
+        for r in con.execute("SELECT id, text FROM notes WHERE chat_id IS ? AND ts>? ORDER BY id DESC LIMIT 30", (owner, time.time() - 86400)):
+            a, b = _norm_note(r["text"]), _norm_note(text)
+            wa, wb = set(a.split()), set(b.split())
+            if a == b or (wa and wb and len(wa & wb) >= 0.8 * min(len(wa), len(wb))):
+                return r["id"]
     with closing(db()) as con, con:
         nid = con.execute(
             "INSERT INTO notes(text, tags, source, ts, chat_id) VALUES (?,?,?,?,?)",
@@ -1332,7 +1343,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "save_note",
-            "description": "Зберегти нотатку в спільну базу нотаток бота.",
+            "description": "Зберегти нотатку — лише те, що НЕ прив'язане до конкретного дня (дні й події з датами — add_day, справи — add_task). Один раз.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1341,6 +1352,27 @@ TOOLS = [
                 },
                 "required": ["text"],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_day",
+            "description": "Записати день/подію/тиждень у календар днів («дні», «календар», «що відзначається»): назва й дати. "
+                           "Використовуй, коли просять «запиши в дні/календар» або це подія з конкретною датою.",
+            "parameters": {"type": "object", "properties": {
+                "title": {"type": "string", "description": "Назва дня чи події, напр. «Всеукраїнський тиждень доброчесності»"},
+                "start": {"type": "string", "description": "Дата початку YYYY-MM-DD"},
+                "end": {"type": "string", "description": "Дата кінця YYYY-MM-DD (для одного дня — та сама)"},
+                "url": {"type": "string", "description": "Посилання на джерело, якщо є"}}, "required": ["title", "start"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_task",
+            "description": "Записати завдання — те, що треба зробити, особливо до конкретної дати чи часу. Нотатки — лише для того, що не прив'язане до дня.",
+            "parameters": {"type": "object", "properties": {"text": {"type": "string", "description": "Що зробити (з датою, якщо є)"}}, "required": ["text"]},
         },
     },
     {
@@ -1433,7 +1465,24 @@ async def run_tool(name, args):
             queue.append(("audio", data, f"🎵 {media.MUSIC_PROVIDERS[pid]['title']}"))
         return "Музику згенеровано й буде надіслано користувачу разом із відповіддю."
     if name == "save_note":
-        return f"Нотатку збережено, id={add_note_db(args.get('text', ''), args.get('tags', ''), 'telegram')}"
+        return f"Нотатку збережено, id={add_note_db(args.get('text', ''), args.get('tags', ''), 'telegram', CHAT.get())}"
+    if name == "add_day":
+        news_ = PLUGINS.get("news")
+        if not news_ or not hasattr(news_, "obs_add"):
+            return "Календар днів недоступний"
+        a_, b_ = str(args.get("start") or "")[:10], str(args.get("end") or args.get("start") or "")[:10]
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", a_):
+            return "Потрібна дата початку у форматі YYYY-MM-DD"
+        b_ = b_ if re.fullmatch(r"\d{4}-\d{2}-\d{2}", b_) else a_
+        title = str(args.get("title") or "").strip()[:200]
+        from plugins.newsroom.observances import kind_of
+        k = "day" if a_ == b_ else kind_of(title)
+        k = k if k != "day" or a_ == b_ else "week"
+        ok = news_.obs_add(title, k, a_, b_, 0, "ваш запис", str(args.get("url") or ""))
+        return f"Записано в календар днів: «{title}» {a_}" + (f"…{b_}" if b_ != a_ else "") + ("" if ok else " (такий запис уже був)")
+    if name == "add_task":
+        tid = create_planned_task(CHAT.get(), str(args.get("text") or "")[:1000])
+        return f"Завдання записано, id={tid}"
     if name == "weather":
         return await websearch.weather(str(args.get("city") or ""))
     if name == "web_search":

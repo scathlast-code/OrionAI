@@ -691,7 +691,8 @@ class ObservancesUI:
             src = notes.mark(it.get("url"), _src_label(it.get("url"))) if str(it.get("url") or "").startswith("http") else \
                 (" · <i>ваш запис</i>" if it.get("owner") else "")
         text = re.sub(r"\s*\([^)]*[\u3040-\u30ff\u4e00-\u9fff\uac00-\ud7af][^)]*\)", "", it["text"])  # ієрогліфи в дужках — геть
-        emo = DB.topic_emoji(text) + " " if it.get("cat") in ("born", "died", "history", "discover") else ""
+        emo = (DB.topic_emoji(text) + " " if it.get("cat") in ("born", "died", "history", "discover")
+               else DB.lore_emoji(text, "🌿" if it.get("cat") == "lore" else "🪔") + " " if it.get("cat") in ("lore", "trad") else "")
         body = esc(text)
         if mark and notes is not None:  # ❗ наша тема — жирним (у списку ще й цитатою)
             body = f"<b>{body}</b>"
@@ -968,7 +969,8 @@ class ObservancesUI:
             nm = x.get("trad_name") or self.holiday_of(tday)
             when = "сьогодні" if tday == self.today() else f"{tday.day} {MONTHS_GEN[tday.month - 1]}"
             body = ([f"<i>Свято: <b>{esc(nm)}</b> · {when}</i>"] if nm else []) + [
-                "• " + (f"<b>{esc(it['head'])}</b> — " if it.get("head") else "") + esc(DX.tidy(it["text"])) + notes.mark(it["url"], it["host"])
+                DB.lore_emoji(it.get("head", "") + " " + it["text"], "🪔") + " " + (f"<b>{esc(it['head'])}</b> — " if it.get("head") else "")
+                + esc(DX.tidy(it["text"]) if not it.get("head") else it["text"]) + notes.mark(it["url"], it["host"])
                 for it in x["trad"][:3 if compact else 8]]
             head_ = DB.CATS["trad"][0] + ("" if same else f" · на {tday.day} {MONTHS_GEN[tday.month - 1]} (не на сьогодні)")
             if not any(k == "trad" for k, _t, _l in out):
@@ -1426,6 +1428,11 @@ class ObservancesUI:
             items = [(r["id"], self.obs_line(r, notes=notes)) for r in rs_ if self.sourced(r)]
             hidden = len(self.obs_on(d, chat, hidden=True))
         else:
+            if cat == "trad":  # 🪔 традиції, знайдені для зведення, — і в цьому списку (з джерелом; можна правити)
+                x = self.store.get(f"dayx:{d.isoformat()}") or {}
+                if x.get("trad") and x.get("trad_day") == d.isoformat():
+                    for it in x["trad"]:
+                        self.db_add(md, "trad", (it["head"] + " — " + it["text"]) if it.get("head") else it["text"], it.get("url", ""))
             items = [(it["id"], self.db_line(it, notes)) for it in self.db_items(md, cat, chat)]
             hidden = len(self.db_items(md, cat, chat, hidden=True))
         per = 8
