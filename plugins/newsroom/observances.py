@@ -273,6 +273,7 @@ class ObservancesUI:
                     try:
                         r = await cl.get(dl)
                         if r.status_code != 200 or not r.content.startswith(b"PK"):
+                            log.warning("контент-план: %s → HTTP %s, %s", dl, r.status_code, r.headers.get("content-type"))
                             continue
                         for day, items in CP.parse(r.content).items():
                             for it in items:
@@ -280,7 +281,8 @@ class ObservancesUI:
                             merged.setdefault(day, []).extend(items)
                         break
                     except Exception:  # noqa: BLE001
-                        log.info("контент-план: не вдалось завантажити %s", dl, exc_info=True)
+                        log.warning("контент-план: не вдалось завантажити %s", dl, exc_info=True)
+        log.warning("контент-план: %d днів, %d тем", len(merged), sum(len(v) for v in merged.values()))
         if merged or not self.store.get("cplan_data"):
             self.store.set("cplan_data", merged)
         self.store.set("cplan_t", time.time())
