@@ -27,3 +27,19 @@ def test_fact_questions_trigger_search():
     import websearch as w
     assert w.wants_search("Коли відбулася битва під Крутами?") and w.wants_search("що сказав мер учора про воду")
     assert not w.wants_search("Привіт") and not w.wants_search("напиши вірш про осінь") and not w.wants_search("переклади hello world")
+
+
+def test_metno_full_fallback_format():
+    from plugins.weather import metno
+    ts = []
+    for h in range(0, 48, 6):
+        ts.append({"time": f"2026-11-{21 + h // 24:02d}T{h % 24:02d}:00:00Z",
+                   "data": {"instant": {"details": {"air_temperature": -2 + h / 12, "wind_speed": 5, "relative_humidity": 80}},
+                            "next_6_hours": {"summary": {"symbol_code": "lightsnow" if h < 24 else "cloudy"},
+                                             "details": {"precipitation_amount": 1.2 if h < 24 else 0}}}})
+    f = metno.to_om({"properties": {"timeseries": ts}}, "UTC")
+    d = f["daily"]
+    assert f["_src"] == "metno" and d["time"][0] == "2026-11-21"
+    assert d["weather_code"][0] == 71 and d["precipitation_probability_max"][0] == 80
+    assert d["temperature_2m_min"][0] <= d["temperature_2m_max"][0]
+    assert f["current"]["weather_code"] == 71

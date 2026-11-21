@@ -166,8 +166,15 @@ class WeatherPlugin(Plugin):
                 await asyncio.sleep(1)
         if data is None:
             self._om_down = time.time() + 600
-            if hit and time.time() - hit[0] < 12 * 3600:  # старіший, але справжній прогноз — краще, ніж помилка
+            if hit and time.time() - hit[0] < 3 * 3600:  # свіжий справжній прогноз — краще, ніж помилка
                 log.warning("погода: Open-Meteo не відповідає (%s) — показую прогноз від %s", err, time.strftime("%H:%M", time.localtime(hit[0])))
+                return hit[1]
+            met = await self.fetch_met(pts, tz)  # 🔁 запасне джерело — MET Norway (yr.no)
+            if met:
+                log.warning("погода: Open-Meteo не відповідає (%s) — прогноз від MET Norway", err)
+                self._cache[key] = (time.time() - 900, met)  # за 5 хв спробуємо Open-Meteo знову
+                return met
+            if hit and time.time() - hit[0] < 12 * 3600:
                 return hit[1]
             raise err
         data = data if isinstance(data, list) else [data]
@@ -175,6 +182,30 @@ class WeatherPlugin(Plugin):
         if len(pts) == len(UA_POINTS):
             self.met_bg()
         return data
+
+    async def fetch_met(self, pts, tz):
+        """Усі точки з MET Norway у форматі Open-Meteo; хоч одна не вдалась — None (щоб не показувати дірявий прогноз)."""
+        sem = asyncio.Semaphore(6)
+
+        async def one(cl, la, lo):
+            async with sem:
+                r = await cl.get(metno.API, params={"lat": round(la, 2), "lon": round(lo, 2)})
+                r.raise_for_status()
+                return metno.to_om(r.json(), tz)
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(20, connect=8), headers=metno.UA) as cl:
+                out = await asyncio.gather(*(one(cl, la, lo) for la, lo in pts))
+        except Exception:  # noqa: BLE001
+            log.info("MET Norway теж не відповідає", exc_info=True)
+            return None
+        return out if all(out) else None
+
+    @staticmethod
+    def ref(f, la, lo):
+        """(посилання, назва джерела) для точки — те джерело, з якого справді прогноз."""
+        if isinstance(f, dict) and f.get("_src") == "metno":
+            return metno.page(la, lo), "MET Norway"
+        return om_url(la, lo), "Open-Meteo"
 
     # ----- 🔁 звірка з другим джерелом (MET Norway): по одному місту на частину країни, кеш 1 год
     def met_bg(self):
@@ -306,7 +337,7 @@ class WeatherPlugin(Plugin):
                                 for i in range(min(days, len(times))) if self.summary(pts, data, i))
             if body:
                 if notes is not None:  # джерело — одразу після кожного рядка-факту зведення
-                    src = notes.mark(om_url(pts[0][1], pts[0][2]), "Open-Meteo")
+                    src = notes.mark(*self.ref(data[0], pts[0][1], pts[0][2]))
                     body = "\n".join(ln + src if ln and not ln.startswith("<b>") else ln for ln in body.split("\n"))
                 parts.append(f"🌍 <b>Погода · {esc(co['name'])}</b> · {len(pts)} найбільших міст\n<blockquote expandable>{body}</blockquote>")
         return "\n".join(parts)
@@ -343,11 +374,12 @@ class WeatherPlugin(Plugin):
             return ""
         lo, hi = min(rows, key=lambda r: r["lo"]), max(rows, key=lambda r: r["hi"])
         pos = {n: (la, lon) for n, la, lon, _r in UA_POINTS}
+        fb = bool(data) and isinstance(data[0], dict) and data[0].get("_src") == "metno"  # запасне джерело — MET Norway
 
         def city(n):  # 📎 назва міста — сама є посиланням на його прогноз (джерело факту одразу в реченні)
             if notes is None or n not in pos:
                 return esc(n)
-            return f'<a href="{esc(om_url(*pos[n]))}">{esc(n)}</a>'
+            return f'<a href="{esc(metno.page(*pos[n]) if fb else om_url(*pos[n]))}">{esc(n)}</a>'
         lines = [f"🌡 Температура: від {t(lo['lo'])} (найхолодніше — {city(lo['name'])}) до {t(hi['hi'])} (найтепліше — {city(hi['name'])})"]
         for region in REGIONS:
             part = [r for r in rows if r["region"] == region]
@@ -358,8 +390,8 @@ class WeatherPlugin(Plugin):
             rlo, rhi = min(r["lo"] for r in part), max(r["hi"] for r in part)
             pp, wind = max(r["pp"] for r in part), max(r["wind"] for r in part)
             ref = next((c for c in REGIONS[region]), None)
-            mark = notes.mark(om_url(ref[1], ref[2]), "Open-Meteo") if notes is not None and ref else ""
-            if notes is not None and ref:
+            mark = notes.mark(*(metno.page(ref[1], ref[2]), "MET Norway") if fb else (om_url(ref[1], ref[2]), "Open-Meteo")) if notes is not None and ref else ""
+            if notes is not None and ref and not fb:  # звіряти MET Norway із самим собою немає сенсу
                 rr = next((r for r in part if r["name"] == ref[0]), None)
                 iso = ((data[0].get("daily") or {}).get("time") or [""] * (i + 1))[i] if data else ""
                 if rr and iso:
