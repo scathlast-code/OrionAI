@@ -14,6 +14,7 @@ import time
 import httpx
 
 from plugins import Plugin, esc
+from . import metno
 from footnotes import Notes, html_cut  # 📎 джерела — зносками в кінці кожної частини
 
 log = logging.getLogger("orion.weather")
@@ -156,7 +157,44 @@ class WeatherPlugin(Plugin):
             data = r.json()
         data = data if isinstance(data, list) else [data]
         self._cache[key] = (time.time(), data)
+        if len(pts) == len(UA_POINTS):
+            self.met_bg()
         return data
+
+    # ----- 🔁 звірка з другим джерелом (MET Norway): по одному місту на частину країни, кеш 1 год
+    def met_bg(self):
+        if time.time() - (getattr(self, "_met_t", 0) or 0) < 3600:
+            return
+        self._met_t = time.time()
+
+        async def go():
+            got = dict(getattr(self, "_met", {}) or {})
+            async with httpx.AsyncClient(timeout=20, headers=metno.UA) as cl:
+                for cities in REGIONS.values():
+                    _n, la, lo = cities[0]
+                    try:
+                        r = await cl.get(metno.API, params={"lat": la, "lon": lo})
+                        r.raise_for_status()
+                        got[(la, lo)] = metno.daily(r.json())
+                    except Exception:  # noqa: BLE001
+                        log.info("MET Norway: не вдалося для %s", _n, exc_info=True)
+            self._met = got
+        try:
+            asyncio.get_running_loop().create_task(go())
+        except RuntimeError:
+            self._met_t = 0
+
+    def met_mark(self, ref, om_lo, om_hi, iso):
+        """Посилання на MET Norway після рядка регіону: ✅ якщо прогнози збігаються, ⚠️ з їхніми цифрами — якщо ні.
+        Немає даних — нічого не пишемо."""
+        name, la, lo = ref
+        met = (getattr(self, "_met", {}) or {}).get((la, lo), {}).get(iso)
+        if not met:
+            return ""
+        a = f'<a href="{esc(metno.page(la, lo))}">MET Norway</a>'
+        if metno.agree((om_lo, om_hi), met):
+            return f" · {a} ✅"
+        return f" · ⚠️ {a}: {esc(name)} {t(round(met[0]))}…{t(round(met[1]))}"
 
     async def geocode(self, name):
         async with httpx.AsyncClient(timeout=20, trust_env=False) as client:
@@ -306,6 +344,11 @@ class WeatherPlugin(Plugin):
             pp, wind = max(r["pp"] for r in part), max(r["wind"] for r in part)
             ref = next((c for c in REGIONS[region]), None)
             mark = notes.mark(om_url(ref[1], ref[2]), "Open-Meteo") if notes is not None and ref else ""
+            if notes is not None and ref:
+                rr = next((r for r in part if r["name"] == ref[0]), None)
+                iso = ((data[0].get("daily") or {}).get("time") or [""] * (i + 1))[i] if data else ""
+                if rr and iso:
+                    mark += self.met_mark(ref, rr["lo"], rr["hi"], iso)
             lines.append(f"{e} <b>{region}</b>: {t(rlo)}…{t(rhi)}, {what}" + (f" · ☂️ до {round(pp)}%" if pp >= 30 else "")
                          + (f" · 💨 до {round(wind)} м/с" if wind >= 8 else "") + mark)
         rain = [r["name"] for r in rows if wet(r["code"]) and r["pp"] >= 50]
