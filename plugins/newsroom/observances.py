@@ -309,13 +309,14 @@ class ObservancesUI:
                             keep.write_bytes(r.content)
                         except Exception:  # noqa: BLE001
                             log.info("контент-план: копію не збережено", exc_info=True)
-                        rep = []
-                        for day, items in CP.parse(r.content, rep).items():
+                        rep, cells = [], {}
+                        for day, items in CP.parse(r.content, rep, cells).items():
                             for it in items:
                                 it["src"] = url
                             merged.setdefault(day, []).extend(items)
                         status.append(f"{dl.split('/')[2]}: ✅ завантажено, тем {sum(len(v) for v in merged.values()) - n0}")
                         self.store.set("cplan_sheets", rep[-40:])
+                        self.store.set("cplan_cells", {"id": CP.file_id(url), "cells": cells})
                         log.warning("контент-план, аркуші: %s", " | ".join(rep))
                         break
                     except Exception as exc:  # noqa: BLE001
@@ -376,11 +377,17 @@ class ObservancesUI:
         month_n = sum(len(v) for k, v in data.items() if k.startswith(f"{y}-{m:02d}"))
         lines = [f"📋 <b>Контент-план · {MONTHS[m - 1]} {y}</b> · тем {month_n}",
                  "✍️ — є теми · [число] — сьогодні · ·число· — обраний день. Торкніться дня, щоб побачити його план.", ""]
+        if day_mode and self.host.is_admin(chat):  # ✏️ правки людини — у саму таблицю, з підтвердженням
+            items_ = data.get(sel.isoformat(), [])
+            ed = [(f"✏️ {k + 1}", self.cb("obce", f"{sel:%Y%m%d}.{k}")) for k in range(min(len(items_), 8))]
+            rows[-3:-3] = [ed[i:i + 4] for i in range(0, len(ed), 4)] + [
+                [("➕ Тема дня", self.cb("obca", f"{sel:%Y%m%d}.topics")), ("➕ Сайт", self.cb("obca", f"{sel:%Y%m%d}.site")),
+                 ("➕ SMM", self.cb("obca", f"{sel:%Y%m%d}.smm"))]]
         if day_mode:
             items = data.get(sel.isoformat(), [])
             lines.append(f"<b>{'Сьогодні' if sel == today else f'{sel.day} {MONTHS_GEN[sel.month - 1]}'}, {WD[sel.weekday()]} · {len(items)}</b>")
-            for it in items:
-                lines.append(f"• {esc(it['title'])}" + (f" · ✍️ {esc(it['author'])}" if it.get("author") else "")
+            for k, it in enumerate(items, 1):
+                lines.append(f"{k}. {esc(it['title'])}" + (f" · ✍️ {esc(it['author'])}" if it.get("author") else "")
                              + (f" · 📍 {it['where']}" if it.get("where") else ""))
             if not items:
                 lines.append("На цей день у плані порожньо.")
@@ -388,6 +395,97 @@ class ObservancesUI:
         lines += ["", f"<i>Таблиця: оновлено {dt.datetime.fromtimestamp(t, self.host.tz).strftime('%d.%m %H:%M') if t else '—'}, "
                       "перевіряю щопівгодини. У загальному календарі ці теми — разом з усіма днями.</i>"]
         return html_cut("\n".join(lines), 4000), rows
+
+    # ----- ✏️ правки контент-плану людиною (ШІ нічого не вписує): правка → перегляд «було/стане» → підтвердження → запис
+    def _cp_item(self, ymd, k):
+        d = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]}"
+        items = (self.store.get("cplan_data") or {}).get(d, [])
+        return items[k] if 0 <= k < len(items) else None
+
+    def cplan_setup_text(self):
+        from . import gsheets as G
+        em = G.email()
+        return ("✏️ <b>Редагування контент-плану</b>\n\nЩоб правки потрапляли просто в таблицю, потрібно один раз:\n"
+                "1. У Google Диску відкрити файл → «Файл» → «Зберегти як Google Таблицю» і надіслати мені нове посилання.\n"
+                "2. Додати в Railway змінну <code>GOOGLE_SERVICE_ACCOUNT_JSON</code> — ключ сервісного акаунта Google (Sheets API).\n"
+                + (f"3. Поділитися таблицею з <code>{esc(em)}</code> як редактор.\n" if em else
+                   "3. Поділитися таблицею з адресою сервісного акаунта (бот покаже її, щойно ключ буде доданий) як редактор.\n")
+                + "\nБот змінює лише ту клітинку, яку ви відредагували, і тільки після вашого «✅ Зберегти».")
+
+    async def cplan_edit_route(self, chat, a, x):
+        from . import gsheets as G
+        if not self.host.is_admin(chat):
+            return "Правити план можуть лише адміністратори", None
+        if not G.creds():
+            return None, (self.cplan_setup_text(), [[("« Контент-план", self.cb("obcp"))]])
+        ymd, _, rest = (x or "").partition(".")
+        back = [[("« План дня", self.cb("obcp", ymd))]]
+        if a == "obce":
+            it = self._cp_item(ymd, int(rest or 0))
+            if not it or not it.get("cell"):
+                return "Не знайшов цю тему в таблиці — оновіть план", None
+            self.ask(chat, "obce", {"op": "edit", "ymd": ymd, "k": int(rest)})
+            return None, (f"✏️ <b>Правка теми</b>\nЗараз у таблиці: <code>{esc(it['orig'])}</code>\n\n"
+                          "Надішліть новий текст (як у таблиці, напр. «Назва - Автор»).",
+                          [[("🗑 Прибрати цю тему", self.cb("obcd", x))]] + back)
+        if a == "obca":
+            self.ask(chat, "obce", {"op": "add", "ymd": ymd, "slot": rest or "topics"})
+            where = {"topics": "теми дня", "site": "рядка «Сайт»", "smm": "рядка «smm»"}.get(rest, "теми дня")
+            return None, (f"➕ <b>Нова тема для {where}</b> · {ymd[6:8]}.{ymd[4:6]}\nНадішліть текст (напр. «Назва - Автор»).", back)
+        if a == "obcd":
+            it = self._cp_item(ymd, int(rest or 0))
+            if not it:
+                return "Не знайдено", None
+            self._cpe = {**getattr(self, "_cpe", {}), chat: {"op": "del", "ymd": ymd, "k": int(rest), "new": None}}
+            return None, (f"🗑 Прибрати з таблиці тему\n<code>{esc(it['orig'])}</code>?",
+                          [[("✅ Так, прибрати з таблиці", self.cb("obcw")), ("✖️ Ні", self.cb("obcx", ymd))]])
+        if a == "obcx":
+            getattr(self, "_cpe", {}).pop(chat, None)
+            self.host.cancel_input(chat)
+            return "Скасовано", self.cplan_screen(chat, ymd)
+        if a == "obcw":
+            p = getattr(self, "_cpe", {}).pop(chat, None)
+            if not p:
+                return "Немає правки для збереження", None
+            return await self.cplan_write(chat, p)
+        return None, self.cplan_screen(chat, ymd)
+
+    def cplan_preview(self, chat, p):
+        was = ""
+        if p["op"] in ("edit", "del"):
+            it = self._cp_item(p["ymd"], p["k"]) or {}
+            was = it.get("orig", "")
+        self._cpe = {**getattr(self, "_cpe", {}), chat: p}
+        text = ("✏️ <b>Перевірте правку перед записом у таблицю</b>\n\n" + (f"Було: <code>{esc(was)}</code>\n" if was else "")
+                + f"Стане: <code>{esc(p['new'])}</code>")
+        return text, [[("✅ Зберегти в таблицю", self.cb("obcw")), ("✖️ Скасувати", self.cb("obcx", p["ymd"]))]]
+
+    async def cplan_write(self, chat, p):
+        from . import contentplan as CP, gsheets as G
+        meta = self.store.get("cplan_cells") or {}
+        sid = meta.get("id") or CP.file_id(self.cplan_urls()[0])
+        d = f"{p['ymd'][:4]}-{p['ymd'][4:6]}-{p['ymd'][6:8]}"
+        try:
+            if p["op"] == "add":
+                cell = (meta.get("cells") or {}).get(d, {}).get(p.get("slot") or "topics")
+                if not cell:
+                    return "Не знайшов клітинку цього дня в таблиці", None
+                cur = await G.get_cell(sid, *cell)
+                await G.set_cell(sid, *cell, (cur + "\n" if cur.strip() else "") + p["new"])
+            else:
+                it = self._cp_item(p["ymd"], p["k"])
+                if not it:
+                    return "Тема вже змінилась — оновіть план", None
+                cur = await G.get_cell(sid, *it["cell"])  # свіжий вміст: не затираємо чужих правок
+                new, ok = CP.replace_line(cur, it["orig"], p["new"])
+                if not ok:
+                    return "⚠️ У таблиці цей рядок уже змінили — оновіть план і спробуйте ще раз", self.cplan_screen(chat, p["ymd"])
+                await G.set_cell(sid, *it["cell"], new)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("контент-план: запис", exc_info=True)
+            return None, (f"⚠️ Не вдалося записати: {esc(str(exc)[:200])}\n\n" + self.cplan_setup_text(), [[("« План дня", self.cb("obcp", p["ymd"]))]])
+        await self.ensure_cplan(force=True)
+        return "✅ Записано в таблицю", self.cplan_screen(chat, p["ymd"])
 
     def cplan_status(self, chat):
         """ℹ️ Технічний стан завантаження: відповіді Google, аркуші, остання зміна."""
@@ -1588,6 +1686,10 @@ class ObservancesUI:
             return None, self.obs_upcoming(chat)
         if a == "obcp":
             return None, self.cplan_screen(chat, x)
+        if a == "obcps":
+            return None, self.cplan_status(chat)
+        if a in ("obce", "obca", "obcd", "obcw", "obcx"):
+            return await self.cplan_edit_route(chat, a, x)
         if a == "obsec":
             k, _, ymd = (x or "").partition(".")
             return None, self.obs_section(chat, k, ymd or self.today().strftime("%Y%m%d"))
@@ -1690,6 +1792,8 @@ class ObservancesUI:
 
     async def obs_text(self, chat, key, data, text):
         t = text.strip()
+        if key == "obce":  # ✏️ текст правки контент-плану — спершу перегляд, запис лише після «✅ Зберегти»
+            return None, self.cplan_preview(chat, {**(data or {}), "new": t[:500]})
         if key == "obm":
             if t in ("-", "—"):
                 self.store.set("obs_morning", False)

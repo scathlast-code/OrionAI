@@ -73,7 +73,33 @@ def _split(cell):
     return out
 
 
-def parse(data: bytes, report: list | None = None):
+def _lines(cell):
+    """Ті самі рядки клітинки, що бере _split, — дослівно (щоб правка замінила саме їх)."""
+    return [ln for ln in (x.strip() for x in re.split(r"[\n\r]+", str(cell or ""))) if len(ln.strip(" •·-—\t")) >= 3]
+
+
+def replace_line(cell, orig, new):
+    """Клітинка з кількома темами: замінити одну (new=None — прибрати)."""
+    out, done = [], False
+    for ln in re.split(r"\r?\n", str(cell or "")):
+        if not done and ln.strip() == orig:
+            done = True
+            if new:
+                out.append(new)
+            continue
+        out.append(ln)
+    return "\n".join(x for x in out if x.strip()), done
+
+
+def col_letter(n):
+    s = ""
+    while n:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def parse(data: bytes, report: list | None = None, cells: dict | None = None):
     """→ {"YYYY-MM-DD": [{"title", "author", "where"}]} з усіх аркушів-місяців. report — сюди підсумок по кожному аркушу."""
     import openpyxl
     wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
@@ -103,12 +129,14 @@ def parse(data: bytes, report: list | None = None):
         before = {k: len(v) for k, v in plan.items()}
         cols = {}  # колонка → дата поточного тижня
         prev_day = 0
-        for r in rows:
+        date_row = -1
+        for ri, r in enumerate(rows):
             nums = {i: int(c) for i, c in enumerate(r) if isinstance(c, (int, float)) and 1 <= int(c) <= 31 and float(c).is_integer()}
             nums.update({i: int(c) for i, c in enumerate(r) if isinstance(c, str) and re.fullmatch(r"\s*\d{1,2}\s*", c) and 1 <= int(c) <= 31})
             filled = [c for c in r if c not in (None, "")]
             if nums and len(nums) >= max(1, len(filled) - 1):  # рядок дат тижня
                 cols = {}
+                date_row = ri
                 for i, d in sorted(nums.items()):
                     m_ = month
                     if d < 8 and prev_day > 20:  # дні наступного місяця в останньому тижні
@@ -127,19 +155,26 @@ def parse(data: bytes, report: list | None = None):
                 continue
             label = str(r[0] or "").strip().lower() if r else ""
             where = next((v for k, v in WHERE.items() if label.startswith(k)), "")
+            if cells is not None:  # 📍 де в таблиці клітинка кожного дня — щоб людина могла правити план із бота
+                slot = "topics" if ri == date_row + 1 else ("site" if where == "Сайт" else "smm" if where == "SMM" else "")
+                if slot:
+                    for i, day0 in cols.items():
+                        if abs((day0.year * 12 + day0.month) - (year * 12 + month)) <= 0 and not (slot == "topics" and where):
+                            cells.setdefault(day0.isoformat(), {})[slot] = [ws.title, ri + 1, i + 1]
             for i, c in enumerate(r):
                 if i not in cols or c in (None, ""):
                     continue
                 txt = str(c)
                 if i == 0 and where:
                     txt = re.sub(r"(?i)^\s*(?:сайт|smm|смм)\s*", "", txt)
-                for title, author in _split(txt):
+                for (title, author), orig in zip(_split(txt), _lines(txt)):
                     if title.lower() in WHERE:
                         continue
                     day = cols[i]
                     if abs((day.year * 12 + day.month) - (year * 12 + month)) > 1:  # дата далеко від місяця аркуша — помилка розбору
                         continue
-                    plan.setdefault(day.isoformat(), []).append({"title": title, "author": author, "where": where})
+                    plan.setdefault(day.isoformat(), []).append({"title": title, "author": author, "where": where,
+                                                                 "cell": [ws.title, ri + 1, i + 1], "orig": orig})
         if report is not None:
             got = {k: len(v) - before.get(k, 0) for k, v in plan.items() if len(v) > before.get(k, 0)}
             ks = sorted(got)
