@@ -136,6 +136,7 @@ class Plugin(Base):
         self.gpend: dict[str, dict] = {}      # 📦 групи, що чекають вибору
         self.user_stop: set = set()
         self.just_done: set = set()
+        self.force_now: dict[int, bool] = {}
         self.last_result: dict[int, tuple] = {}
         self.cur_url: dict[int, str] = {}     # посилання поточного завантаження (як надіслала людина)
         self.pend_seen: dict[int, float] = {} # коли востаннє нагадували про збережені посилання
@@ -843,6 +844,8 @@ class Plugin(Base):
             return "⬇️ Починаю", (self.live_screen(chat) if self.in_app() else None)
         if a == "st":
             return None, self.live_screen(chat)
+        if a == "force" and x in self.offers:  # ⬇️ людина свідомо хоче повторно (напр. інший формат)
+            return self.start_quick(chat, self.offers[x][1], self.instr.get(chat) or None, force=True) or "🔎 Шукаю…", None
         if a == "re" and x in self.offers:  # 🔁 повторити після помилки
             return self.start_quick(chat, self.offers[x][1]) or "🔎 Шукаю…", (self.live_screen(chat) if self.in_app() else None)
         if a == "cl" and chat in self.pending and self.pending[chat].token == x:
@@ -1131,7 +1134,14 @@ class Plugin(Base):
         lst = self.pend_list(chat)
         have = {e["url"] for e in lst}
         added = 0
+        skipped = []
         for url, instr in pairs:
+            if self.same_running(chat, url):
+                skipped.append("⏳ " + url[:60] + " — уже завантажується")
+                continue
+            if self.hist.by_url(chat, url):
+                skipped.append("♻️ " + url[:60] + " — уже скачувалось")
+                continue
             if url not in have:
                 lst.append({"url": url, "instr": instr or None, "ts": int(time.time())})
                 have.add(url)
@@ -1143,6 +1153,10 @@ class Plugin(Base):
         msg = (f"⏳ Ще завантажую попереднє. 📌 Посилання збережено" + (f" ({added})" if added > 1 else "")
                + f" — у пам'яті {len(lst)} з {self.PEND_MAX}. Щойно закінчу — запропоную завантажити"
                + (" всі разом груповим завантаженням." if len(lst) > 1 else "."))
+        if skipped:
+            msg += "\nНе додано:\n" + "\n".join(esc(x) for x in skipped)
+            if not added:
+                msg = "Нічого нового не додано:\n" + "\n".join(esc(x) for x in skipped)
         if dropped:
             msg += f"\n⚠️ Перевищено ліміт {self.PEND_MAX}: найдавніші {dropped} посилань видалено."
         elif len(lst) >= self.PEND_MAX - 5:
@@ -1290,7 +1304,8 @@ class Plugin(Base):
         for i, it in enumerate(g["items"], 1):
             mode = it["mode"] or g["mode"]
             ins = G.merge_instr(g["common"], it["own"])
-            lines.append(f"{i}. {R.icon(M.site_name(it['url']))} {G.MODE_ICON[mode]} <code>{esc(it['url'][:60])}</code>\n    {esc(G.instr_short(ins))}")
+            dup = " · ♻️ уже скачувалось — пропущу" if self.hist.by_url(chat, it["url"]) else ""
+            lines.append(f"{i}. {R.icon(M.site_name(it['url']))} {G.MODE_ICON[mode]} <code>{esc(it['url'][:60])}</code>{dup}\n    {esc(G.instr_short(ins))}")
         rows = [[(("✅ " if g["mode"] == k else "") + lab, self.cb("grm", tok, k)) for k, lab in G.MODES[:3]],
                 [(("✅ " if g["mode"] == k else "") + lab, self.cb("grm", tok, k)) for k, lab in G.MODES[3:]]]
         per = [(f"{i} {G.MODE_ICON[it['mode'] or g['mode']]}", self.cb("gri", tok, i)) for i, it in enumerate(g["items"], 1)]
@@ -1317,6 +1332,12 @@ class Plugin(Base):
             self.instr[chat] = it.get("instr") or {}
             self.last_result.pop(chat, None)
             why = ""
+            old = self.hist.by_url(chat, it["url"])
+            if old and not it.get("force"):  # ♻️ уже скачували — не дублюємо
+                g.setdefault("dups", []).append({"n": i + 1, "id": old["id"], "when": R.ts_text(old.get("ts"))})
+                g["left"].pop(0)
+                self._active(chat, done=True)
+                continue
             try:
                 await self.group_one(chat, it["url"], it.get("mode") or "auto")
                 n_sent, fl = self.last_result.get(chat, (1, []))
@@ -1343,6 +1364,12 @@ class Plugin(Base):
             for f in fails:
                 text += f"\n\n№{f['n']} · 🔗 {esc(f['url'][:200])}\n❓ {esc(f['why'])}"
             text += "\n\nУсі такі посилання — у «🧯 Биті посилання» (там можна спробувати ще раз)."
+        dups = g.get("dups", [])
+        if dups:
+            text += "\n\n♻️ <b>Уже скачувались раніше</b> (повторно не завантажував):"
+            for d in dups:
+                url = self.mh_link(d["id"])
+                text += f"\n№{d['n']} · " + (f'<a href="{esc(url)}">той допис</a>' if url else "той допис") + f" · {esc(d['when'])}"
         rows = [[("📦 Відкрити групу в архіві", self.cb("grl", g["id"]))]]
         if fails:
             rows.append([("🧯 Биті посилання", self.cb("bad"))])
@@ -1370,16 +1397,45 @@ class Plugin(Base):
         await self.download(chat, job, list(range(1, len(job.items) + 1)), status=status)
 
     # ---------------------------------------------------------------- 1 крок: посилання → файл
-    def start_quick(self, chat, url, instr=None):
+    def start_quick(self, chat, url, instr=None, force=False):
         """Повертає текст лише якщо почати не можна; інакше все показує саме повідомлення-статус.
-        instr — вказівки людини про теги («сортуй по тегу полісся», «без тегів»)."""
+        instr — вказівки людини про теги («сортуй по тегу полісся», «без тегів»); force — завантажити навіть повторно."""
+        if self.busy(chat) and self.same_running(chat, url):  # те саме вже вантажиться — повтор просто ігноруємо
+            return "⏳ Це посилання вже завантажується просто зараз — повтор пропускаю."
+        if not force:
+            old = self.hist.by_url(chat, url)
+            if old:  # ♻️ уже скачували — показуємо той допис замість повторного завантаження
+                self._bg_soft(self.already(chat, old, url, instr))
+                return ""  # повідомлення надсилає сам already()
         if self.busy(chat):  # 📌 не губимо: запам'ятовуємо й запропонуємо, щойно закінчимо
             return self.pend_add(chat, [(url, instr)])
         self.instr[chat] = instr or {}
         self.cur_url[chat] = url
+        self.force_now[chat] = force
         self.live[chat] = (f"🔎 Шукаю: {esc(M.describe_source(url))}…", [])
         self._bg(chat, self.quick(chat, url))
         return None
+
+    def same_running(self, chat, url):
+        k = R.norm_url(url)
+        cur = {R.norm_url(u) for u in (self.cur_url.get(chat), getattr(self.jobs.get(chat), "url", None)) if u}
+        g = self.gctx.get(chat)
+        if g:
+            cur |= {R.norm_url(g["items"][i]["url"]) for i in g.get("left", [])}
+        return k in cur
+
+    def _bg_soft(self, coro):
+        asyncio.get_running_loop().create_task(coro, context=contextvars.Context())
+
+    async def already(self, chat, old, url, instr=None):
+        """♻️ Повторне посилання: замість завантаження — той самий допис (відповідь на нього зі списком пов'язаного)."""
+        t = secrets.token_hex(4)
+        self.offers[t] = (chat, url)
+        self.instr[chat] = instr or {}
+        when = R.ts_text(old.get("ts"))
+        await self.host.notify(chat, f"♻️ <b>Це вже скачувалось</b> {esc(when)} — повторно не завантажую, ось той допис.",
+                               [[("⬇️ Все одно завантажити ще раз", self.cb("force", t))]])
+        await self.jump(chat, old["id"])
 
     def in_app(self):
         return self.host.extra.get("in_app", lambda: False)()
@@ -1562,6 +1618,16 @@ class Plugin(Base):
         token = M.NOTE.set(set_note)
         try:
             url = await M.resolve_share(url)
+            old = self.hist.by_url(chat, url) if not self.force_now.pop(chat, False) else None
+            if old:  # інше посилання на вже скачаний допис (напр. інший /share/…)
+                tick.cancel()
+                try:
+                    await self.host.bot().delete_message(chat, status.message_id)
+                except Exception:  # noqa: BLE001
+                    pass
+                self._active(chat, done=True)
+                await self.already(chat, old, self.cur_url.get(chat) or url, self.instr.get(chat))
+                return
             with tempfile.TemporaryDirectory(prefix="orion-media-") as work:
                 items = await M.inspect_link(url, Path(work))
         except M.URLDenied as exc:
@@ -2205,7 +2271,7 @@ class Plugin(Base):
                         if not recorded and getattr(msg_, "message_id", None):  # 🔗 запам'ятовуємо для «попереднє …»
                             recorded = True
                             rid_ = self.hist.add(chat, msg=msg_.message_id, author=R.norm_author(who), who=who, alink=link, site=site,
-                                          url=str(job.url), title=(desc or item.title or "")[:80], topics=rel_t, geos=rel_g, langs=rel_l, first=rel_f, geotag=geotag,
+                                          url=str(job.url), src_url=self.cur_url.get(chat) or "", title=(desc or item.title or "")[:80], topics=rel_t, geos=rel_g, langs=rel_l, first=rel_f, geotag=geotag,
                                           **({"group": gx["id"], "gi": gx["i"]} if gx else {}), **({"notag": True} if rel is None else {}))
                             await self._cat_button(chat, msg_.message_id, rid_, rel_btns)
                         sent.append(out.name)

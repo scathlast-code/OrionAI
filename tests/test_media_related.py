@@ -109,3 +109,12 @@ def test_search(tmp_path):
     assert [e["msg"] for e in res] == [1] and "📍 Карпати" in got
     assert [e["msg"] for e in h.search(1, "від tvoe_v_v")[1]] == [2]
     assert len(h.search(1, "сніг")[1]) == 2
+
+
+def test_norm_url_and_by_url(tmp_path):
+    assert R.norm_url("https://threads.net/share/_p0MF6MLV/?igsh=1") == R.norm_url("https://www.threads.com/share/_p0MF6MLV")
+    assert R.norm_url("https://youtu.be/abc123") == R.norm_url("https://www.youtube.com/watch?v=abc123&t=5")
+    h = R.History(tmp_path / "h.json")
+    h.add(1, msg=1, url="https://www.threads.com/@o/post/ABC", src_url="https://www.threads.com/share/X")
+    assert h.by_url(1, "https://threads.net/share/X/")["msg"] == 1 and h.by_url(1, "https://threads.com/@o/post/ABC?x=1")
+    assert h.by_url(1, "https://threads.com/share/Y") is None

@@ -321,6 +321,27 @@ def stem_rx(name):
     return re.compile(B + r"\w*\W+".join(parts), re.I)
 
 
+def norm_url(url):
+    """Одне й те саме посилання в різних виглядах -> однаковий ключ (без www/m., ?igsh=…, слеша в кінці; threads.net = threads.com)."""
+    from urllib.parse import parse_qs, urlsplit
+    try:
+        u = urlsplit(str(url).strip())
+    except ValueError:
+        return str(url)
+    host = (u.hostname or "").lower()
+    for pre in ("www.", "m.", "mobile.", "web."):
+        if host.startswith(pre):
+            host = host[len(pre):]
+    host = {"threads.net": "threads.com", "twitter.com": "x.com", "youtu.be": "youtube.com"}.get(host, host)
+    path = u.path.rstrip("/")
+    keep = ""
+    if host == "youtube.com":
+        v = parse_qs(u.query).get("v", [""])[0] or (path.strip("/") if u.hostname and "youtu.be" in u.hostname else "")
+        if v:
+            path, keep = "/watch", "v=" + v
+    return f"{host}{path}" + (f"?{keep}" if keep else "")
+
+
 def norm_author(name):
     return re.sub(r"[^\w]", "", str(name or "").lower().lstrip("@"))
 
@@ -382,6 +403,14 @@ class History:
                     e.pop("notag", None)
                     self._save(data)
                     return self._fix(dict(e))
+        return None
+
+    def by_url(self, chat, *urls):
+        """Чи це вже скачували (за будь-яким із посилань: як надіслали чи справжнє після переадресації)."""
+        keys = {norm_url(u) for u in urls if u}
+        for e in reversed(self.items(chat)):
+            if keys & {norm_url(e.get("url", "")), norm_url(e.get("src_url", ""))}:
+                return e
         return None
 
     def by_msg(self, chat, msg_id):
