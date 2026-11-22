@@ -3088,6 +3088,7 @@ PLUGINS = orion_plugins.Registry(orion_plugins.Host(
            "chat_answer": lambda chat, text: _plugin_chat_answer(chat, text),
            "real_bot": lambda: tg_app.bot if tg_app else None, "hubclient": hub,
            "touched_since": lambda chat, t: LAST_CB.get(chat, 0) > t,
+           "utm_screen": lambda chat: on_utm_screen(chat),
            "miniapp_url": miniapp_url(),
            "awaiting": lambda chat: chat in AWAIT or CM.wants_text(chat),
            "node_active": lambda: NODE.active,
@@ -7465,6 +7466,15 @@ UTM_MENU = [[("➕ Додати посилання", "m:utmadd")], [("📈 Кл�
             [("📗 Excel", "m:utmx"), ("📘 Word", "m:utmd")], [("🗂 Резервні формати", "m:utmres")]]
 
 
+def on_utm_screen(chat_id):
+    """Чи людина зараз у меню «UTM-мітки» (там надіслане посилання — для мітки, а не для завантаження)."""
+    try:
+        cur = L._shown.get((chat_id, L_SCOPE.get())) or L.current(chat_id) or ""
+    except Exception:  # noqa: BLE001
+        return False
+    return str(cur).startswith("m:utm")
+
+
 def scr_utm(chat_id):
     text = ("🔗 <b>UTM-мітки</b>\n"
             "<blockquote expandable>ℹ️ Довідка\n"
@@ -11446,6 +11456,13 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         req = translate_mod.parse_request(msg.text, (r0.text or r0.caption) if r0 else None)
         if req:
             return await do_translate(update, ctx, *req)
+    if msg.text and chat_id not in AWAIT and on_utm_screen(chat_id):  # 🔗 у меню «UTM-мітки» посилання = додати мітку
+        import topicsort as _TS0
+        _m0 = _TS0.URL_RE.search(msg.text)
+        if _m0:
+            _rest0 = _TS0.URL_RE.sub("", msg.text).split()
+            ask_input(chat_id, "utmurl")  # «посилання тег» — одразу з тегом, як у меню
+            return await handle_awaited(update, ctx, _m0.group(0).rstrip(").,»") + (f" {_rest0[0]}" if len(_rest0) == 1 else ""))
     if await PLUGINS.intercept(update, ctx):  # 🔌 режим прийому новинарні, посилання на стікери тощо
         return
     if not msg.text and not msg.photo:
