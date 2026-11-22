@@ -35,3 +35,15 @@ def test_pending_limit(tmp_path):
     assert len(p.pend_list(1)) == 50
     p.pend_done(1, "https://x.com/b/0")
     assert len(p.pend_list(1)) == 49
+
+
+def test_bad_links_limit(tmp_path):
+    from plugins.media import Plugin
+    p = Plugin.__new__(Plugin)
+    p.dir = tmp_path
+    for i in range(205):
+        p.bad_add(1, f"https://x.com/{i}", "приватне")
+    lst = p.bad_list(1)
+    assert len(lst) == 200 and lst[0]["url"] == "https://x.com/5"
+    p.bad_ok(1, "https://x.com/204")
+    assert p.bad_list(1)[-1]["ok"]

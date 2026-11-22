@@ -86,3 +86,16 @@ def test_user_tags_saved_and_matched(tmp_path):
     assert h.match_user("Туман на Поліссі зранку")["g"] == [k]
     h.drop_user("g", k)
     assert h.user_tags() == []
+
+
+def test_emoji_no_false_matches():
+    t = keys(R.tags("Пів годинки і Карпати солідно забіліли😍❄️🌨")[0])
+    assert t == ["снігопад"]  # не «дощ» і не «спека» через невидимі знаки в емодзі
+    assert keys(R.tags("ллє як з відра")[0]) == ["дощ"] and keys(R.tags("все засипало за ніч")[0]) == ["снігопад"]
+
+
+def test_manual_update(tmp_path):
+    h = R.History(tmp_path / "h.json")
+    rid = h.add(1, msg=5, author="a", topics=[], geos=[], notag=True)
+    e = h.update(1, rid, topics=["снігопад"])
+    assert e["topics"] == ["снігопад"] and "notag" not in e and h.by_msg(1, 5)["id"] == rid
