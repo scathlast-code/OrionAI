@@ -44,6 +44,23 @@ LIVE = (60, 180, 300)
 MEDIA_HOSTS = ("youtube.com", "youtu.be", "instagram.com", "tiktok.com", "facebook.com", "fb.watch", "threads.net",
                "threads.com", "x.com", "twitter.com", "vimeo.com", "reddit.com", "pinterest.com", "pin.it", "twitch.tv",
                "dailymotion.com", "soundcloud.com", "tumblr.com", "likee.video", "snapchat.com", "rumble.com", "bsky.app")
+# Соцмережі (і їхні веб- та мобільні версії — m., mobile., web. теж підходять): посилання сюди — одразу завантажуємо.
+# Посилання на будь-які інші сайти (зокрема відеосайти й файлообмінники) — бот питає, що з ними робити.
+SOCIAL_HOSTS = ("youtube.com", "youtu.be", "instagram.com", "tiktok.com", "facebook.com", "fb.watch", "fb.com", "threads.net",
+                "threads.com", "x.com", "twitter.com", "reddit.com", "redd.it", "pinterest.com", "pin.it", "tumblr.com",
+                "snapchat.com", "bsky.app", "likee.video", "linkedin.com", "t.me", "telegram.me")
+TG_POST = re.compile(r"^https?://(?:www\.)?(?:t|telegram)\.me/(?:s/|c/)?[\w]+/\d+", re.I)
+
+
+def is_social(url):
+    host = (M.urlsplit(url).hostname or "").lower()
+    if not M.domain_matches(host, SOCIAL_HOSTS):
+        return False
+    if M.domain_matches(host, ("t.me", "telegram.me")):  # Telegram — лише конкретний допис каналу, не запрошення чи профіль
+        return bool(TG_POST.match(url))
+    return True
+
+
 QUICK_MAX = 10  # стільки елементів (альбом, карусель) завантажуємо одразу, без меню
 URL_ONLY = re.compile(r"^\s*(https?://\S+)\s*$")
 
@@ -806,8 +823,9 @@ class Plugin(Base):
             m = (None, mm[0].rstrip(").,]»")) if instr else None
         if not m or self.host.extra.get("awaiting", lambda c: False)(msg.chat_id):
             return False
-        host = (M.urlsplit(m[1]).hostname or "").lower()
-        if not M.domain_matches(host, MEDIA_HOSTS):
+        if not is_social(m[1]):  # інші сайти — бот питає, що робити (🧭 пропозиції)
+            return False
+        if self.host.extra.get("utm_screen", lambda c: False)(msg.chat_id):  # у меню «UTM-мітки» посилання — для мітки, не для завантаження
             return False
         toast = self.start_quick(msg.chat_id, m[1], instr)
         if instr and not toast:
