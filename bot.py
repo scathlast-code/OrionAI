@@ -6279,6 +6279,7 @@ def scr_devbk(chat_id, key=None):
             rows.append([(f"{title.split(' (')[0]} · {len(h)}", f"m:devbk:{k}")])
         rows.append([("📸 Зняти зараз", "m:devbk:_now"), ("« Копії", "m:backup")])
         rows.append([("🌐 Веб-версія з живими даними (архів)", "m:devweb")])
+        rows.append([("📒 Журнал розробки й промти", "m:devlog")])
         return "\n".join(lines), rows
     title = secs.get(key, (key, []))[0]
     hist = list(reversed(idx.get(key) or []))
@@ -9215,6 +9216,17 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
             screen = scr_devbk_item(chat_id, arg, int(parts[3]))
         else:
             screen = scr_devbk(chat_id, arg or None)
+    elif a == "devlog":  # 📒 журнал: зроблене, помилки, дозволи, налаштування сервісів, черга, промти дослівно, перелік файлів
+        if not is_admin_id(chat_id):
+            toast, screen = "Лише для власників", None
+        else:
+            sent = 0
+            for f in ("31-zhurnal.md", "30-promty.md", "32-faily.md"):
+                pth = Path(__file__).resolve().parent / "docs" / f
+                if pth.exists():
+                    await ctx.bot.send_document(chat_id, InputFile(pth.open("rb"), filename=f))
+                    sent += 1
+            toast, screen = f"📒 Надіслано файлів: {sent}", None
     elif a == "devweb" and is_admin_id(chat_id):  # 🌐 веб-версія бота й мініапп з сьогоднішніми даними + повний код — архівом у чат
         async def build_web():
             import webdemo

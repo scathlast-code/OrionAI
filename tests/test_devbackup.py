@@ -15,7 +15,7 @@ def test_snapshot_per_section_and_restore(tmp_path, monkeypatch):
     assert D.snapshot() == []  # нічого не змінилось — нових знімків немає
     (root / "plugins" / "weather" / "__init__.py").write_text("w2-broken")
     again = D.snapshot()
-    assert again == ["🌤 Погода"]  # лише змінений розділ
+    assert again[0] == "🌤 Погода" and again[1:] == [D.sections()["full"][0]]  # змінений розділ + повний знімок поряд
     old = D.index()["pl_weather"][0]["file"]
     assert D.diff_names("pl_weather", old) == ["plugins/weather/__init__.py"]
     D.restore("pl_weather", old)
