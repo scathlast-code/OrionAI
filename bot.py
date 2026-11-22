@@ -12618,6 +12618,11 @@ async def main():
             except Exception:  # noqa: BLE001
                 log.exception("перевірка кластера під час запуску")
             log.info("кластер: «%s» %s", NODE.name, "активний" if NODE.active else "у резерві")
+        with closing(db()) as _con:  # 🛟 спершу відновлюємо дані, потім приймаємо повідомлення —
+            empty = lifeboat.db_is_empty(_con)  # інакше люди з доступом на хвилину бачать «це приватний бот»
+        if not DB_EXISTED or empty:
+            when = await lifeboat_restore(tg_app.bot)
+            log.info("🛟 рятувальна копія: %s", f"відновлено дані від {when}" if when else "не знадобилась або недоступна")
         await apply_receiving()
         BACKGROUND.add(asyncio.create_task(task_worker()))
         # forget_strangers() більше не викликаємо: власник вирішив зберігати все (крім номерів карток)
@@ -12625,10 +12630,6 @@ async def main():
         n_state = RSTATE.load()
         if n_state:
             log.info("🛟 стан у пам'яті повернуто: %s частин", n_state)
-        with closing(db()) as _con:
-            empty = lifeboat.db_is_empty(_con)
-        if not DB_EXISTED or empty:
-            await lifeboat_restore(tg_app.bot)
         BACKGROUND.add(asyncio.create_task(lifeboat_loop()))
         BACKGROUND.add(asyncio.create_task(premium_loop()))
         ACTLOG.add(0, "система", "запуск бота", "нова база" if not DB_EXISTED else "")

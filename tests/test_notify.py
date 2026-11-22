@@ -8,9 +8,10 @@ def test_modes_cycle_and_apply():
     store = {}
     notify.setup(lambda c: store.get(c, {}), lambda c, v: store.__setitem__(c, v))
     assert notify.mode(5, "backup") == "silent"
-    assert notify.cycle(5, "morning") == "silent"
+    assert notify.mode(5, "morning") == "silent"  # ранкове зведення — тихо за замовчуванням
     assert notify.cycle(5, "morning") == "off"
     assert notify.cycle(5, "morning") == "loud"
+    assert notify.cycle(5, "morning") == "silent"
     assert notify.cycle(5, "tasks") == "silent"
     assert notify.cycle(5, "tasks") == "loud"  # не вимикається
     with notify.kind("tasks"):

@@ -18,7 +18,7 @@ KIND = contextvars.ContextVar("notify_kind", default="other")
 KINDS = {
     "tasks": ("🧠 Відповіді, що готувались у фоні", False, "loud"),
     "media": ("📥 Завантаження", False, "loud"),
-    "morning": ("🌅 Ранкові теми дня й погода", True, "loud"),
+    "morning": ("🌅 Ранкові теми дня й погода", True, "silent"),  # власник: ранкове зведення — беззвучно
     "warn": ("📅 Попередження про важливі дні", True, "loud"),
     "news": ("📰 Новинарня: новини, чернетки, звіти", False, "loud"),
     "space": ("🤝 Спільні простори", True, "loud"),
