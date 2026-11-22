@@ -26,7 +26,9 @@ def test_pending_limit(tmp_path):
     from plugins.media import Plugin
     p = Plugin.__new__(Plugin)
     p.dir = tmp_path
-    p.pend_seen = {}
+    p.pend_seen, p.cur_url, p.jobs, p.gctx = {}, {}, {}, {}
+    from plugins.media import related as R
+    p.hist = R.History(tmp_path / "h.json")
     msg = p.pend_add(1, [(f"https://x.com/a/{i}", None) for i in range(48)])
     assert "майже повна" in msg
     msg = p.pend_add(1, [(f"https://x.com/b/{i}", None) for i in range(5)])
