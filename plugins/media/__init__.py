@@ -30,6 +30,7 @@ from pathlib import Path
 
 from plugins import Plugin as Base, esc
 from . import media as M
+from . import related as R
 from .common import JobError, TELEGRAM_IN, TELEGRAM_OUT, run, safe_name
 from .metadata import REPORT_ONLY, clean, report, suffix
 from .bigsend import BIG_LIMIT, Big, Progress
@@ -100,7 +101,7 @@ class Plugin(Base):
     summary = ("Завантаження відео, фото, аудіо й тексту дописів за посиланням із YouTube, Instagram, TikTok, Facebook, "
                "Threads, X, Telegram, Reddit, Vimeo та сотень інших сайтів: якість, MP3, GIF, без звуку, озвучка, субтитри, "
                "таймкоди, запис ефіру, ZIP. А також звіт і очищення метаданих власних файлів.")
-    VIEWS = {"ck", "tools", "help"}
+    VIEWS = {"ck", "tools", "help", "arc", "arcl", "rls"}
 
     def __init__(self, host):
         super().__init__(host)
@@ -113,6 +114,7 @@ class Plugin(Base):
         self.offers: dict[str, tuple[int, str]] = {}
         self.live: dict[int, tuple[str, list]] = {}
         self.got: dict[int, list] = {}  # чат -> файли останнього завантаження (для перегляду в Mini App)  # чат -> останній стан швидкого завантаження (для Mini App)
+        self.hist = R.History(self.dir / "history.json")  # 🔗 історія скачаного: автор · тема · місце
         self.big = Big(self.dir, host.token)  # 🚀 файли до 2 ГБ через MTProto
         self.commands = [("media", self.cmd_media, "Медіа: завантажити за посиланням")]
 
@@ -155,6 +157,125 @@ class Plugin(Base):
         rows.append([("« Медіа", self.cb())])
         return t, rows
 
+    # ================================================================ 🔗 пов'язане скачане
+    REL = (("a", "👤 Автор"), ("t", "🏷 Тема (і «без теми»)"), ("g", "📍 Місце (і «без місця»)"), ("f", "🆕 Вперше"))
+
+    def rel_on(self, chat, k):
+        return (self.pref(chat, "rel", {}) or {}).get(k, True)
+
+    def mh_link(self, rid):
+        try:
+            u = self.host.bot().username
+        except Exception:  # noqa: BLE001
+            u = ""
+        return f"https://t.me/{u}?start=mh_{rid}" if u else ""
+
+    def related_parts(self, chat, who, site, text):
+        """-> (рядок для підпису HTML, його видима довжина, кнопки автора, теми, місця)."""
+        topics, geos = R.tags(text)
+        by_site, by_geo, by_topic, extra, first = self.hist.related(chat, who, topics, geos)
+        pairs = (list(by_geo.items()) if self.rel_on(chat, "g") else []) + (list(by_topic.items()) if self.rel_on(chat, "t") else [])
+        pairs += [(k, e) for k, e in extra.items() if (k == "notopic" and self.rel_on(chat, "t")) or (k == "nogeo" and self.rel_on(chat, "g"))
+                  or (k == "first" and self.rel_on(chat, "f"))]
+        links, seen = [], set()
+        for k, e in pairs:
+            label = "попереднє " + (R.GEO_LABEL.get(k) or R.TOPIC_LABEL.get(k) or R.EXTRA_LABEL.get(k, ""))
+            url = self.mh_link(e["id"])
+            if url and e["id"] not in seen:  # одне й те саме повідомлення — одним посиланням
+                seen.add(e["id"])
+                links.append((label, url))
+        line = ("\n↩️ " + " · ".join(f'<a href="{esc(u)}">{esc(lab)}</a>' for lab, u in links)) if links else ""
+        vis = len("\n↩️ " + " · ".join(lab for lab, _ in links)) if links else 0
+        if first and self.rel_on(chat, "f"):  # 🆕 тема чи місце вперше (автор «вперше» не позначається)
+            note = "\n🆕 Вперше: " + R.first_text(first)
+            line, vis = note + line, vis + len(note)
+        buttons = []
+        if self.rel_on(chat, "a"):
+            for st, e in by_site.items():
+                url = self.mh_link(e["id"])
+                if url:
+                    buttons.append((f"{R.icon(st)} Попереднє відео автора", url))
+        return line, vis, buttons, topics, geos, [f"{a}:{b}" for a, b in first]
+
+    async def jump(self, chat, rid):
+        """↩️ Перехід до раніше скачаного: відповідь на старе повідомлення (дотик до цитати — і ви там)."""
+        bot = self.host.bot()
+        e = self.hist.get(chat, rid)
+        if not e:
+            return await self.host.notify(chat, "Цього запису в історії скачаного вже немає.")
+        what = " · ".join(x for x in [e.get("who") and "👤 " + esc(e["who"]), esc(e.get("site") or ""),
+                                       esc(R.ts_text(e.get("ts")))] if x)
+        try:
+            await bot.send_message(chat, f"⬆️ <b>Ось воно</b> — торкніться цитати, щоб перейти\n{what}", parse_mode="HTML",
+                                   reply_to_message_id=e["msg"], allow_sending_without_reply=False)
+        except Exception:  # noqa: BLE001 — повідомлення видалене з чату
+            link = f'\n<a href="{esc(e["url"])}">🔗 Допис</a>' if str(e.get("url", "")).startswith("http") else ""
+            await self.host.notify(chat, f"⚠️ Це повідомлення вже видалене з чату.\n{what}{link}")
+
+    def arc_screen(self, chat):
+        g = self.hist.groups(chat)
+        n = len(self.hist.items(chat))
+        t = ("🗂 <b>Архів скачаного</b>\n<blockquote expandable>ℹ️ Як це працює\nКожен скачаний файл бот запам'ятовує: автора, "
+             "соцмережу, тему й місце (з тексту допису). Під новим файлом з'являються посилання «попереднє з Карпат», "
+             "«попереднє зі снігопадом» і кнопки «попереднє відео автора» окремо для кожної соцмережі (іконкою). Дотик — і бот "
+             "показує те повідомлення. Кнопка «🔗 Допис» лишається як була — це оригінал. Що показувати — у «⚙️ Що пов'язувати».</blockquote>"
+             f"\n\nЗаписів: {n} · авторів: {len(g['a'])} · тем: {len(g['t'])} · місць: {len(g['g'])}")
+        rows = [[(f"👤 Автори · {len(g['a'])}", self.cb("arcl", "a")), (f"🏷 Теми · {len(g['t'])}", self.cb("arcl", "t")),
+                 (f"📍 Місця · {len(g['g'])}", self.cb("arcl", "g"))],
+                [(f"{R.EXTRA_NAME[k]} · {len(g['x'][k])}", self.cb("arcl", "x", k)) for k in ("notopic", "nogeo", "first") if g["x"].get(k)],
+                [("⚙️ Що пов'язувати", self.cb("rls"))], [("« Медіа", self.cb())]]
+        return t, [r for r in rows if r]
+
+    def arc_keys(self, chat, kind):
+        g = self.hist.groups(chat)[kind]
+        return sorted(g, key=lambda k: (-len(g[k]), k)), g
+
+    def arc_list(self, chat, kind, idx=None):
+        keys, g = self.arc_keys(chat, kind)
+        name = {"a": "👤 Автори", "t": "🏷 Теми", "g": "📍 Місця"}[kind]
+        if idx is None or not (0 <= idx < len(keys)):
+            t = f"🗂 <b>{name}</b>\n\n" + ("Поки порожньо — з'явиться після завантажень." if not keys else "Оберіть, щоб побачити все скачане:")
+            rows, line = [], []
+            for i, k in enumerate(keys[:60]):
+                es = g[k]
+                lab = (es[-1].get("who") or k) if kind == "a" else (R.TOPIC_NAME.get(k, k) if kind == "t" else R.GEO_NAME.get(k, k))
+                line.append((f"{lab[:24]} · {len(es)}", self.cb("arcl", kind, i)))
+                if len(line) == 2:
+                    rows.append(line)
+                    line = []
+            if line:
+                rows.append(line)
+            rows.append([("« Архів", self.cb("arc"))])
+            return t, rows
+        k = keys[idx]
+        es = list(reversed(g[k]))[:25]
+        lab = (es[0].get("who") or k) if kind == "a" else (R.TOPIC_NAME.get(k, k) if kind == "t" else R.GEO_NAME.get(k, k))
+        lines = [f"🗂 <b>{esc(lab)}</b> · {len(g[k])}", ""]
+        for e in es:
+            url = self.mh_link(e["id"])
+            title = esc((e.get("title") or "файл")[:60])
+            head = f'<a href="{esc(url)}">{title}</a>' if url else title
+            lines.append(f"• {head} · {R.icon(e.get('site'))} {esc(e.get('who') or '')} · {esc(R.ts_text(e.get('ts')))}")
+        return "\n".join(lines)[:4000], [[("« " + name.split(" ", 1)[1], self.cb("arcl", kind))], [("« Архів", self.cb("arc"))]]
+
+    def arc_extra(self, chat, k):
+        es = list(reversed(self.hist.groups(chat)["x"].get(k, [])))
+        lines = [f"🗂 <b>{R.EXTRA_NAME[k]}</b> · {len(es)}", ""]
+        for e in es[:25]:
+            url = self.mh_link(e["id"])
+            title = esc((e.get("title") or "файл")[:60])
+            head = f'<a href="{esc(url)}">{title}</a>' if url else title
+            fx = (" · " + esc(R.first_text([tuple(f.split(":", 1)) for f in e["first"]]))) if k == "first" and e.get("first") else ""
+            lines.append(f"• {head} · {R.icon(e.get('site'))} {esc(e.get('who') or '')}{fx} · {esc(R.ts_text(e.get('ts')))}")
+        return "\n".join(lines)[:4000], [[("« Архів", self.cb("arc"))]]
+
+    def rel_screen(self, chat):
+        t = ("⚙️ <b>Що пов'язувати з новими завантаженнями</b>\n\nУвімкнене з'являється під кожним новим файлом: "
+             "посилання на попереднє з тим самим місцем чи темою, кнопки на попереднє відео автора. Налаштування особисте.")
+        rows = [[(("✅ " if self.rel_on(chat, k) else "▫️ ") + lab, self.cb("rlt", k))] for k, lab in self.REL]
+        rows.append([("« Архів", self.cb("arc"))])
+        return t, rows
+
     # ================================================================ екрани
     def home(self, chat):
         busy = self.busy(chat)
@@ -172,6 +293,7 @@ class Plugin(Base):
         if chat in self.jobs:
             rows.insert(1, [("📋 Останній знайдений набір", self.cb("menu", self.jobs[chat].token))])
         rows += [[(f"⭐ Якість за замовчуванням: {self.dq_label(chat)}", self.cb("dq"))],
+                 [("🗂 Архів скачаного: автори · теми · місця", self.cb("arc"))],
                  [("🍪 Входи на сайти (cookies)", self.cb("ck")), ("🛠 Інструменти", self.cb("tools"))],
                  [("🩺 Перевірити, які сайти працюють", self.cb("chk"))]]
         return t, rows
@@ -283,6 +405,19 @@ class Plugin(Base):
         if a == "dqs" and x in dict(self.DQ):
             self.set_pref(chat, "q", x)
             return f"⭐ Тепер: {self.dq_label(chat)}", self.dq_screen(chat)
+        if a == "arc":
+            return None, self.arc_screen(chat)
+        if a == "arcl" and x == "x" and y in R.EXTRA_NAME:
+            return None, self.arc_extra(chat, y)
+        if a == "arcl" and x in ("a", "t", "g"):
+            return None, self.arc_list(chat, x, int(y) if y.isdigit() else None)
+        if a == "rls":
+            return None, self.rel_screen(chat)
+        if a == "rlt" and x in dict(self.REL):
+            cur = dict(self.pref(chat, "rel", {}) or {})
+            cur[x] = not self.rel_on(chat, x)
+            self.set_pref(chat, "rel", cur)
+            return ("Увімкнено" if cur[x] else "Вимкнено"), self.rel_screen(chat)
         if a == "oth":  # 👤 інші відео автора — список з його каналу
             job = self.job_by(chat, x)
             url = self.author_url(job.items[0].info) if job and job.items else ""
@@ -1303,9 +1438,11 @@ class Plugin(Base):
                     # Підпис HTML: довгі адреси — короткими посиланнями «Автор» / «Допис»; ліміт Telegram — 1024 видимі символи
                     who_html = (f'<a href="{esc(link)}">{esc(who)}</a>' if link else esc(who)) if who else ""
                     site = M.site_name(job.url) if str(job.url).startswith("http") else (job.__dict__.get("src") or "")
+                    rel_line, rel_len, rel_btns, rel_t, rel_g, rel_f = self.related_parts(chat, who, site, f"{desc}\n{item.title}")
                     tail = (f"\n\n👤 {who_html}" if who else "\n") + (f" · {esc(site)}" if site else "") \
-                        + (f' · <a href="{esc(job.url)}">🔗 Допис</a>' if str(job.url).startswith("http") else "") + song_html
-                    tail_len = len(f"\n\n👤 {who} · {site} · 🔗 Допис") + len(re.sub(r"<[^>]+>|&\w+;", "", song_html))
+                        + (f' · <a href="{esc(job.url)}">🔗 Допис</a>' if str(job.url).startswith("http") else "") + song_html + rel_line
+                    tail_len = len(f"\n\n👤 {who} · {site} · 🔗 Допис") + len(re.sub(r"<[^>]+>|&\w+;", "", song_html)) + rel_len
+                    recorded = False
                     first = True
                     for out in outs + tracks:
                         cap = ""
@@ -1329,7 +1466,12 @@ class Plugin(Base):
 
                         async def on_up(done, total, up=up):
                             await stage(f"{up}\n{bar(done, total)}")
-                        await self.send_media(chat, out, cap, on_progress=on_up)
+                        msg_ = await self.send_media(chat, out, cap, on_progress=on_up,
+                                                     markup=None if recorded else self._url_markup([[b] for b in rel_btns]))
+                        if not recorded and getattr(msg_, "message_id", None):  # 🔗 запам'ятовуємо для «попереднє …»
+                            recorded = True
+                            self.hist.add(chat, msg=msg_.message_id, author=R.norm_author(who), who=who, alink=link, site=site,
+                                          url=str(job.url), title=(desc or item.title or "")[:80], topics=rel_t, geos=rel_g, first=rel_f)
                         sent.append(out.name)
                         kept = self.keep(out)
                         if kept:
@@ -1427,12 +1569,18 @@ class Plugin(Base):
         await f.download_to_drive(path, read_timeout=60)
         return path
 
-    async def send_media(self, chat, path, caption_html="", on_progress=None):
+    def _url_markup(self, rows):
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        return InlineKeyboardMarkup([[InlineKeyboardButton(t, url=u) for t, u in row] for row in rows]) if rows else None
+
+    async def send_media(self, chat, path, caption_html="", on_progress=None, markup=None):
         """Відео — як відео (з плеєром), фото — як фото, GIF — анімацією, аудіо — треком; решта — файлом."""
         ext = path.suffix.lower()
         size = path.stat().st_size
         bot = self.host.bot()
         kw = dict(caption=caption_html, parse_mode="HTML", read_timeout=300, write_timeout=300)
+        if markup:
+            kw["reply_markup"] = markup
         meta = {}
         thumb = await M.make_thumb(path, path.parent)  # 🖼 передперегляд — щоб видно, що це за файл, і в чаті, і в завантаженому
         tkw = {"thumbnail": thumb.read_bytes()} if thumb else {}

@@ -10652,6 +10652,13 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if is_admin_id(user.id) and not ctx.args:  # 🧰 «Старт» після оновлення — знімок коду розділів, що змінились (тихо, у фоні)
         import devbackup as DB_
         asyncio.get_running_loop().run_in_executor(None, DB_.snapshot, "старт")
+    m_mh = re.fullmatch(r"mh_(\d+)", ctx.args[0]) if ctx.args else None
+    if m_mh and PLUGINS.get("med") and hasattr(PLUGINS.get("med"), "jump"):  # ↩️ «попереднє з Карпат / від автора»
+        try:
+            await update.message.delete()  # службове «/start …» не засмічує чат
+        except Exception:  # noqa: BLE001
+            pass
+        return await PLUGINS.get("med").jump(update.effective_chat.id, int(m_mh.group(1)))
     m_obb = re.fullmatch(r"obb_([a-z]+)_(\d{8})", ctx.args[0]) if ctx.args else None
     if m_obb and PLUGINS.get("news") and hasattr(PLUGINS.get("news"), "jump"):  # ↗️ «відкрити X» → кнопка X, що блимає
         try:
