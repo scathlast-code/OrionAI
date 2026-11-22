@@ -42,6 +42,11 @@ def sections():
     taken = {p for _t, fs in out.values() for p in fs}
     rest = sorted(p for p in ROOT.glob("*.py") if p not in taken and p.name != "__init__.py")
     out["modules"] = ("🧱 Службові модулі (решта .py)", rest)
+    extra = [ROOT / f for f in ("requirements.txt", "Procfile", "railway.json", "nixpacks.toml", "Dockerfile", ".gitignore") if (ROOT / f).exists()]
+    docs = sorted((ROOT / "docs").glob("*.md")) + sorted((ROOT / "tools").glob("*.py")) if (ROOT / "docs").exists() else []
+    out["docs"] = ("📒 Журнал, промти й документація", docs)
+    allf = sorted({p for _t, fs in out.values() for p in fs} | set(extra))
+    out["full"] = ("📦 Повний знімок (увесь код, журнал, налаштування збирання)", allf)  # повний — поряд із частковими
     return out
 
 
