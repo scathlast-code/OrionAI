@@ -9152,7 +9152,8 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
             med = PLUGINS.get("med")
             url = TS.URL_RE.search(src["text"]).group(0)
             if med and hasattr(med, "start_quick"):
-                toast, screen = med.start_quick(chat_id, url) or "⬇️ Завантажую — стан і файл прийдуть сюди", None
+                from plugins.media import related as _rel
+                toast, screen = med.start_quick(chat_id, url, _rel.parse_instr(src["text"])) or "⬇️ Завантажую — стан і файл прийдуть сюди", None
             else:
                 toast, screen = "Завантаження вимкнене", None
         elif act in ("chk", "qr"):  # 🛡 куди веде посилання / 🔳 QR-код
