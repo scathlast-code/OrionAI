@@ -119,7 +119,7 @@ class Plugin(Base):
     summary = ("Завантаження відео, фото, аудіо й тексту дописів за посиланням із YouTube, Instagram, TikTok, Facebook, "
                "Threads, X, Telegram, Reddit, Vimeo та сотень інших сайтів: якість, MP3, GIF, без звуку, озвучка, субтитри, "
                "таймкоди, запис ефіру, ZIP. А також звіт і очищення метаданих власних файлів.")
-    VIEWS = {"ck", "tools", "help", "arc", "arcl", "rls", "utg", "gra", "grl", "pend", "bad", "ted"}
+    VIEWS = {"ck", "tools", "help", "arc", "arcl", "rls", "utg", "gra", "grl", "pend", "bad", "ted", "fnd"}
 
     def __init__(self, host):
         super().__init__(host)
@@ -386,7 +386,8 @@ class Plugin(Base):
              "кожної соцмережі (іконкою). Порожніх посилань немає. Дотик — і бот показує те повідомлення. Кнопка «🔗 Допис» — оригінал. "
              "Що показувати — у «⚙️ Що пов'язувати».</blockquote>"
              f"\n\nЗаписів: {n} · авторів: {len(g['a'])} · тем: {len(g['t'])} · локацій: {len(g['g'])} · мов: {len(g['l'])}")
-        rows = [[(f"👤 Автори · {len(g['a'])}", self.cb("arcl", "a")), (f"🏷 Теми · {len(g['t'])}", self.cb("arcl", "t"))],
+        rows = [[("🔎 Знайти в скачаному", self.cb("fnd"))],
+                [(f"👤 Автори · {len(g['a'])}", self.cb("arcl", "a")), (f"🏷 Теми · {len(g['t'])}", self.cb("arcl", "t"))],
                 [(f"📍 Локації · {len(g['g'])}", self.cb("arcl", "g")), (f"🗣 Мови · {len(g['l'])}", self.cb("arcl", "l"))],
                 [(f"{R.EXTRA_NAME[k]} · {len(g['x'][k])}", self.cb("arcl", "x", k)) for k in ("notopic", "nogeo", "first") if g["x"].get(k)],
                 [("📦 Групи", self.cb("grl")), ("✍️ Мої теги", self.cb("utg"))], [("⚙️ Що пов'язувати", self.cb("rls"))], [("« Медіа", self.cb())]]
@@ -661,6 +662,10 @@ class Plugin(Base):
             self.gctx[chat] = {"id": gid, "items": items, "left": list(range(len(items))), "n": len(items)}
             self._bg(chat, self.group_run(chat))
             return f"📦 Група №{gid}: починаю", None
+        if a == "fnd":
+            self.ask(chat, "fnd")
+            return None, ("🔎 <b>Що знайти в скачаному?</b>\n\nНапишіть тему, місце, автора — можна разом, як зручно:\n"
+                          "«снігопад з Карпат», «усе від oleno4ka», «Полісся озеро», «англійською про спорт».", [[("« Архів", self.cb("arc"))]])
         if a == "ted" and x.isdigit():
             return None, self.ted_screen(chat, int(x))
         if a == "tdel" and x.isdigit() and y[:1] in ("t", "g", "l") and y[1:].isdigit():
@@ -887,6 +892,8 @@ class Plugin(Base):
         return None, self.job_screen(chat)
 
     async def on_text(self, update, ctx, chat, key, data, text):
+        if key == "fnd":
+            return None, self.find_screen(chat, text)
         if key == "tadd":
             toast = await self.ted_apply(chat, int(data), text)
             return toast, self.ted_screen(chat, int(data))
@@ -983,6 +990,11 @@ class Plugin(Base):
         msg = update.message
         if not msg or msg.chat.type != "private" or not msg.text:
             return False
+        m_find = re.match(r"(?is)\s*(?:знайди|пошукай|покажи|шукай)\s+(?:мені\s+)?(?:(?:усе|все|всі|усі)\s+)?"
+                          r"(?:скачан\w*|завантажен\w*)\s*(?:відео|дописи|файли)?\s*(.*)", msg.text)
+        if m_find and not G.URL.search(msg.text):  # 🔎 «знайди скачане про снігопад з Карпат»
+            await self.host.notify(msg.chat_id, *self.find_screen(msg.chat_id, m_find.group(1) or ""))
+            return True
         r0 = msg.reply_to_message
         if r0 and not G.URL.search(msg.text) and len(msg.text) < 200:  # ✏️ відповідь на скачаний файл: «тег снігопад»
             e = self.hist.by_msg(msg.chat_id, r0.message_id)
@@ -2318,6 +2330,25 @@ class Plugin(Base):
             await self.host.bot().edit_message_reply_markup(chat_id=chat, message_id=mid, reply_markup=InlineKeyboardMarkup(rows))
         except Exception:  # noqa: BLE001
             pass
+
+    def find_screen(self, chat, query):
+        got, res = self.hist.search(chat, query)
+        head = "🔎 <b>Пошук у скачаному</b>" + (f" · {esc(' · '.join(got))}" if got else f" · «{esc(query[:60])}»")
+        if not res:
+            return (head + "\n\nНічого не знайшлося. Спробуйте інакше: тема («снігопад»), місце («Карпати»), автор (нік) — "
+                    "можна разом: «снігопад з Карпат від oleno4ka».", [[("🔎 Шукати ще", self.cb("fnd"))], [("« Архів", self.cb("arc"))]])
+        lines = [head + f" · знайдено {len(res)}", ""]
+        for e in res[:40]:
+            url = self.mh_link(e["id"])
+            title = esc((e.get("title") or "файл").replace("\n", " ")[:55])
+            tags_ = ", ".join([self.hist.name("t", k) for k in e.get("topics", [])[:2]] + [self.hist.name("g", k) for k in e.get("geos", [])[:2]])
+            lines.append("• " + (f'<a href="{esc(url)}">{title}</a>' if url else title)
+                         + f" · {R.icon(e.get('site'))} {esc(e.get('who') or '')}" + (f" · {esc(tags_)}" if tags_ else "")
+                         + f" · {esc(R.ts_text(e.get('ts'))[:10])}")
+        if len(res) > 40:
+            lines.append(f"\n…ще {len(res) - 40} — уточніть запит")
+        body = lines[0] + "\n<blockquote expandable>" + "\n".join(lines[2:]) + "</blockquote>" if len(res) > 8 else "\n".join(lines)
+        return body[:4000], [[("🔎 Шукати ще", self.cb("fnd"))], [("« Архів", self.cb("arc"))]]
 
     def ted_screen(self, chat, rid):
         e = self.hist.get(chat, rid)
