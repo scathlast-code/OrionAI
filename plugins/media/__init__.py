@@ -262,6 +262,8 @@ class Plugin(Base):
             u = ""
         return f"https://t.me/{u}?start=mh_{rid}" if u else ""
 
+    ROW_CHARS = 34  # приблизно стільки знаків уміщає рядок підпису на телефоні
+
     def related_parts(self, chat, who, topics, geos, langs):
         """-> (рядок для підпису HTML, його видима довжина, кнопки автора, «вперше»)."""
         r = self.hist.related(chat, who, topics, geos, langs)
@@ -284,6 +286,10 @@ class Plugin(Base):
         if first and self.rel_on(chat, "f"):  # 🆕 тема чи локація вперше (автор «вперше» не позначається)
             note = "\n🆕 Вперше: " + self.hist.first_text(first)
             line, vis = esc(note) + line, vis + len(note)
+        if vis > self.ROW_CHARS * 3:  # більше ніж три рядки на екрані телефона — згортаємо
+            n = len(links) + (1 if first and self.rel_on(chat, "f") else 0)
+            line = f"\n<blockquote expandable>🔗 Пов'язане · {n}" + line + "</blockquote>"
+            vis += len(f"🔗 Пов'язане · {n}") + 1
         buttons = []
         if self.rel_on(chat, "a"):
             for st, e in r["site"].items():
