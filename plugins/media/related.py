@@ -459,6 +459,8 @@ class History:
         by_site, by_geo, by_topic, by_lang, extra = {}, {}, {}, {}, {}
         seen_t, seen_g = set(), set()
         for e in reversed(lst):  # найновіші спершу
+            if e.get("notag"):  # «без тегів» — лише в своїй групі
+                continue
             if a and e.get("author") == a:
                 by_site.setdefault(e.get("site") or "", e)
             for g in e.get("geos", []):
@@ -487,6 +489,8 @@ class History:
         """Для архіву: автори, теми, локації, мови, без теми, без локації, вперше."""
         out = {"a": {}, "t": {}, "g": {}, "l": {}, "x": {}}
         for e in self.items(chat):
+            if e.get("notag"):
+                continue
             if e.get("author"):
                 out["a"].setdefault(e["author"], []).append(e)
             for kind in ("t", "g", "l"):
