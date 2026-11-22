@@ -158,10 +158,53 @@ class Plugin(Base):
         return t, rows
 
     # ================================================================ 🔗 пов'язане скачане
-    REL = (("a", "👤 Автор"), ("t", "🏷 Тема (і «без теми»)"), ("g", "📍 Місце (і «без місця»)"), ("f", "🆕 Вперше"))
+    REL = (("a", "👤 Автор"), ("t", "🏷 Тема (і «без теми»)"), ("g", "📍 Локація (і «без локації»)"), ("l", "🗣 Мова"),
+           ("f", "🆕 Вперше"), ("ai", "🤖 Визначати тему, локацію й мову за допомогою ШІ"))
 
     def rel_on(self, chat, k):
         return (self.pref(chat, "rel", {}) or {}).get(k, True)
+
+    async def detect(self, chat, text, geotag, who, alink):
+        """Тема, локація, мова: ШІ (без обмежень) + словник; мова без тексту — як переважно пише автор.
+        -> (ключі тем, ключі локацій, ключі мов)."""
+        d_t, d_g = R.tags(f"{text}\n{geotag}")
+        a_t, a_g, lang = [], [], ""
+        body = (text or "").strip()
+        if self.rel_on(chat, "ai") and (len(body) >= 12 or geotag):
+            try:
+                ans, _m = await asyncio.wait_for(self.host.ask_ai(
+                    R.ai_prompt(body, geotag, self.hist.known("t"), self.hist.known("g")), system=R.AI_SYSTEM,
+                    label="🔗 Тема й локація"), 40)
+                a_t, a_g, lang = R.parse_ai(ans)
+            except Exception:  # noqa: BLE001 — ШІ недоступний: лишається словник
+                log.info("related: ШІ не визначив тему — беру словник")
+        topics, geos = R.merge(a_t, d_t), R.merge(a_g, d_g)
+        if geotag and not geos:  # геотег є, а ні ШІ, ні словник його не впізнали — беремо як є
+            geos = [(geotag.strip()[:40], "· " + geotag.strip()[:40])]
+        lang = lang or R.guess_lang(body)
+        if not lang:  # без тексту — мова, якою переважно пише автор
+            lang = await self.author_lang(chat, who, alink)
+        return self.hist.learn("t", topics), self.hist.learn("g", geos), self.hist.learn("l", R.lang_pair(lang))
+
+    async def author_lang(self, chat, who, alink):
+        """Переважна мова автора: з його попередніх скачаних дописів, інакше — з опису його сторінки."""
+        a = R.norm_author(who)
+        cnt = {}
+        for e in self.hist.items(chat):
+            if a and e.get("author") == a:
+                for k in e.get("langs", []):
+                    cnt[k] = cnt.get(k, 0) + 1
+        if cnt:
+            k = max(cnt, key=cnt.get)
+            return next((c for c, (n, _p) in R.LANGS.items() if R.key_of(n) == k), "")
+        if alink:
+            try:
+                _u, page = await asyncio.wait_for(M._grab(alink, 600_000), 12)
+                meta = re.findall(r'<meta[^>]+(?:og:description|name="description")[^>]+content="([^"]*)"', page)
+                return R.guess_lang(" ".join(meta))
+            except Exception:  # noqa: BLE001
+                return ""
+        return ""
 
     def mh_link(self, rid):
         try:
@@ -170,32 +213,35 @@ class Plugin(Base):
             u = ""
         return f"https://t.me/{u}?start=mh_{rid}" if u else ""
 
-    def related_parts(self, chat, who, site, text):
-        """-> (рядок для підпису HTML, його видима довжина, кнопки автора, теми, місця)."""
-        topics, geos = R.tags(text)
-        by_site, by_geo, by_topic, extra, first = self.hist.related(chat, who, topics, geos)
-        pairs = (list(by_geo.items()) if self.rel_on(chat, "g") else []) + (list(by_topic.items()) if self.rel_on(chat, "t") else [])
-        pairs += [(k, e) for k, e in extra.items() if (k == "notopic" and self.rel_on(chat, "t")) or (k == "nogeo" and self.rel_on(chat, "g"))
+    def related_parts(self, chat, who, topics, geos, langs):
+        """-> (рядок для підпису HTML, його видима довжина, кнопки автора, «вперше»)."""
+        r = self.hist.related(chat, who, topics, geos, langs)
+        pairs = []
+        for kind in ("g", "t", "l"):
+            if self.rel_on(chat, kind):
+                pairs += [(self.hist.label(kind, k), e) for k, e in r[kind].items()]
+        pairs += [(R.EXTRA_LABEL[k], e) for k, e in r["x"].items()
+                  if (k == "notopic" and self.rel_on(chat, "t")) or (k == "nogeo" and self.rel_on(chat, "g"))
                   or (k == "first" and self.rel_on(chat, "f"))]
         links, seen = [], set()
-        for k, e in pairs:
-            label = "попереднє " + (R.GEO_LABEL.get(k) or R.TOPIC_LABEL.get(k) or R.EXTRA_LABEL.get(k, ""))
+        for phrase, e in pairs:
             url = self.mh_link(e["id"])
             if url and e["id"] not in seen:  # одне й те саме повідомлення — одним посиланням
                 seen.add(e["id"])
-                links.append((label, url))
+                links.append(("попереднє " + phrase, url))
         line = ("\n↩️ " + " · ".join(f'<a href="{esc(u)}">{esc(lab)}</a>' for lab, u in links)) if links else ""
         vis = len("\n↩️ " + " · ".join(lab for lab, _ in links)) if links else 0
-        if first and self.rel_on(chat, "f"):  # 🆕 тема чи місце вперше (автор «вперше» не позначається)
-            note = "\n🆕 Вперше: " + R.first_text(first)
-            line, vis = note + line, vis + len(note)
+        first = r["first"]
+        if first and self.rel_on(chat, "f"):  # 🆕 тема чи локація вперше (автор «вперше» не позначається)
+            note = "\n🆕 Вперше: " + self.hist.first_text(first)
+            line, vis = esc(note) + line, vis + len(note)
         buttons = []
         if self.rel_on(chat, "a"):
-            for st, e in by_site.items():
+            for st, e in r["site"].items():
                 url = self.mh_link(e["id"])
                 if url:
                     buttons.append((f"{R.icon(st)} Попереднє відео автора", url))
-        return line, vis, buttons, topics, geos, [f"{a}:{b}" for a, b in first]
+        return line, vis, buttons, [f"{a}:{b}" for a, b in first]
 
     async def jump(self, chat, rid):
         """↩️ Перехід до раніше скачаного: відповідь на старе повідомлення (дотик до цитати — і ви там)."""
@@ -216,12 +262,14 @@ class Plugin(Base):
         g = self.hist.groups(chat)
         n = len(self.hist.items(chat))
         t = ("🗂 <b>Архів скачаного</b>\n<blockquote expandable>ℹ️ Як це працює\nКожен скачаний файл бот запам'ятовує: автора, "
-             "соцмережу, тему й місце (з тексту допису). Під новим файлом з'являються посилання «попереднє з Карпат», "
-             "«попереднє зі снігопадом» і кнопки «попереднє відео автора» окремо для кожної соцмережі (іконкою). Дотик — і бот "
-             "показує те повідомлення. Кнопка «🔗 Допис» лишається як була — це оригінал. Що показувати — у «⚙️ Що пов'язувати».</blockquote>"
-             f"\n\nЗаписів: {n} · авторів: {len(g['a'])} · тем: {len(g['t'])} · місць: {len(g['g'])}")
-        rows = [[(f"👤 Автори · {len(g['a'])}", self.cb("arcl", "a")), (f"🏷 Теми · {len(g['t'])}", self.cb("arcl", "t")),
-                 (f"📍 Місця · {len(g['g'])}", self.cb("arcl", "g"))],
+             "соцмережу, тему, локацію (з тексту допису й геотегу) і мову (без тексту — якою переважно пише автор). Тему й локацію "
+             "визначає ШІ — без обмежень, увесь світ; нові назви запам'ятовуються. Під новим файлом з'являються посилання «попереднє з Карпат», "
+             "«попереднє зі снігопадом», «попереднє без локації», «попереднє українською» і кнопки «попереднє відео автора» окремо для "
+             "кожної соцмережі (іконкою). Порожніх посилань немає. Дотик — і бот показує те повідомлення. Кнопка «🔗 Допис» — оригінал. "
+             "Що показувати — у «⚙️ Що пов'язувати».</blockquote>"
+             f"\n\nЗаписів: {n} · авторів: {len(g['a'])} · тем: {len(g['t'])} · локацій: {len(g['g'])} · мов: {len(g['l'])}")
+        rows = [[(f"👤 Автори · {len(g['a'])}", self.cb("arcl", "a")), (f"🏷 Теми · {len(g['t'])}", self.cb("arcl", "t"))],
+                [(f"📍 Локації · {len(g['g'])}", self.cb("arcl", "g")), (f"🗣 Мови · {len(g['l'])}", self.cb("arcl", "l"))],
                 [(f"{R.EXTRA_NAME[k]} · {len(g['x'][k])}", self.cb("arcl", "x", k)) for k in ("notopic", "nogeo", "first") if g["x"].get(k)],
                 [("⚙️ Що пов'язувати", self.cb("rls"))], [("« Медіа", self.cb())]]
         return t, [r for r in rows if r]
@@ -232,13 +280,13 @@ class Plugin(Base):
 
     def arc_list(self, chat, kind, idx=None):
         keys, g = self.arc_keys(chat, kind)
-        name = {"a": "👤 Автори", "t": "🏷 Теми", "g": "📍 Місця"}[kind]
+        name = {"a": "👤 Автори", "t": "🏷 Теми", "g": "📍 Локації", "l": "🗣 Мови"}[kind]
         if idx is None or not (0 <= idx < len(keys)):
             t = f"🗂 <b>{name}</b>\n\n" + ("Поки порожньо — з'явиться після завантажень." if not keys else "Оберіть, щоб побачити все скачане:")
             rows, line = [], []
             for i, k in enumerate(keys[:60]):
                 es = g[k]
-                lab = (es[-1].get("who") or k) if kind == "a" else (R.TOPIC_NAME.get(k, k) if kind == "t" else R.GEO_NAME.get(k, k))
+                lab = (es[-1].get("who") or k) if kind == "a" else self.hist.name(kind, k)
                 line.append((f"{lab[:24]} · {len(es)}", self.cb("arcl", kind, i)))
                 if len(line) == 2:
                     rows.append(line)
@@ -249,7 +297,7 @@ class Plugin(Base):
             return t, rows
         k = keys[idx]
         es = list(reversed(g[k]))[:25]
-        lab = (es[0].get("who") or k) if kind == "a" else (R.TOPIC_NAME.get(k, k) if kind == "t" else R.GEO_NAME.get(k, k))
+        lab = (es[0].get("who") or k) if kind == "a" else self.hist.name(kind, k)
         lines = [f"🗂 <b>{esc(lab)}</b> · {len(g[k])}", ""]
         for e in es:
             url = self.mh_link(e["id"])
@@ -265,13 +313,14 @@ class Plugin(Base):
             url = self.mh_link(e["id"])
             title = esc((e.get("title") or "файл")[:60])
             head = f'<a href="{esc(url)}">{title}</a>' if url else title
-            fx = (" · " + esc(R.first_text([tuple(f.split(":", 1)) for f in e["first"]]))) if k == "first" and e.get("first") else ""
+            fx = (" · " + esc(self.hist.first_text([tuple(f.split(":", 1)) for f in e["first"]]))) if k == "first" and e.get("first") else ""
             lines.append(f"• {head} · {R.icon(e.get('site'))} {esc(e.get('who') or '')}{fx} · {esc(R.ts_text(e.get('ts')))}")
         return "\n".join(lines)[:4000], [[("« Архів", self.cb("arc"))]]
 
     def rel_screen(self, chat):
         t = ("⚙️ <b>Що пов'язувати з новими завантаженнями</b>\n\nУвімкнене з'являється під кожним новим файлом: "
-             "посилання на попереднє з тим самим місцем чи темою, кнопки на попереднє відео автора. Налаштування особисте.")
+             "посилання на попереднє з тією ж локацією, темою чи мовою, кнопки на попереднє відео автора. «🤖 ШІ» — тема й локація "
+             "без обмежень (вимкнено — лише вбудований словник). Налаштування особисте.")
         rows = [[(("✅ " if self.rel_on(chat, k) else "▫️ ") + lab, self.cb("rlt", k))] for k, lab in self.REL]
         rows.append([("« Архів", self.cb("arc"))])
         return t, rows
@@ -409,7 +458,7 @@ class Plugin(Base):
             return None, self.arc_screen(chat)
         if a == "arcl" and x == "x" and y in R.EXTRA_NAME:
             return None, self.arc_extra(chat, y)
-        if a == "arcl" and x in ("a", "t", "g"):
+        if a == "arcl" and x in ("a", "t", "g", "l"):
             return None, self.arc_list(chat, x, int(y) if y.isdigit() else None)
         if a == "rls":
             return None, self.rel_screen(chat)
@@ -1438,7 +1487,11 @@ class Plugin(Base):
                     # Підпис HTML: довгі адреси — короткими посиланнями «Автор» / «Допис»; ліміт Telegram — 1024 видимі символи
                     who_html = (f'<a href="{esc(link)}">{esc(who)}</a>' if link else esc(who)) if who else ""
                     site = M.site_name(job.url) if str(job.url).startswith("http") else (job.__dict__.get("src") or "")
-                    rel_line, rel_len, rel_btns, rel_t, rel_g, rel_f = self.related_parts(chat, who, site, f"{desc}\n{item.title}")
+                    geotag = M.geotag(info)
+                    rel_t, rel_g, rel_l = await self.detect(chat, desc or "", geotag, who, link)
+                    rel_line, rel_len, rel_btns, rel_f = self.related_parts(chat, who, rel_t, rel_g, rel_l)
+                    if geotag:
+                        rel_line, rel_len = f"\n📍 {esc(geotag[:60])}" + rel_line, rel_len + len(geotag[:60]) + 3
                     tail = (f"\n\n👤 {who_html}" if who else "\n") + (f" · {esc(site)}" if site else "") \
                         + (f' · <a href="{esc(job.url)}">🔗 Допис</a>' if str(job.url).startswith("http") else "") + song_html + rel_line
                     tail_len = len(f"\n\n👤 {who} · {site} · 🔗 Допис") + len(re.sub(r"<[^>]+>|&\w+;", "", song_html)) + rel_len
@@ -1471,7 +1524,7 @@ class Plugin(Base):
                         if not recorded and getattr(msg_, "message_id", None):  # 🔗 запам'ятовуємо для «попереднє …»
                             recorded = True
                             self.hist.add(chat, msg=msg_.message_id, author=R.norm_author(who), who=who, alink=link, site=site,
-                                          url=str(job.url), title=(desc or item.title or "")[:80], topics=rel_t, geos=rel_g, first=rel_f)
+                                          url=str(job.url), title=(desc or item.title or "")[:80], topics=rel_t, geos=rel_g, langs=rel_l, first=rel_f, geotag=geotag)
                         sent.append(out.name)
                         kept = self.keep(out)
                         if kept:

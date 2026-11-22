@@ -391,6 +391,21 @@ def post_text(info):
     return ""
 
 
+def geotag(info):
+    """📍 Геотег допису (Instagram і Facebook ставлять його над дописом, Threads і X — під ним; у даних він в одному полі)."""
+    info = info or {}
+    for key in ("location", "location_name", "place", "poi_name", "geo", "geotag"):
+        v = info.get(key)
+        if isinstance(v, dict):
+            v = v.get("name") or v.get("title") or v.get("full_name") or v.get("short_name") or ""
+        if isinstance(v, str) and v.strip() and not v.strip().startswith(("http", "{")):
+            return re.sub(r"\s+", " ", v).strip()[:80]
+    poi = info.get("poi") or info.get("poi_info")
+    if isinstance(poi, dict) and (poi.get("name") or poi.get("poi_name")):
+        return str(poi.get("name") or poi.get("poi_name"))[:80]
+    return ""
+
+
 def author(info):
     name = (
         info.get("uploader") or info.get("channel") or info.get("author")
@@ -654,6 +669,9 @@ async def threads_probe(url, work):
         caption = post.get("caption") or {}
         if isinstance(caption, dict) and caption.get("text"):
             info["description"] = caption["text"]
+        loc = post.get("location") or (post.get("text_post_app_info") or {}).get("location")
+        if isinstance(loc, dict) and loc.get("name"):  # 📍 геотег
+            info["location"] = loc["name"]
         items = []
         for part in post.get("carousel_media") or [post]:
             found = _best_media(part) if isinstance(part, dict) else None
@@ -822,7 +840,8 @@ async def story_probe(url, work):
             items.append(Item("direct", link, {"title": f"Сторіс @{user}", "author": user, "when": story_time(row),
                                                "author_url": f"https://www.instagram.com/{user}/", "_exact": exact,
                                                "_fallback": row.get("videoUrl") or row.get("imageUrl"),
-                                               "description": " ".join(row.get("links") or [])}))
+                                               "description": " ".join(row.get("links") or []),
+                                               "location": row.get("locationName") or row.get("location") or ""}))
     if not items:
         raise JobError(f"У @{user} зараз немає доступних сторіс (минули 24 години або акаунт приватний).")
     return items
