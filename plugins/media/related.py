@@ -526,3 +526,53 @@ class History:
             if e.get("first"):
                 out["x"].setdefault("first", []).append(e)
         return out
+
+    def search(self, chat, query):
+        """🔎 «снігопад з Карпат від oleno4ka» -> (що зрозуміли, знайдені записи). Тема, локація, автор, мова — усі разом (І);
+        решта слів — пошук у назві/тексті."""
+        q = (query or "").strip()
+        voc = self.vocab()
+        want = {"t": set(), "g": set(), "l": set()}
+        rest = q
+        for kind in ("t", "g", "l"):
+            for k, d in voc[kind].items():
+                rx = stem_rx(d.get("name") or k)
+                m = rx.search(rest) if rx else None
+                if m:
+                    want[kind].add(k)
+                    rest = rest[:m.start()] + " " + rest[m.end():]
+        for name, _p in tags(q)[0]:
+            want["t"].add(key_of(name))
+        for name, _p in tags(q)[1]:
+            want["g"].add(key_of(name))
+        items = [e for e in self.items(chat) if not e.get("notag") or e.get("group")]
+        authors = {e.get("author"): e.get("who") or e.get("author") for e in items if e.get("author")}
+        who = set()
+        for a, w in authors.items():
+            if len(a) >= 3 and (a in norm_author(q) or norm_author(w) in norm_author(q)):
+                who.add(a)
+                rest = re.sub(re.escape(str(w)), " ", rest, flags=re.I)
+        words = [w for w in re.findall(r"[\w'’]{3,}", rest.lower())
+                 if w not in ("знайди", "пошукай", "покажи", "скачане", "скачані", "завантажене", "завантажені", "відео", "дописи",
+                              "допис", "фото", "про", "від", "автора", "автор", "мені", "всі", "усі", "тему", "темою", "яке", "які", "with")]
+        res = []
+        for e in items:
+            if want["t"] and not want["t"] & set(e.get("topics", [])):
+                continue
+            if want["g"] and not want["g"] & set(e.get("geos", [])):
+                continue
+            if want["l"] and not want["l"] & set(e.get("langs", [])):
+                continue
+            if who and e.get("author") not in who:
+                continue
+            if words and not (want["t"] or want["g"] or want["l"] or who):
+                hay = f"{e.get('title', '')} {e.get('who', '')} {e.get('geotag', '')}".lower()
+                if not any(w[:max(4, len(w) - 2)] in hay for w in words):
+                    continue
+            res.append(e)
+        understood = ([("🏷 " + self.name("t", k)) for k in want["t"]] + [("📍 " + self.name("g", k)) for k in want["g"]]
+                      + [("🗣 " + self.name("l", k)) for k in want["l"]] + [("👤 " + authors[a]) for a in who])
+        if not understood and words:
+            understood = ["🔤 " + " ".join(words)]
+        return understood, list(reversed(res))
+

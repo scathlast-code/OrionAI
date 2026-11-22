@@ -99,3 +99,13 @@ def test_manual_update(tmp_path):
     rid = h.add(1, msg=5, author="a", topics=[], geos=[], notag=True)
     e = h.update(1, rid, topics=["снігопад"])
     assert e["topics"] == ["снігопад"] and "notag" not in e and h.by_msg(1, 5)["id"] == rid
+
+
+def test_search(tmp_path):
+    h = R.History(tmp_path / "h.json")
+    h.add(1, msg=1, author="karpatyposydok", who="karpaty_posydok", title="Будиночки в Карпатах", topics=["снігопад"], geos=["карпати"])
+    h.add(1, msg=2, author="tvoe", who="tvoe_v_v", title="Сніжить на Волині", topics=["снігопад"], geos=["волинь"])
+    got, res = h.search(1, "снігопад з Карпат")
+    assert [e["msg"] for e in res] == [1] and "📍 Карпати" in got
+    assert [e["msg"] for e in h.search(1, "від tvoe_v_v")[1]] == [2]
+    assert len(h.search(1, "сніг")[1]) == 2
