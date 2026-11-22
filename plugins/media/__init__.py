@@ -119,7 +119,7 @@ class Plugin(Base):
     summary = ("Завантаження відео, фото, аудіо й тексту дописів за посиланням із YouTube, Instagram, TikTok, Facebook, "
                "Threads, X, Telegram, Reddit, Vimeo та сотень інших сайтів: якість, MP3, GIF, без звуку, озвучка, субтитри, "
                "таймкоди, запис ефіру, ZIP. А також звіт і очищення метаданих власних файлів.")
-    VIEWS = {"ck", "tools", "help", "arc", "arcl", "rls", "utg", "gra", "grl", "pend"}
+    VIEWS = {"ck", "tools", "help", "arc", "arcl", "rls", "utg", "gra", "grl", "pend", "bad", "ted"}
 
     def __init__(self, host):
         super().__init__(host)
@@ -136,6 +136,7 @@ class Plugin(Base):
         self.gpend: dict[str, dict] = {}      # 📦 групи, що чекають вибору
         self.user_stop: set = set()
         self.just_done: set = set()
+        self.last_result: dict[int, tuple] = {}
         self.cur_url: dict[int, str] = {}     # посилання поточного завантаження (як надіслала людина)
         self.pend_seen: dict[int, float] = {} # коли востаннє нагадували про збережені посилання
         self.ticks: dict[int, asyncio.Task] = {}  # ✍️ вказівки про теги до поточного завантаження
@@ -299,12 +300,14 @@ class Plugin(Base):
         pairs += [(R.EXTRA_LABEL[k], e) for k, e in r["x"].items()
                   if (k == "notopic" and self.rel_on(chat, "t")) or (k == "nogeo" and self.rel_on(chat, "g"))
                   or (k == "first" and self.rel_on(chat, "f"))]
-        links, seen = [], set()
-        for phrase, e in pairs:
+        by_id = {}
+        for phrase, e in pairs:  # одне й те саме попереднє повідомлення — одним посиланням з усіма збігами
             url = self.mh_link(e["id"])
-            if url and e["id"] not in seen:  # одне й те саме повідомлення — одним посиланням
-                seen.add(e["id"])
-                links.append(("попереднє " + phrase, url))
+            if url:
+                by_id.setdefault(e["id"], [url, []])
+                if phrase not in by_id[e["id"]][1]:
+                    by_id[e["id"]][1].append(phrase)
+        links = [("попереднє " + ", ".join(ph), url) for url, ph in by_id.values()]
         line = ("\n↩️ " + " · ".join(f'<a href="{esc(u)}">{esc(lab)}</a>' for lab, u in links)) if links else ""
         vis = len("\n↩️ " + " · ".join(lab for lab, _ in links)) if links else 0
         first = r["first"]
@@ -323,20 +326,55 @@ class Plugin(Base):
                     buttons.append((f"{R.icon(st)} Попереднє відео автора", url))
         return line, vis, buttons, [f"{a}:{b}" for a, b in first]
 
+    def related_all(self, chat, e, limit=15):
+        """Усе скачане, пов'язане з цим записом: за кожною темою, локацією й автором -> [(заголовок, [записи])]."""
+        es = [x for x in self.hist.items(chat) if x.get("id") != e.get("id") and not x.get("notag")]
+        out = []
+        if e.get("author"):
+            same = [x for x in es if x.get("author") == e["author"]]
+            if same:
+                out.append((f"👤 {e.get('who') or e['author']}", same))
+        for kind, key, icon_ in (("g", "geos", "📍"), ("t", "topics", "🏷")):
+            for k in e.get(key, []):
+                same = [x for x in es if k in x.get(key, [])]
+                if same:
+                    out.append((f"{icon_} {self.hist.name(kind, k)}", same))
+        if e.get("group"):
+            same = [x for x in self.hist.items(chat) if x.get("group") == e["group"] and x.get("id") != e.get("id")]
+            if same:
+                out.append((f"📦 Група №{e['group']}", same))
+        return [(h, list(reversed(lst))[:limit], len(lst)) for h, lst in out]
+
     async def jump(self, chat, rid):
-        """↩️ Перехід до раніше скачаного: відповідь на старе повідомлення (дотик до цитати — і ви там)."""
+        """↩️ «попереднє …»: відповідь на той допис (дотик до цитати — і ви там) зі списком УСЬОГО пов'язаного:
+        та сама тема, локація, автор, група. Список згорнутий — розгортається й гортається."""
         bot = self.host.bot()
         e = self.hist.get(chat, rid)
         if not e:
             return await self.host.notify(chat, "Цього запису в історії скачаного вже немає.")
-        what = " · ".join(x for x in [e.get("who") and "👤 " + esc(e["who"]), esc(e.get("site") or ""),
-                                       esc(R.ts_text(e.get("ts")))] if x)
+        parts = []
+        for head, lst, total in self.related_all(chat, e):
+            lines = []
+            for x in lst:
+                url = self.mh_link(x["id"])
+                title = esc((x.get("title") or "файл").replace("\n", " ")[:50])
+                lines.append(("• " + (f'<a href="{esc(url)}">{title}</a>' if url else title)
+                              + f" · {R.icon(x.get('site'))} {esc(R.ts_text(x.get('ts'))[:10])}"))
+            more = f"\n…ще {total - len(lst)} — в «🗂 Архів скачаного»" if total > len(lst) else ""
+            parts.append(f"<b>{esc(head)}</b> · {total}\n" + "\n".join(lines) + more)
+        head = "⬆️ <b>Цей допис</b> — торкніться цитати, щоб перейти до нього"
+        body = (head + "\n\n🔗 <b>Пов'язане</b>\n<blockquote expandable>" + "\n\n".join(parts) + "</blockquote>") if parts \
+            else head + "\n\nІнших пов'язаних завантажень поки немає."
+        from footnotes import html_split
+        kb = self._markup([[("🏷 Категорії", self.cb("ted", rid))]])
+        chunks = html_split(body, 3900)
         try:
-            await bot.send_message(chat, f"⬆️ <b>Ось воно</b> — торкніться цитати, щоб перейти\n{what}", parse_mode="HTML",
-                                   reply_to_message_id=e["msg"], allow_sending_without_reply=False)
-        except Exception:  # noqa: BLE001 — повідомлення видалене з чату
-            link = f'\n<a href="{esc(e["url"])}">🔗 Допис</a>' if str(e.get("url", "")).startswith("http") else ""
-            await self.host.notify(chat, f"⚠️ Це повідомлення вже видалене з чату.\n{what}{link}")
+            for i, ch in enumerate(chunks):
+                await bot.send_message(chat, ch, parse_mode="HTML", disable_web_page_preview=True,
+                                       reply_markup=kb if i == len(chunks) - 1 else None,
+                                       **({"reply_to_message_id": e["msg"], "allow_sending_without_reply": False} if i == 0 else {}))
+        except Exception:  # noqa: BLE001 — сам допис видалено з чату: список усе одно показуємо
+            await self.host.notify(chat, "⚠️ Цей файл уже видалено з чату.\n\n" + body.split("\n\n", 1)[-1], [[("🏷 Категорії", self.cb("ted", rid))]])
 
     def arc_screen(self, chat):
         g = self.hist.groups(chat)
@@ -469,6 +507,9 @@ class Plugin(Base):
             rows.insert(0, [("⏹ Зупинити завдання", self.cb("stop"))])
         if chat in self.jobs:
             rows.insert(1, [("📋 Останній знайдений набір", self.cb("menu", self.jobs[chat].token))])
+        bl = [e for e in self.bad_list(chat) if not e.get("ok")]
+        if bl:
+            rows.insert(1 if len(rows) > 1 else 0, [(f"🧯 Биті посилання · {len(bl)}", self.cb("bad"))])
         pl = self.pend_list(chat)
         if pl:
             rows.insert(0, [(f"📌 Збережені посилання · {len(pl)}", self.cb("pend"))])
@@ -620,6 +661,33 @@ class Plugin(Base):
             self.gctx[chat] = {"id": gid, "items": items, "left": list(range(len(items))), "n": len(items)}
             self._bg(chat, self.group_run(chat))
             return f"📦 Група №{gid}: починаю", None
+        if a == "ted" and x.isdigit():
+            return None, self.ted_screen(chat, int(x))
+        if a == "tdel" and x.isdigit() and y[:1] in ("t", "g", "l") and y[1:].isdigit():
+            e = self.hist.get(chat, int(x))
+            if e:
+                key = R.KINDS[y[0]]
+                lst = list(e.get(key, []))
+                if int(y[1:]) < len(lst):
+                    lst.pop(int(y[1:]))
+                    self.hist.update(chat, int(x), **{key: lst})
+            return "🗑 Прибрано", self.ted_screen(chat, int(x))
+        if a == "tadd" and x.isdigit():
+            self.ask(chat, "tadd", int(x))
+            return None, ("➕ <b>Нові категорії</b>\n\nНапишіть через кому: теми й місця (напр. «снігопад, Полісся, озеро»).",
+                          [[("« Категорії", self.cb("ted", x))]])
+        if a == "bad":
+            return None, self.bad_screen(chat, int(x) if x.isdigit() else 0)
+        if a == "badre" and x.isdigit():
+            lst = list(reversed(self.bad_list(chat)))
+            if 0 < int(x) <= len(lst):
+                return self.start_quick(chat, lst[int(x) - 1]["url"]) or "🔎 Пробую ще раз…", None
+            return "Запис застарів", self.bad_screen(chat)
+        if a == "badclr":
+            data = self._bad()
+            data.pop(str(chat), None)
+            (self.dir / "failed.json").write_text(json.dumps(data, ensure_ascii=False), "utf-8")
+            return "🗑 Очищено", self.bad_screen(chat)
         if a == "pend":
             return None, self.pend_screen(chat)
         if a == "pgo":
@@ -819,6 +887,9 @@ class Plugin(Base):
         return None, self.job_screen(chat)
 
     async def on_text(self, update, ctx, chat, key, data, text):
+        if key == "tadd":
+            toast = await self.ted_apply(chat, int(data), text)
+            return toast, self.ted_screen(chat, int(data))
         if key == "grt":
             tok, num = str(data).split(":")
             g = self.gpend.get(tok)
@@ -912,6 +983,13 @@ class Plugin(Base):
         msg = update.message
         if not msg or msg.chat.type != "private" or not msg.text:
             return False
+        r0 = msg.reply_to_message
+        if r0 and not G.URL.search(msg.text) and len(msg.text) < 200:  # ✏️ відповідь на скачаний файл: «тег снігопад»
+            e = self.hist.by_msg(msg.chat_id, r0.message_id)
+            if e and re.search(r"(?i)тег|категор|сортуй|групуй|прибери|видали|зніми|#", msg.text):
+                toast = await self.ted_apply(msg.chat_id, e["id"], msg.text)
+                await self.host.notify(msg.chat_id, *(lambda t, r: (f"{toast}\n\n{t}", r))(*self.ted_screen(msg.chat_id, e["id"])))
+                return True
         if len(G.URL.findall(msg.text)) >= 2 and not self.host.extra.get("awaiting", lambda c: False)(msg.chat_id) \
                 and not self.host.extra.get("utm_screen", lambda c: False)(msg.chat_id):  # 📦 кілька посилань — один вибір на всі
             tok = self.group_offer(msg.chat_id, msg.text)
@@ -1104,6 +1182,68 @@ class Plugin(Base):
                     f"Вони лишаться, доки не завантажите; понад {self.PEND_MAX} найдавніші видаляються.\n\n")
             await self.host.notify(chat, head + t, rows[:-1] + [[("📌 Збережені", self.cb("pend")), ("✖️ Пізніше", self.cb("grx", tok))]])
 
+    # ---------------------------------------------------------------- 🧯 биті посилання (окремо від збережених)
+    BAD_MAX = 200
+
+    def _bad(self):
+        try:
+            return json.loads((self.dir / "failed.json").read_text("utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def bad_list(self, chat):
+        return self._bad().get(str(chat), [])
+
+    def bad_add(self, chat, url, why):
+        """Посилання, з якого нічого не вийшло, — з причиною. До 200; найстаріші видаляються самі."""
+        if not url:
+            return
+        data = self._bad()
+        lst = [e for e in data.get(str(chat), []) if e["url"] != url]
+        lst.append({"url": url, "why": re.sub(r"<[^>]+>", "", str(why))[:300], "ts": int(time.time()), "site": M.site_name(url)})
+        data[str(chat)] = lst[-self.BAD_MAX:]
+        try:
+            (self.dir / "failed.json").write_text(json.dumps(data, ensure_ascii=False), "utf-8")
+        except OSError:
+            pass
+
+    def bad_ok(self, chat, url):
+        """Згодом вдалося — позначаємо ✅ (запис лишається для історії)."""
+        data = self._bad()
+        changed = False
+        for e in data.get(str(chat), []):
+            if e["url"] == url and not e.get("ok"):
+                e["ok"] = int(time.time())
+                changed = True
+        if changed:
+            (self.dir / "failed.json").write_text(json.dumps(data, ensure_ascii=False), "utf-8")
+
+    def bad_screen(self, chat, page=0):
+        lst = list(reversed(self.bad_list(chat)))
+        if not lst:
+            return "🧯 <b>Биті посилання</b>\n\nПорожньо — усе завантажувалось.", [[("« Медіа", self.cb())]]
+        per = 8
+        page = max(0, min(page, (len(lst) - 1) // per))
+        part = lst[page * per:(page + 1) * per]
+        lines = [f"🧯 <b>Биті посилання · {len(lst)} з {self.BAD_MAX}</b>",
+                 f"<blockquote expandable>ℹ️ Що це\nПосилання, з яких бот нічого не зміг завантажити, і чому. Окремо від «📌 Збережених» "
+                 f"(тих, що ще не пробували). Понад {self.BAD_MAX} — найстаріші видаляються самі. «✅» — згодом вдалося.</blockquote>", ""]
+        rows = []
+        for k, e in enumerate(part, page * per + 1):
+            lines.append(f"{k}. {'✅ ' if e.get('ok') else ''}{R.icon(e.get('site'))} {esc(R.ts_text(e['ts'])[:16])}\n"
+                         f"🔗 {esc(e['url'][:200])}\n❓ {esc(e['why'][:200])}")
+            if not e.get("ok"):
+                rows.append([(f"🔁 №{k} ще раз", self.cb("badre", k))])
+        nav = []
+        if page:
+            nav.append(("◀️", self.cb("bad", page - 1)))
+        if (page + 1) * per < len(lst):
+            nav.append(("▶️", self.cb("bad", page + 1)))
+        if nav:
+            rows.append(nav)
+        rows += [[("🗑 Очистити", self.cb("badclr"))], [("« Медіа", self.cb())]]
+        return "\n\n".join(["\n".join(lines[:3])] + lines[3:])[:4000], rows
+
     # ---------------------------------------------------------------- 📦 групове завантаження
     def group_offer(self, chat, text):
         """Кілька посилань одним повідомленням -> токен групи, що чекає вибору (або None)."""
@@ -1163,18 +1303,38 @@ class Plugin(Base):
                                      [[("⏹ Зупинити групу", self.cb("stop"))]])
             g["mid"] = getattr(gst, "message_id", 0)
             self.instr[chat] = it.get("instr") or {}
+            self.last_result.pop(chat, None)
+            why = ""
             try:
                 await self.group_one(chat, it["url"], it.get("mode") or "auto")
+                n_sent, fl = self.last_result.get(chat, (1, []))
+                if not n_sent:
+                    why = "; ".join(re.sub(r"<[^>]+>", "", f) for f in fl[:3]) or "файлів не знайшлося"
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 — одна невдача не зупиняє групу
                 log.exception("group item failed")
-                g.setdefault("failed", []).append(f"№{i + 1}: {M.explain(exc) if isinstance(exc, JobError) else type(exc).__name__}")
+                if isinstance(exc, JobError):
+                    nice, raw = M.explain(exc), re.sub(r"<[^>]+>", "", str(exc))[:200]
+                    why = nice if raw in nice else f"{nice} ({raw})"
+                else:
+                    why = f"{type(exc).__name__}: {str(exc)[:150]}"
+                self.bad_add(chat, it["url"], why)
+            if why:
+                g.setdefault("failed", []).append({"n": i + 1, "url": it["url"], "why": re.sub(r"<[^>]+>", "", why)[:300]})
             g["left"].pop(0)
             self._active(chat, done=True)  # черга збережена — після перезапуску продовжимо
-        fails = g.get("failed", [])
-        text = (f"✅ <b>Група №{g['id']}</b> · готово {n - len(fails)} з {n}" + ("\n\n⚠️ " + "\n".join(map(esc, fails)) if fails else ""))
-        await self._status(chat, gst, text, [[("📦 Відкрити групу в архіві", self.cb("grl", g["id"]))], [("« Медіа", self.cb())]])
+        fails = [f if isinstance(f, dict) else {"n": "?", "url": "", "why": str(f)} for f in g.get("failed", [])]
+        text = f"{'✅' if not fails else '⚠️'} <b>Група №{g['id']}</b> · готово {n - len(fails)} з {n}"
+        if fails:
+            text += "\n\n<b>Не вийшло:</b>"
+            for f in fails:
+                text += f"\n\n№{f['n']} · 🔗 {esc(f['url'][:200])}\n❓ {esc(f['why'])}"
+            text += "\n\nУсі такі посилання — у «🧯 Биті посилання» (там можна спробувати ще раз)."
+        rows = [[("📦 Відкрити групу в архіві", self.cb("grl", g["id"]))]]
+        if fails:
+            rows.append([("🧯 Биті посилання", self.cb("bad"))])
+        await self._status(chat, gst, text[:4000], rows + [[("« Медіа", self.cb())]])
         self.gctx.pop(chat, None)
         self.instr.pop(chat, None)
 
@@ -1393,16 +1553,19 @@ class Plugin(Base):
             with tempfile.TemporaryDirectory(prefix="orion-media-") as work:
                 items = await M.inspect_link(url, Path(work))
         except M.URLDenied as exc:
+            self.bad_add(chat, self.cur_url.get(chat) or url, str(exc))
             await self._status(chat, status, f"⚠️ {esc(str(exc))}")
             self._active(chat, done=True)
             return
         except JobError as exc:
+            self.bad_add(chat, self.cur_url.get(chat) or url, str(exc))
             t = secrets.token_hex(4)
             self.offers[t] = (chat, url)
             rows = [[("🔁 Спробувати ще раз", self.cb("re", t))], [("🍪 Входи на сайти", self.cb("ck")), ("« Медіа", self.cb())]]
             if "APIFY_TOKEN" in str(exc) and "не підходить" not in str(exc):
                 rows.insert(0, [("🔑 Вставити ключ Apify тут", self.cb("akey"))])
-            await self._status(chat, status, f"⚠️ <b>Не вийшло завантажити</b> · {esc(src)}\n\n{exc}"[:4000], rows)
+            await self._status(chat, status, (f"⚠️ <b>Не вийшло завантажити</b> · {esc(src)}\n🔗 {esc(self.cur_url.get(chat) or url)}"
+                                              f"\n\n❓ {exc}\n\n🧯 Збережено в «Биті посилання»")[:4000], rows)
             self._active(chat, done=True)
             return
         finally:
@@ -2029,9 +2192,10 @@ class Plugin(Base):
                                                      markup=None if recorded else self._url_markup([[b] for b in rel_btns]))
                         if not recorded and getattr(msg_, "message_id", None):  # 🔗 запам'ятовуємо для «попереднє …»
                             recorded = True
-                            self.hist.add(chat, msg=msg_.message_id, author=R.norm_author(who), who=who, alink=link, site=site,
+                            rid_ = self.hist.add(chat, msg=msg_.message_id, author=R.norm_author(who), who=who, alink=link, site=site,
                                           url=str(job.url), title=(desc or item.title or "")[:80], topics=rel_t, geos=rel_g, langs=rel_l, first=rel_f, geotag=geotag,
                                           **({"group": gx["id"], "gi": gx["i"]} if gx else {}), **({"notag": True} if rel is None else {}))
+                            await self._cat_button(chat, msg_.message_id, rid_, rel_btns)
                         sent.append(out.name)
                         kept = self.keep(out)
                         if kept:
@@ -2082,12 +2246,21 @@ class Plugin(Base):
                         self.got[chat].append(kept)
                 except JobError as exc:
                     failed.append(f"ZIP · {esc(str(exc))}")
+        self.last_result[chat] = (len(sent), list(failed))
+        if sent:
+            for u_ in {self.cur_url.get(chat), job.url}:
+                if u_:
+                    self.bad_ok(chat, u_)
+        elif failed or not shown:  # 🧯 нічого не вийшло — у биті посилання з причиною
+            self.bad_add(chat, self.cur_url.get(chat) or job.url, "; ".join(re.sub(r"<[^>]+>", "", f) for f in failed[:3])
+                         or "файлів не знайшлося")
         if sent and not failed:
             msg = "✅ Готово" + (f" · файлів: {len(sent)}" if len(sent) > 1 else "")
         elif sent:
             msg = f"✅ Надіслано файлів: {len(sent)}\n\n⚠️ Не вдалося:\n" + "\n".join(failed[:30])
         elif failed:
-            msg = "⚠️ <b>Не вийшло завантажити</b>\n\n" + "\n\n".join(failed[:10])
+            msg = (f"⚠️ <b>Не вийшло завантажити</b>\n🔗 {esc(self.cur_url.get(chat) or job.url)}\n\n❓ " + "\n\n".join(failed[:10])
+                   + "\n\n🧯 Збережено в «Биті посилання»")
         elif shown:
             msg = "📝 Тут лише текст допису — надіслав його вище."
         else:
@@ -2135,6 +2308,63 @@ class Plugin(Base):
         f = await self.host.bot().get_file(p.file_id, read_timeout=40)
         await f.download_to_drive(path, read_timeout=60)
         return path
+
+    async def _cat_button(self, chat, mid, rid, url_btns):
+        """Під файлом — «🏷 Категорії»: переглянути й змінити теми, локації, мову вручну."""
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        rows = [[InlineKeyboardButton(t, url=u)] for t, u in url_btns]
+        rows.append([InlineKeyboardButton("🏷 Категорії", callback_data=self.cb("ted", rid))])
+        try:
+            await self.host.bot().edit_message_reply_markup(chat_id=chat, message_id=mid, reply_markup=InlineKeyboardMarkup(rows))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def ted_screen(self, chat, rid):
+        e = self.hist.get(chat, rid)
+        if not e:
+            return "Цього запису вже немає.", [[("« Архів", self.cb("arc"))]]
+        lines = [f"🏷 <b>Категорії</b> · {esc((e.get('title') or 'файл')[:60])}",
+                 f"{R.icon(e.get('site'))} {esc(e.get('who') or '')}" + (f" · 📦 Група №{e['group']}" if e.get("group") else ""),
+                 "<blockquote expandable>ℹ️ Як змінити\n🗑 — прибрати категорію. «➕ Додати» — напишіть теги через кому "
+                 "(напр. «снігопад, Полісся»). Те саме можна, відповівши на сам файл: «тег снігопад», «прибери тег Карпати».</blockquote>", ""]
+        rows = []
+        for kind, title in (("t", "🏷 Теми"), ("g", "📍 Локації"), ("l", "🗣 Мова")):
+            ks = e.get(R.KINDS[kind], [])
+            lines.append(f"{title}: " + (", ".join(esc(self.hist.name(kind, k)) for k in ks) if ks else "—"))
+            btn = [(f"🗑 {self.hist.name(kind, k)[:18]}", self.cb("tdel", rid, f"{kind}{i}")) for i, k in enumerate(ks)]
+            rows += [btn[j:j + 3] for j in range(0, len(btn), 3)]
+        rows.append([("➕ Додати", self.cb("tadd", rid))])
+        url = self.mh_link(rid)
+        rows.append([("« Архів", self.cb("arc"))])
+        if url:
+            lines.append(f'\n<a href="{esc(url)}">⬆️ Показати файл</a>')
+        return "\n".join(lines)[:4000], rows
+
+    async def ted_apply(self, chat, rid, text):
+        """Текст людини -> додати / прибрати категорії запису. -> короткий звіт."""
+        e = self.hist.get(chat, rid)
+        if not e:
+            return "Цього запису вже немає"
+        low = text.lower()
+        instr = R.parse_instr(text)
+        drop = instr["drop"] if instr else []
+        m_rm = re.match(r"\s*(?:прибери|видали|забери|зніми|прибрати)\s+(?:тег\w*|категорі\w*)?\s*(.+)", low)
+        if m_rm:
+            drop += [R.clean_tag(t) for t in re.split(r"[,;]|\s+і\s+", m_rm.group(1)) if R.clean_tag(t)]
+            add = []
+        else:
+            add = (instr or {}).get("add") or ((G.own_tags(text) or {}).get("add", []) if not instr else [])
+        t_k, g_k = list(e.get("topics", [])), list(e.get("geos", []))
+        for kind, k in (await self.user_tags(chat, add) if add else []):
+            lst = t_k if kind == "t" else g_k
+            if k not in lst:
+                lst.append(k)
+        for d in drop:
+            rx = R.stem_rx(d)
+            t_k = [k for k in t_k if not (rx and rx.search(self.hist.name("t", k)))]
+            g_k = [k for k in g_k if not (rx and rx.search(self.hist.name("g", k)))]
+        self.hist.update(chat, rid, topics=t_k, geos=g_k)
+        return "✅ Категорії оновлено"
 
     def _url_markup(self, rows):
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
