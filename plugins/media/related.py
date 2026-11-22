@@ -199,6 +199,9 @@ def guess_lang(text):
     return ""
 
 
+AI_USER = (" Користувач сам попросив поставити теги — обов'язково додай кожен у topics або places (визнач, тема це чи місце), "
+           "виправивши відмінок: name — називний, phrase — для «попереднє …» (полісся → Полісся, «з Полісся»; озером → озеро, «з озером»).")
+
 AI_SYSTEM = ("Ти визначаєш тему, локацію й мову допису з соцмережі для групування скачаних відео. Відповідай лише JSON без пояснень: "
              '{"topics":[{"name":"снігопад","phrase":"зі снігопадом"}],"places":[{"name":"Карпати","phrase":"з Карпат"}],"lang":"uk"}. '
              "name — українською, називний відмінок, коротко (1–3 слова), тема з малої літери, місце з великої. "
@@ -211,8 +214,9 @@ AI_SYSTEM = ("Ти визначаєш тему, локацію й мову до�
              "незрозуміла тема — topics: [].")
 
 
-def ai_prompt(text, geotag, known_t, known_g):
-    return (f"Текст допису:\n{(text or '')[:1500]}\n\nГеотег допису: {geotag or 'немає'}\n\n"
+def ai_prompt(text, geotag, known_t, known_g, user_tags=()):
+    ask = f"\n\nКористувач просить поставити теги: {', '.join(user_tags)}" if user_tags else ""
+    return (f"Текст допису:\n{(text or '')[:1500]}\n\nГеотег допису: {geotag or 'немає'}{ask}\n\n"
             f"Теми, що вже є: {', '.join(known_t[:120])}\nЛокації, що вже є: {', '.join(known_g[:120])}")
 
 
@@ -253,6 +257,60 @@ def merge(*lists):
                 seen.add(key_of(name))
                 out.append((name, phrase))
     return out
+
+
+# ✍️ Вказівки користувача разом із посиланням: «сортуй по тегу полісся», «групуй всі за озером»,
+# «не став тег снігопад», «без тегів»
+_VERB = r"(?:сортуй|сортувати|групуй|групувати|додай|постав|став|познач|тег|теги|тегом|тегу|категорі\w*)"
+_NO_ALL = re.compile(r"(?:без|не\s+(?:став|ставь|додавай|треба|потрібно|сортуй|групуй|познач)\w*)\s+(?:жодних\s+|ніяких\s+|взагалі\s+)?"
+                     r"(?:тег(?:и|ів)|сортуван\w*|групуван\w*|категорі[йї]|позначок)\b|не\s+(?:сортуй|групуй)\s*(?:взагалі|ніяк)?\s*$", re.I)
+_NO_ONE = re.compile(r"(?:без|не\s+(?:став|ставь|додавай|сортуй|групуй|познач|треба)\w*)\s+(?:тег\w*|категорі\w*|по|за|як)?\s*[«\"']?([^,.;!?\n«»\"']{2,40})", re.I)
+_ADD = re.compile(r"(?:сортуй|сортувати|групуй|групувати|додай|постав|познач)\w*\s+(?:(?:всі|все|усі|усе|його|це|їх)\s+)?"
+                  r"(?:(?:по|за|під|в|у|як|з)\s+)?(?:тег\w*|категорі\w*|темі|темою|тему|локаці\w*)?\s*(?:(?:по|за|під|з)\s+)?[«\"'#]?([^,.;!?\n«»\"']{2,40})"
+                  r"|(?:^|\s)(?:тег|теги|категорія)\s*[:\-]?\s*[«\"']?([^,.;!?\n«»\"']{2,40})|#([\w'’-]{2,40})", re.I)
+_TRIM = re.compile(r"^(?:тег\w*|категорі\w*|по|за|під|з|із|зі|як|темі|темою|тему|всі|все|усі|відео)\s+|\s+(?:будь ласка|плз|pls|і|й|та|а|але|ще)$", re.I)
+
+
+def clean_tag(raw):
+    t = (raw or "").strip(" «»\"'#-—:")
+    for _ in range(4):
+        t2 = _TRIM.sub("", t).strip()
+        if t2 == t:
+            break
+        t = t2
+    return t[:40]
+
+
+def parse_instr(text):
+    """Текст поруч із посиланням -> {"add": [...], "drop": [...], "none": bool} або None, якщо це не вказівки про теги."""
+    s = re.sub(r"https?://\S+", " ", text or "").strip()
+    if not s or not re.search(_VERB + r"|#\w", s, re.I):
+        return None
+    out = {"add": [], "drop": [], "none": False}
+    if _NO_ALL.search(s):
+        out["none"] = True
+        return out
+    rest = s
+    for m in _NO_ONE.finditer(s):
+        t = clean_tag(m.group(1))
+        if t:
+            out["drop"].append(t)
+        rest = rest.replace(m.group(0), " ")
+    for m in _ADD.finditer(rest):
+        for part in re.split(r"\s+(?:і|й|та|а також)\s+|\s*,\s*", next(g for g in m.groups() if g is not None)):
+            t = clean_tag(part)
+            if t and t.lower() not in ("тег", "теги") and t not in out["add"]:
+                out["add"].append(t)
+    return out if (out["add"] or out["drop"]) else None
+
+
+def stem_rx(name):
+    """Шаблон для пошуку назви в іншому тексті: основа кожного слова (Полісся → поліс…, озеро → озер…)."""
+    words = [w for w in re.findall(r"[\w'’]+", key_of(name)) if len(w) > 2]
+    if not words:
+        return None
+    parts = [re.escape(w[:max(4, len(w) - 2)] if len(w) > 4 else w) for w in words]
+    return re.compile(B + r"\w*\W+".join(parts), re.I)
 
 
 def norm_author(name):
@@ -342,6 +400,37 @@ class History:
                 self._save(data)
         return keys
 
+    def learn_user(self, kind, name, phrase):
+        """✍️ Тег, який поставив сам користувач: зберігається й надалі шукається в нових дописах."""
+        k = key_of(name)
+        with self.lock:
+            data = self._load()
+            voc = data.setdefault("_vocab", {}).setdefault(kind, {})
+            voc[k] = {"name": name, "phrase": phrase, "user": True}
+            self._save(data)
+        return k
+
+    def user_tags(self):
+        v = self._load().get("_vocab", {})
+        return [(kind, k, d) for kind in ("t", "g") for k, d in v.get(kind, {}).items() if d.get("user")]
+
+    def drop_user(self, kind, k):
+        with self.lock:
+            data = self._load()
+            d = data.get("_vocab", {}).get(kind, {}).get(k)
+            if d:
+                d.pop("user", None)
+                self._save(data)
+
+    def match_user(self, text):
+        """Збережені теги користувача, згадані в тексті допису -> {"t": [ключі], "g": [ключі]}."""
+        out = {"t": [], "g": []}
+        for kind, k, d in self.user_tags():
+            rx = stem_rx(d.get("name") or k)
+            if rx and rx.search(text or ""):
+                out[kind].append(k)
+        return out
+
     def name(self, kind, k):
         return self.vocab()[kind].get(k, {}).get("name") or k
 
@@ -355,7 +444,7 @@ class History:
             for k in e.get(KINDS[kind], []):
                 cnt[k] = cnt.get(k, 0) + 1
         voc = self.vocab()[kind]
-        return [voc[k]["name"] for k in sorted(voc, key=lambda k: -cnt.get(k, 0))[:limit]]
+        return [voc[k]["name"] for k in sorted(voc, key=lambda k: (not voc[k].get("user"), -cnt.get(k, 0)))[:limit]]
 
     def first_text(self, first):
         return ", ".join(("тема «" if kind == "t" else "локація «") + self.name(kind, k) + "»" for kind, k in first)

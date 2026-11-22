@@ -14,3 +14,5 @@
 ## З експорту діалогу (якщо колись знадобиться — tools/import_dialog.py)
 <!-- AUTO:LINKS -->
 <!-- /AUTO:LINKS -->
+
+- 22.11.2026 — приклад до тегів користувача: https://www.threads.com/share/_p0MF6MLV

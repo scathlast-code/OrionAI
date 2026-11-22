@@ -101,7 +101,7 @@ class Plugin(Base):
     summary = ("Завантаження відео, фото, аудіо й тексту дописів за посиланням із YouTube, Instagram, TikTok, Facebook, "
                "Threads, X, Telegram, Reddit, Vimeo та сотень інших сайтів: якість, MP3, GIF, без звуку, озвучка, субтитри, "
                "таймкоди, запис ефіру, ZIP. А також звіт і очищення метаданих власних файлів.")
-    VIEWS = {"ck", "tools", "help", "arc", "arcl", "rls"}
+    VIEWS = {"ck", "tools", "help", "arc", "arcl", "rls", "utg"}
 
     def __init__(self, host):
         super().__init__(host)
@@ -113,6 +113,7 @@ class Plugin(Base):
         self.tasks: dict[int, asyncio.Task] = {}
         self.offers: dict[str, tuple[int, str]] = {}
         self.live: dict[int, tuple[str, list]] = {}
+        self.instr: dict[int, dict] = {}  # ✍️ вказівки про теги до поточного завантаження
         self.got: dict[int, list] = {}  # чат -> файли останнього завантаження (для перегляду в Mini App)  # чат -> останній стан швидкого завантаження (для Mini App)
         self.hist = R.History(self.dir / "history.json")  # 🔗 історія скачаного: автор · тема · місце
         self.big = Big(self.dir, host.token)  # 🚀 файли до 2 ГБ через MTProto
@@ -164,9 +165,47 @@ class Plugin(Base):
     def rel_on(self, chat, k):
         return (self.pref(chat, "rel", {}) or {}).get(k, True)
 
-    async def detect(self, chat, text, geotag, who, alink):
-        """Тема, локація, мова: ШІ (без обмежень) + словник; мова без тексту — як переважно пише автор.
-        -> (ключі тем, ключі локацій, ключі мов)."""
+    async def user_tags(self, chat, raw):
+        """✍️ Теги, які людина написала поруч із посиланням -> [(вид, ключ)]; зберігаються назавжди."""
+        found = []
+        ans = ""
+        if self.rel_on(chat, "ai"):
+            try:
+                ans, _m = await asyncio.wait_for(self.host.ask_ai(
+                    "Теги від користувача: " + "; ".join(raw) + "\nПоверни JSON: "
+                    '{"tags":[{"name":"Полісся","phrase":"з Полісся","kind":"place"},{"name":"озеро","phrase":"з озером","kind":"topic"}]} — '
+                    "по одному на кожен тег, у тому ж порядку. name — називний відмінок українською (місце з великої, тема з малої), "
+                    "phrase — продовження «попереднє …», kind — place (місце, регіон, країна, водойма з назвою) або topic.",
+                    label="✍️ Теги користувача"), 30)
+            except Exception:  # noqa: BLE001
+                ans = ""
+        items = []
+        mm = re.search(r"\{.*\}", ans or "", re.S)
+        if mm:
+            try:
+                items = [t for t in __import__("json").loads(mm.group(0)).get("tags", []) if isinstance(t, dict) and t.get("name")]
+            except ValueError:
+                items = []
+        for i, tag in enumerate(raw):
+            it = items[i] if i < len(items) else None
+            seed = next(((kind, k) for kind in ("g", "t") for k, d in R.SEED[kind].items()
+                         if R.stem_rx(d["name"]) and R.stem_rx(d["name"]).search(tag)), None)
+            if it:
+                kind = "g" if str(it.get("kind", "")).startswith("p") else "t"
+                name, phrase = str(it["name"])[:40], str(it.get("phrase") or "")[:50] or "· " + str(it["name"])[:40]
+            elif seed:
+                kind, name, phrase = seed[0], R.SEED[seed[0]][seed[1]]["name"], R.SEED[seed[0]][seed[1]]["phrase"]
+            else:  # без ШІ — як написала людина
+                kind, name, phrase = "t", tag.strip(), "· " + tag.strip()
+            found.append((kind, self.hist.learn_user(kind, name, phrase)))
+        return found
+
+    async def detect(self, chat, text, geotag, who, alink, instr=None):
+        """Тема, локація, мова: ШІ (без обмежень) + словник + збережені теги людини + її вказівки до посилання;
+        мова без тексту — як переважно пише автор. -> (ключі тем, ключі локацій, ключі мов) або None — «без тегів»."""
+        instr = instr or {}
+        if instr.get("none"):
+            return None
         d_t, d_g = R.tags(f"{text}\n{geotag}")
         a_t, a_g, lang = [], [], ""
         body = (text or "").strip()
@@ -184,7 +223,17 @@ class Plugin(Base):
         lang = lang or R.guess_lang(body)
         if not lang:  # без тексту — мова, якою переважно пише автор
             lang = await self.author_lang(chat, who, alink)
-        return self.hist.learn("t", topics), self.hist.learn("g", geos), self.hist.learn("l", R.lang_pair(lang))
+        t_k, g_k, l_k = self.hist.learn("t", topics), self.hist.learn("g", geos), self.hist.learn("l", R.lang_pair(lang))
+        mine = self.hist.match_user(f"{text}\n{geotag}")  # ✍️ збережені теги людини, згадані в дописі
+        t_k += [k for k in mine["t"] if k not in t_k]
+        g_k += [k for k in mine["g"] if k not in g_k]
+        for kind, k in (await self.user_tags(chat, instr["add"]) if instr.get("add") else []):
+            (t_k if kind == "t" else g_k).insert(0, k) if k not in (t_k if kind == "t" else g_k) else None
+        for d in instr.get("drop", []):  # «не став тег …»
+            rx = R.stem_rx(d)
+            for lst, kind in ((t_k, "t"), (g_k, "g"), (l_k, "l")):
+                lst[:] = [k for k in lst if not (k == R.key_of(d) or (rx and rx.search(self.hist.name(kind, k))))]
+        return t_k, g_k, l_k
 
     async def author_lang(self, chat, who, alink):
         """Переважна мова автора: з його попередніх скачаних дописів, інакше — з опису його сторінки."""
@@ -271,7 +320,7 @@ class Plugin(Base):
         rows = [[(f"👤 Автори · {len(g['a'])}", self.cb("arcl", "a")), (f"🏷 Теми · {len(g['t'])}", self.cb("arcl", "t"))],
                 [(f"📍 Локації · {len(g['g'])}", self.cb("arcl", "g")), (f"🗣 Мови · {len(g['l'])}", self.cb("arcl", "l"))],
                 [(f"{R.EXTRA_NAME[k]} · {len(g['x'][k])}", self.cb("arcl", "x", k)) for k in ("notopic", "nogeo", "first") if g["x"].get(k)],
-                [("⚙️ Що пов'язувати", self.cb("rls"))], [("« Медіа", self.cb())]]
+                [("✍️ Мої теги", self.cb("utg")), ("⚙️ Що пов'язувати", self.cb("rls"))], [("« Медіа", self.cb())]]
         return t, [r for r in rows if r]
 
     def arc_keys(self, chat, kind):
@@ -316,6 +365,31 @@ class Plugin(Base):
             fx = (" · " + esc(self.hist.first_text([tuple(f.split(":", 1)) for f in e["first"]]))) if k == "first" and e.get("first") else ""
             lines.append(f"• {head} · {R.icon(e.get('site'))} {esc(e.get('who') or '')}{fx} · {esc(R.ts_text(e.get('ts')))}")
         return "\n".join(lines)[:4000], [[("« Архів", self.cb("arc"))]]
+
+    @staticmethod
+    def instr_text(instr):
+        if instr.get("none"):
+            return "✍️ Добре — це завантаження без тегів і сортування."
+        parts = []
+        if instr.get("add"):
+            parts.append("додам тег: " + ", ".join(f"«{t}»" for t in instr["add"]) + " (збережу — надалі шукатиму його й сам)")
+        if instr.get("drop"):
+            parts.append("не ставлю: " + ", ".join(f"«{t}»" for t in instr["drop"]))
+        return "✍️ " + "; ".join(parts)
+
+    def mytags_screen(self, chat):
+        tags = self.hist.user_tags()
+        g = self.hist.groups(chat)
+        t = ("✍️ <b>Мої теги</b>\n<blockquote expandable>ℹ️ Як додати\nНадішліть посилання і поруч напишіть, напр.: «сортуй по тегу полісся», "
+             "«групуй всі за озером», «тег: Шацькі озера», «#полісся». Бот поставить тег, збереже його й надалі сам шукатиме в нових дописах. "
+             "«не став тег снігопад» — без одного тегу; «без тегів» — це завантаження без сортування взагалі.</blockquote>\n\n"
+             + ("Поки немає." if not tags else "Дотик — прибрати тег зі збережених (уже скачане лишається в групі)."))
+        rows = []
+        for i, (kind, k, d) in enumerate(tags[:40]):
+            n = len(g[kind].get(k, []))
+            rows.append([(f"🗑 {'📍' if kind == 'g' else '🏷'} {d.get('name', k)[:28]} · {n}", self.cb("utd", i))])
+        rows.append([("« Архів", self.cb("arc"))])
+        return t, rows
 
     def rel_screen(self, chat):
         t = ("⚙️ <b>Що пов'язувати з новими завантаженнями</b>\n\nУвімкнене з'являється під кожним новим файлом: "
@@ -460,6 +534,14 @@ class Plugin(Base):
             return None, self.arc_extra(chat, y)
         if a == "arcl" and x in ("a", "t", "g", "l"):
             return None, self.arc_list(chat, x, int(y) if y.isdigit() else None)
+        if a == "utg":
+            return None, self.mytags_screen(chat)
+        if a == "utd" and x.isdigit():
+            tags = self.hist.user_tags()
+            if int(x) < len(tags):
+                kind, k, _d = tags[int(x)]
+                self.hist.drop_user(kind, k)
+            return "🗑 Прибрано", self.mytags_screen(chat)
         if a == "rls":
             return None, self.rel_screen(chat)
         if a == "rlt" and x in dict(self.REL):
@@ -656,7 +738,7 @@ class Plugin(Base):
             if not m:
                 self.ask(chat, "url")
                 return "Не бачу посилання", ("⚠️ Потрібне посилання, що починається з https://", [[("✖️ Скасувати", "m:cancel")]])
-            toast = self.start_quick(chat, m[0].rstrip(").,]»"))
+            toast = self.start_quick(chat, m[0].rstrip(").,]»"), R.parse_instr(text))
             return toast, (self.live_screen(chat) if self.in_app() else None)
         job = self.jobs.get(chat)
         if not job or job.token != data:
@@ -711,12 +793,19 @@ class Plugin(Base):
         if not msg or msg.chat.type != "private" or not msg.text:
             return False
         m = URL_ONLY.match(msg.text)
+        instr = None
+        if not m:  # посилання + вказівки про теги: «сортуй по тегу полісся», «без тегів»
+            mm = re.search(r"https?://\S+", msg.text)
+            instr = R.parse_instr(msg.text) if mm and len(re.findall(r"https?://", msg.text)) == 1 else None
+            m = (None, mm[0].rstrip(").,]»")) if instr else None
         if not m or self.host.extra.get("awaiting", lambda c: False)(msg.chat_id):
             return False
         host = (M.urlsplit(m[1]).hostname or "").lower()
         if not M.domain_matches(host, MEDIA_HOSTS):
             return False
-        toast = self.start_quick(msg.chat_id, m[1])
+        toast = self.start_quick(msg.chat_id, m[1], instr)
+        if instr and not toast:
+            await msg.reply_text(self.instr_text(instr))
         if toast or self.in_app():
             await msg.reply_text(toast or "📥 Завантажую. Стан — у розділі «📥 Медіа», файл прийде в чат з ботом.")
         return True
@@ -789,10 +878,12 @@ class Plugin(Base):
         self.tasks[chat] = task
 
     # ---------------------------------------------------------------- 1 крок: посилання → файл
-    def start_quick(self, chat, url):
-        """Повертає текст лише якщо почати не можна; інакше все показує саме повідомлення-статус."""
+    def start_quick(self, chat, url, instr=None):
+        """Повертає текст лише якщо почати не можна; інакше все показує саме повідомлення-статус.
+        instr — вказівки людини про теги («сортуй по тегу полісся», «без тегів»)."""
         if self.busy(chat):
             return "⏳ Ще завантажую попереднє — дочекайтесь або зупиніть: /media"
+        self.instr[chat] = instr or {}
         self.live[chat] = (f"🔎 Шукаю: {esc(M.describe_source(url))}…", [])
         self._bg(chat, self.quick(chat, url))
         return None
@@ -1488,14 +1579,19 @@ class Plugin(Base):
                     who_html = (f'<a href="{esc(link)}">{esc(who)}</a>' if link else esc(who)) if who else ""
                     site = M.site_name(job.url) if str(job.url).startswith("http") else (job.__dict__.get("src") or "")
                     geotag = M.geotag(info)
-                    rel_t, rel_g, rel_l = await self.detect(chat, desc or "", geotag, who, link)
-                    rel_line, rel_len, rel_btns, rel_f = self.related_parts(chat, who, rel_t, rel_g, rel_l)
+                    rel = await self.detect(chat, desc or "", geotag, who, link, self.instr.get(chat))
+                    if rel is None:  # людина попросила без тегів — без сортування й без запису
+                        rel_t = rel_g = rel_l = rel_f = rel_btns = []
+                        rel_line, rel_len = "", 0
+                    else:
+                        rel_t, rel_g, rel_l = rel
+                        rel_line, rel_len, rel_btns, rel_f = self.related_parts(chat, who, rel_t, rel_g, rel_l)
                     if geotag:
                         rel_line, rel_len = f"\n📍 {esc(geotag[:60])}" + rel_line, rel_len + len(geotag[:60]) + 3
                     tail = (f"\n\n👤 {who_html}" if who else "\n") + (f" · {esc(site)}" if site else "") \
                         + (f' · <a href="{esc(job.url)}">🔗 Допис</a>' if str(job.url).startswith("http") else "") + song_html + rel_line
                     tail_len = len(f"\n\n👤 {who} · {site} · 🔗 Допис") + len(re.sub(r"<[^>]+>|&\w+;", "", song_html)) + rel_len
-                    recorded = False
+                    recorded = rel is None
                     first = True
                     for out in outs + tracks:
                         cap = ""

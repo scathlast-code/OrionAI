@@ -66,3 +66,23 @@ def test_geotag():
     assert M.geotag({"location": {"name": "Synevyr Lake"}}) == "Synevyr Lake"
     assert M.geotag({"location": "Буковель"}) == "Буковель"
     assert M.geotag({}) == ""
+
+
+def test_parse_instr():
+    P = R.parse_instr
+    assert P("https://www.threads.com/share/_p0MF6MLV\n\nсортуй по тегу полісся")["add"] == ["полісся"]
+    assert P("https://x.y/z групуй всі за озером")["add"] == ["озером"]
+    assert P("https://x.y/z без тегів")["none"] and P("не став теги")["none"] and P("не сортуй")["none"]
+    r = P("групуй за озером, але без тегу снігопад")
+    assert r["add"] == ["озером"] and r["drop"] == ["снігопад"]
+    assert P("#полісся #зима")["add"] == ["полісся", "зима"]
+    assert P("що це за відео?") is None and P("https://x.y/z") is None
+
+
+def test_user_tags_saved_and_matched(tmp_path):
+    h = R.History(tmp_path / "h.json")
+    k = h.learn_user("g", "Полісся", "з Полісся")
+    assert h.label("g", k) == "з Полісся" and h.known("g")[0] == "Полісся"  # свої теги — першими для ШІ
+    assert h.match_user("Туман на Поліссі зранку")["g"] == [k]
+    h.drop_user("g", k)
+    assert h.user_tags() == []
