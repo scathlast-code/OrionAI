@@ -91,3 +91,47 @@ def html_cut(text, limit=4000, tail=""):
             stack.append(name)
     closing = "".join(f"</{t}>" for t in reversed(stack))
     return cut + "…" + closing + tail
+
+
+def html_split(text, limit=3900):
+    """Ділить довгий HTML на частини для Telegram, не розриваючи тегів: відкриті <b>, <blockquote>… закриваються
+    в кінці частини й відкриваються знову на початку наступної. Ріже по порожніх рядках, за потреби — по рядках."""
+    text = text or ""
+    if visible_len(text) <= limit:
+        return [text]
+    parts, cur, opened = [], "", []  # opened — повні відкривні теги, що діють на межі
+
+    def stack_after(chunk, start):
+        st = list(start)
+        for m in _TAG.finditer(chunk):
+            name = m.group(2).lower()
+            if m.group(1):
+                for i in range(len(st) - 1, -1, -1):
+                    if re.match(rf"<{name}\b", st[i], re.I):
+                        del st[i:]
+                        break
+            else:
+                st.append(m.group(0))
+        return st
+
+    def close(st):
+        return "".join(f"</{re.match(r'<(\w[\w-]*)', t).group(1)}>" for t in reversed(st))
+
+    pieces = re.split(r"(\n\n)", text)
+    lines = []
+    for p in pieces:
+        if visible_len(p) > limit:  # завеликий абзац — по рядках
+            lines += re.split(r"(\n)", p)
+        else:
+            lines.append(p)
+    start = []
+    for seg in lines:
+        if cur and visible_len(cur + seg) > limit:
+            st = stack_after(cur, start)
+            parts.append("".join(start) + cur + close(st))
+            start, cur = st, ""
+            seg = seg.lstrip("\n")
+        cur += seg
+    if cur.strip():
+        parts.append("".join(start) + cur)
+    return [html_cut(p, 4000) for p in parts if p.strip()]

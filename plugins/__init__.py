@@ -64,12 +64,27 @@ class Host:
                 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
                 markup = InlineKeyboardMarkup([[InlineKeyboardButton(t, callback_data=d) if not d.startswith("url:")
                                                 else InlineKeyboardButton(t, url=d[4:]) for t, d in row] for row in rows])
-        try:
-            return await bot.send_message(chat_id, text[:4096], parse_mode="HTML", reply_markup=markup,
-                                          disable_web_page_preview=True)
-        except Exception:  # noqa: BLE001
-            log.exception("plugin notify failed")
-            return None
+        from footnotes import html_split
+        import notify as _nt
+        quiet = _nt.apply(chat_id, {}, True)  # 🔕 тихий режим людини для цього типу (ранкове зведення — тихо)
+        parts = html_split(text or "", 3900)  # довге (ранкове зведення тощо) — кількома повідомленнями, теги не рвуться
+        sent = None
+        for i, part in enumerate(parts):
+            last = i == len(parts) - 1
+            try:
+                sent = await bot.send_message(chat_id, part, parse_mode="HTML", reply_markup=markup if last else None,
+                                              disable_web_page_preview=True, **quiet)
+            except Exception:  # noqa: BLE001
+                log.exception("plugin notify failed — надсилаю без оформлення")
+                try:  # запасний шлях: той самий текст без розмітки, щоб повідомлення не пропало
+                    import html as _h
+                    import re as _re
+                    plain = _h.unescape(_re.sub(r"<[^>]+>", "", part))[:4096]
+                    sent = await bot.send_message(chat_id, plain, reply_markup=markup if last else None,
+                                                  disable_web_page_preview=True, **quiet)
+                except Exception:  # noqa: BLE001
+                    log.exception("plugin notify failed")
+        return sent
 
     async def notify_admins(self, text, rows=None):
         import notify
