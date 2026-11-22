@@ -31,6 +31,7 @@ from pathlib import Path
 from plugins import Plugin as Base, esc
 from . import media as M
 from . import related as R
+from . import group as G
 from .common import JobError, TELEGRAM_IN, TELEGRAM_OUT, run, safe_name
 from .metadata import REPORT_ONLY, clean, report, suffix
 from .bigsend import BIG_LIMIT, Big, Progress
@@ -118,7 +119,7 @@ class Plugin(Base):
     summary = ("Завантаження відео, фото, аудіо й тексту дописів за посиланням із YouTube, Instagram, TikTok, Facebook, "
                "Threads, X, Telegram, Reddit, Vimeo та сотень інших сайтів: якість, MP3, GIF, без звуку, озвучка, субтитри, "
                "таймкоди, запис ефіру, ZIP. А також звіт і очищення метаданих власних файлів.")
-    VIEWS = {"ck", "tools", "help", "arc", "arcl", "rls", "utg"}
+    VIEWS = {"ck", "tools", "help", "arc", "arcl", "rls", "utg", "gra", "grl"}
 
     def __init__(self, host):
         super().__init__(host)
@@ -130,7 +131,11 @@ class Plugin(Base):
         self.tasks: dict[int, asyncio.Task] = {}
         self.offers: dict[str, tuple[int, str]] = {}
         self.live: dict[int, tuple[str, list]] = {}
-        self.instr: dict[int, dict] = {}  # ✍️ вказівки про теги до поточного завантаження
+        self.instr: dict[int, dict] = {}
+        self.gctx: dict[int, dict] = {}       # 📦 поточне групове завантаження чату
+        self.gpend: dict[str, dict] = {}      # 📦 групи, що чекають вибору
+        self.user_stop: set = set()
+        self.ticks: dict[int, asyncio.Task] = {}  # ✍️ вказівки про теги до поточного завантаження
         self.got: dict[int, list] = {}  # чат -> файли останнього завантаження (для перегляду в Mini App)  # чат -> останній стан швидкого завантаження (для Mini App)
         self.hist = R.History(self.dir / "history.json")  # 🔗 історія скачаного: автор · тема · місце
         self.big = Big(self.dir, host.token)  # 🚀 файли до 2 ГБ через MTProto
@@ -343,7 +348,7 @@ class Plugin(Base):
         rows = [[(f"👤 Автори · {len(g['a'])}", self.cb("arcl", "a")), (f"🏷 Теми · {len(g['t'])}", self.cb("arcl", "t"))],
                 [(f"📍 Локації · {len(g['g'])}", self.cb("arcl", "g")), (f"🗣 Мови · {len(g['l'])}", self.cb("arcl", "l"))],
                 [(f"{R.EXTRA_NAME[k]} · {len(g['x'][k])}", self.cb("arcl", "x", k)) for k in ("notopic", "nogeo", "first") if g["x"].get(k)],
-                [("✍️ Мої теги", self.cb("utg")), ("⚙️ Що пов'язувати", self.cb("rls"))], [("« Медіа", self.cb())]]
+                [("📦 Групи", self.cb("grl")), ("✍️ Мої теги", self.cb("utg"))], [("⚙️ Що пов'язувати", self.cb("rls"))], [("« Медіа", self.cb())]]
         return t, [r for r in rows if r]
 
     def arc_keys(self, chat, kind):
@@ -413,6 +418,29 @@ class Plugin(Base):
             rows.append([(f"🗑 {'📍' if kind == 'g' else '🏷'} {d.get('name', k)[:28]} · {n}", self.cb("utd", i))])
         rows.append([("« Архів", self.cb("arc"))])
         return t, rows
+
+    def next_group(self, chat):
+        n = int(self.pref(chat, "gseq", 0) or 0) + 1
+        self.set_pref(chat, "gseq", n)
+        return n
+
+    def group_list(self, chat, gid=None):
+        es = [e for e in self.hist.items(chat) if e.get("group")]
+        if gid is None:
+            by = {}
+            for e in es:
+                by.setdefault(e["group"], []).append(e)
+            t = "📦 <b>Групові завантаження</b>\n\n" + ("Поки немає. Надішліть кілька посилань одним повідомленням." if not by else "Оберіть групу:")
+            rows = [[(f"№{k} · {len(v)} · {R.ts_text(v[0].get('ts'))[:10]}", self.cb("grl", k))] for k, v in sorted(by.items(), reverse=True)[:30]]
+            return t, rows + [[("« Архів", self.cb("arc"))]]
+        lst = [e for e in es if e.get("group") == gid]
+        lines = [f"📦 <b>Група №{gid}</b> · {len(lst)}", ""]
+        for e in lst:
+            url = self.mh_link(e["id"])
+            title = esc((e.get("title") or "файл")[:60])
+            lines.append(f"{e.get('gi', 0) + 1}. " + (f'<a href="{esc(url)}">{title}</a>' if url else title)
+                         + f" · {R.icon(e.get('site'))} {esc(e.get('who') or '')}")
+        return "\n".join(lines)[:4000], [[("« Групи", self.cb("grl"))], [("« Архів", self.cb("arc"))]]
 
     def rel_screen(self, chat):
         t = ("⚙️ <b>Що пов'язувати з новими завантаженнями</b>\n\nУвімкнене з'являється під кожним новим файлом: "
@@ -557,6 +585,35 @@ class Plugin(Base):
             return None, self.arc_extra(chat, y)
         if a == "arcl" and x in ("a", "t", "g", "l"):
             return None, self.arc_list(chat, x, int(y) if y.isdigit() else None)
+        if a == "gra" and x in self.gpend:
+            return None, self.group_screen(chat, x)
+        if a == "grm" and x in self.gpend and y in G.MODE_ICON:
+            self.gpend[x]["mode"] = y
+            return "Вигляд для всіх змінено", self.group_screen(chat, x)
+        if a == "gri" and x in self.gpend and y.isdigit():
+            it = self.gpend[x]["items"][int(y) - 1]
+            order = [""] + [k for k, _l in G.MODES]
+            it["mode"] = order[(order.index(it["mode"]) + 1) % len(order)]
+            return f"№{y}: " + (dict(G.MODES)[it["mode"]] if it["mode"] else "як для всіх"), self.group_screen(chat, x)
+        if a == "grt" and x in self.gpend and y.isdigit():
+            self.ask(chat, "grt", f"{x}:{y}")
+            return None, (f"✍️ <b>Теги для №{y}</b>\n\nНапишіть теги через кому (напр. «Полісся, озеро»), або «без тегів», "
+                          "або «не став тег снігопад». Порожнє «-» — повернути як було (теги визначу сам).", [[("« Група", self.cb("gra", x))]])
+        if a == "grx" and x in self.gpend:
+            self.gpend.pop(x, None)
+            return "Скасовано", self.home(chat)
+        if a == "grgo" and x in self.gpend:
+            if self.busy(chat):
+                return "⏳ Ще завантажую попереднє — дочекайтесь або зупиніть", None
+            g = self.gpend.pop(x)
+            gid = self.next_group(chat)
+            items = [{"url": it["url"], "mode": it["mode"] or g["mode"], "instr": G.merge_instr(g["common"], it["own"])}
+                     for it in g["items"]]
+            self.gctx[chat] = {"id": gid, "items": items, "left": list(range(len(items))), "n": len(items)}
+            self._bg(chat, self.group_run(chat))
+            return f"📦 Група №{gid}: починаю", None
+        if a == "grl":
+            return None, self.group_list(chat, int(x) if x.isdigit() else None)
         if a == "utg":
             return None, self.mytags_screen(chat)
         if a == "utd" and x.isdigit():
@@ -607,6 +664,7 @@ class Plugin(Base):
         if a == "stop":
             task = self.tasks.get(chat)
             if task and not task.done():
+                self.user_stop.add(chat)
                 task.cancel()
                 return "⏹ Зупиняю", self.home(chat)
             return "Активного завдання немає", self.home(chat)
@@ -732,6 +790,16 @@ class Plugin(Base):
         return None, self.job_screen(chat)
 
     async def on_text(self, update, ctx, chat, key, data, text):
+        if key == "grt":
+            tok, num = str(data).split(":")
+            g = self.gpend.get(tok)
+            if not g:
+                return "Група застаріла", self.home(chat)
+            g["items"][int(num) - 1]["own"] = None if text.strip() in ("-", "—") else G.own_tags(text)
+            return "✍️ Записано", self.group_screen(chat, tok)
+        return await self._on_text(update, ctx, chat, key, data, text)
+
+    async def _on_text(self, update, ctx, chat, key, data, text):
         text = (text or "").strip()
         if key == "spn":  # номери сторіс: «1, 3-5»
             job = self.job_by(chat, data)
@@ -815,6 +883,12 @@ class Plugin(Base):
         msg = update.message
         if not msg or msg.chat.type != "private" or not msg.text:
             return False
+        if len(G.URL.findall(msg.text)) >= 2 and not self.host.extra.get("awaiting", lambda c: False)(msg.chat_id) \
+                and not self.host.extra.get("utm_screen", lambda c: False)(msg.chat_id):  # 📦 кілька посилань — один вибір на всі
+            tok = self.group_offer(msg.chat_id, msg.text)
+            if tok:
+                await self.host.notify(msg.chat_id, *self.group_screen(msg.chat_id, tok))
+                return True
         m = URL_ONLY.match(msg.text)
         instr = None
         if not m:  # посилання + вказівки про теги: «сортуй по тегу полісся», «без тегів»
@@ -885,9 +959,15 @@ class Plugin(Base):
 
     def _bg(self, chat, coro):
         async def wrap():
+            shutdown = False
             try:
                 await coro
             except asyncio.CancelledError:
+                if chat not in self.user_stop:  # бот вимикається (оновлення) — не стираємо, після старту продовжимо
+                    shutdown = True
+                    raise
+                self.user_stop.discard(chat)
+                self.gctx.pop(chat, None)
                 await self.host.notify(chat, "⏹ Завдання зупинено.")
             except JobError as exc:
                 await self.host.notify(chat, f"⚠️ {esc(str(exc))[:3500]}")
@@ -895,11 +975,104 @@ class Plugin(Base):
                 log.exception("media job failed")
                 await self.host.notify(chat, f"⚠️ Не вдалося: {esc(type(exc).__name__)}")
             finally:
-                self._active(chat, done=True)
+                t_ = self.ticks.pop(chat, None)
+                if t_:
+                    t_.cancel()
+                if not shutdown:
+                    self._active(chat, done=True)
         # Чистий контекст: якщо завдання почали з Mini App, його повідомлення й файли мають іти в справжній чат,
         # а не в «перехоплювач» запиту застосунку, який уже завершився.
         task = asyncio.get_running_loop().create_task(wrap(), context=contextvars.Context())
         self.tasks[chat] = task
+
+    # ---------------------------------------------------------------- 📦 групове завантаження
+    def group_offer(self, chat, text):
+        """Кілька посилань одним повідомленням -> токен групи, що чекає вибору (або None)."""
+        sp = G.split(text)
+        if not sp:
+            return None
+        common, items = sp
+        tok = secrets.token_hex(3)
+        self.gpend[tok] = {"chat": chat, "common": common, "mode": "auto",
+                           "items": [{"url": u, "own": ins, "raw": raw, "mode": ""} for u, ins, raw in items[:30]]}
+        while len(self.gpend) > 50:
+            self.gpend.pop(next(iter(self.gpend)))
+        return tok
+
+    def group_screen(self, chat, tok):
+        g = self.gpend.get(tok)
+        if not g:
+            return "📦 Ця група вже запущена або застаріла — надішліть посилання ще раз.", [[("« Медіа", self.cb())]]
+        n = len(g["items"])
+        word = "допис" if n % 10 == 1 and n % 100 != 11 else ("дописи" if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else "дописів")
+        lines = [f"📦 <b>Групове завантаження · {n} {word}</b>",
+                 "<blockquote expandable>ℹ️ Як це працює\nОбираєте один раз — бот завантажує всі по черзі, кожен окремим дописом із "
+                 "власним підписом. Усі позначаються «📦 Група №…» і мають посилання на попередній із групи; в архіві — «📦 Групи». "
+                 "Вигляд: «Як є» — відео як відео, фото як фото. Свій вигляд для допису — кнопка з його номером (по колу). "
+                 "Теги: свої — кнопкою «✍️ №…» або текстом біля посилання («сортуй по тегу полісся», «без тегів»); "
+                 "без них — бот сам призначить теги кожному за тим, що знайде в дописі.</blockquote>", ""]
+        if g["common"]:
+            lines.append(f"Для всіх: {esc(G.instr_short(g['common']))}\n")
+        for i, it in enumerate(g["items"], 1):
+            mode = it["mode"] or g["mode"]
+            ins = G.merge_instr(g["common"], it["own"])
+            lines.append(f"{i}. {R.icon(M.site_name(it['url']))} {G.MODE_ICON[mode]} <code>{esc(it['url'][:60])}</code>\n    {esc(G.instr_short(ins))}")
+        rows = [[(("✅ " if g["mode"] == k else "") + lab, self.cb("grm", tok, k)) for k, lab in G.MODES[:3]],
+                [(("✅ " if g["mode"] == k else "") + lab, self.cb("grm", tok, k)) for k, lab in G.MODES[3:]]]
+        per = [(f"{i} {G.MODE_ICON[it['mode'] or g['mode']]}", self.cb("gri", tok, i)) for i, it in enumerate(g["items"], 1)]
+        rows += [per[k:k + 5] for k in range(0, len(per), 5)]
+        tg = [(f"✍️ №{i}", self.cb("grt", tok, i)) for i in range(1, n + 1)]
+        rows += [tg[k:k + 5] for k in range(0, len(tg), 5)]
+        rows.append([(f"▶️ Завантажити всі · {n}", self.cb("grgo", tok))])
+        rows.append([("✖️ Скасувати", self.cb("grx", tok))])
+        return "\n".join(lines)[:4000], rows
+
+    async def group_run(self, chat):
+        """По черзі: кожне посилання — самостійне завантаження з позначкою групи."""
+        g = self.gctx[chat]
+        n = len(g["items"])
+        gst = None
+        while g.get("left"):
+            i = g["left"][0]
+            g["i"] = i
+            it = g["items"][i]
+            done_n = n - len(g["left"])
+            gst = await self._status(chat, gst, f"📦 <b>Група №{g['id']}</b> · {done_n} з {n} готово · зараз №{i + 1}",
+                                     [[("⏹ Зупинити групу", self.cb("stop"))]])
+            g["mid"] = getattr(gst, "message_id", 0)
+            self.instr[chat] = it.get("instr") or {}
+            try:
+                await self.group_one(chat, it["url"], it.get("mode") or "auto")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — одна невдача не зупиняє групу
+                log.exception("group item failed")
+                g.setdefault("failed", []).append(f"№{i + 1}: {M.explain(exc) if isinstance(exc, JobError) else type(exc).__name__}")
+            g["left"].pop(0)
+            self._active(chat, done=True)  # черга збережена — після перезапуску продовжимо
+        fails = g.get("failed", [])
+        text = (f"✅ <b>Група №{g['id']}</b> · готово {n - len(fails)} з {n}" + ("\n\n⚠️ " + "\n".join(map(esc, fails)) if fails else ""))
+        await self._status(chat, gst, text, [[("📦 Відкрити групу в архіві", self.cb("grl", g["id"]))], [("« Медіа", self.cb())]])
+        self.gctx.pop(chat, None)
+        self.instr.pop(chat, None)
+
+    async def group_one(self, chat, url, mode):
+        """Одне посилання групи без жодних питань: знайти й одразу завантажити в обраному вигляді."""
+        src = M.describe_source(url)
+        status = await self._status(chat, None, f"🔎 Шукаю: <b>{esc(src)}</b>…")
+        url = await M.resolve_share(url)
+        with tempfile.TemporaryDirectory(prefix="orion-media-") as work:
+            items = await M.inspect_link(url, Path(work))
+        job = Job(secrets.token_hex(4), url, items[:QUICK_MAX])
+        dq = self.pref(chat, "q", "ask")
+        job.options.height = int(dq) if dq.isdigit() and dq != "0" else (0 if dq == "0" else 1080)
+        if mode in ("video", "audio", "gif", "mute"):
+            job.options.mode = mode
+        elif dq == "a":
+            job.options.mode = "audio"
+        job.__dict__["src"] = src
+        self.jobs[chat] = job
+        await self.download(chat, job, list(range(1, len(job.items) + 1)), status=status)
 
     # ---------------------------------------------------------------- 1 крок: посилання → файл
     def start_quick(self, chat, url, instr=None):
@@ -980,9 +1153,43 @@ class Plugin(Base):
                 # Нове — лише якщо старе зникло (видалене).
                 if "not found" not in why and "can't be edited" not in why:
                     return msg
-        return await self.host.notify(chat, text, rows) or msg
+        new = await self.host.notify(chat, text, rows) or msg
+        self._active_mid(chat, new)
+        return new
+
+    def _active_mid(self, chat, msg):
+        """Статус переїхав у нове повідомлення — запам'ятати, щоб після перезапуску виправити саме його."""
+        try:
+            data = json.loads(self._active_path().read_text("utf-8"))
+            if str(chat) in data and getattr(msg, "message_id", None):
+                data[str(chat)][0] = msg.message_id
+                self._active_path().write_text(json.dumps(data), "utf-8")
+        except Exception:  # noqa: BLE001
+            pass
 
     # ---- статуси, що пережили б перезапуск: бот відмічає, а після старту виправляє «завислі» повідомлення
+    def usual_time(self, site):
+        """Скільки зазвичай триває одне завантаження з цього сайту (середнє за попередніми), с."""
+        try:
+            d = json.loads((self.dir / "times.json").read_text("utf-8")).get(site)
+        except (OSError, ValueError):
+            d = None
+        return int(d[0]) if d else 0
+
+    def note_time(self, site, seconds, count=1):
+        try:
+            data = json.loads((self.dir / "times.json").read_text("utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        avg, n = data.get(site, [0, 0])
+        per = seconds / max(1, count)
+        n = min(n + 1, 20)  # ковзне середнє останніх ~20
+        data[site] = [round(avg + (per - avg) / n, 1), n]
+        try:
+            (self.dir / "times.json").write_text(json.dumps(data), "utf-8")
+        except OSError:
+            pass
+
     def _active_path(self):
         return self.dir / "active.json"
 
@@ -991,33 +1198,47 @@ class Plugin(Base):
             data = json.loads(self._active_path().read_text("utf-8"))
         except Exception:  # noqa: BLE001
             data = {}
-        if done:
+        g = self.gctx.get(chat)
+        if done and g and g.get("left"):  # у групі ще є черга — пам'ятаємо її, щоб після перезапуску продовжити
+            data[str(chat)] = [g.get("mid", 0), "", int(time.time()), {"grp": g}]
+        elif done:
             data.pop(str(chat), None)
         elif status is not None:
-            data[str(chat)] = [getattr(status, "message_id", 0), url or "", int(time.time())]
+            data[str(chat)] = [getattr(status, "message_id", 0), url or "", int(time.time()),
+                               {"instr": self.instr.get(chat) or {}, "grp": g}]
         try:
             self._active_path().write_text(json.dumps(data), "utf-8")
         except OSError:
             pass
 
     async def start(self):
-        """Після перезапуску: «🔎 Шукаю…» чи «⬇️ Завантажую…», що лишились від перерваного завдання — чесно позначити."""
+        """Після перезапуску (оновлення бота) перерване завантаження продовжується саме — і одиночне, і групове."""
         try:
             data = json.loads(self._active_path().read_text("utf-8"))
         except Exception:  # noqa: BLE001
             return
         self._active_path().unlink(missing_ok=True)
         await asyncio.sleep(5)
-        for chat, (mid, url, _t) in data.items():
-            t = secrets.token_hex(4)
-            self.offers[t] = (int(chat), url)
+        for chat, row in data.items():
+            mid, url, ts = row[0], row[1], row[2]
+            extra = row[3] if len(row) > 3 and isinstance(row[3], dict) else {}
+            chat = int(chat)
+            if time.time() - ts > 6 * 3600:
+                continue  # надто давнє — не відновлюємо без людини
             try:
-                await self.host.bot().edit_message_text(
-                    "⚠️ Завантаження перервалося: бот перезапускався (оновлення). Натисніть, щоб почати знову.",
-                    chat_id=int(chat), message_id=int(mid),
-                    reply_markup=self._markup([[("🔁 Спробувати ще раз", self.cb("re", t))]]))
+                await self.host.bot().edit_message_text("🔁 Бот оновлювався — продовжую завантаження сам.",
+                                                        chat_id=chat, message_id=int(mid))
             except Exception:  # noqa: BLE001
                 pass
+            g = extra.get("grp")
+            if g and g.get("items"):
+                g["left"] = [i for i in g.get("left", []) if i < len(g["items"])] or ([g.get("i", 0)] if url else [])
+                if url and g.get("i") is not None and g["i"] not in g["left"]:
+                    g["left"].insert(0, g["i"])  # той, що перервався, — спочатку
+                self.gctx[chat] = g
+                self._bg(chat, self.group_run(chat))
+            elif url:
+                self.start_quick(chat, url, extra.get("instr") or None)
 
     async def quick(self, chat, url):
         stop = [[("⏹ Зупинити", self.cb("stop"))]]
@@ -1558,14 +1779,39 @@ class Plugin(Base):
         last = [0.0]
         t0 = time.time()
 
-        async def stage(text, force=False):
+        cur = {"text": "", "bar": False, "t": time.time(), "shown": 0.0}
+        site = M.site_name(job.url) if str(job.url).startswith("http") else "файл"
+        usual = self.usual_time(site)
+
+        def clock():
+            el = int(time.time() - cur["t"])
+            line = f"⏱ минуло {el // 60}:{el % 60:02d}"
+            if not cur["bar"] and usual:  # байтів ще не видно — орієнтир за попередніми завантаженнями з цього сайту
+                left = max(0, usual - el)
+                line += f" · зазвичай ≈{usual // 60}:{usual % 60:02d}" + (f", лишилось ≈{left // 60}:{left % 60:02d}" if left else ", ось-ось")
+            return line
+
+        async def stage(text, force=False, has_bar=False):
             """Живий стан: застосунок бачить кожне оновлення, повідомлення в чаті — не частіше ніж раз на 3 с."""
             nonlocal status
-            self.live[chat] = (text, [])
+            cur["text"], cur["bar"] = text, has_bar
+            full = text + "\n" + clock()
+            self.live[chat] = (full, [])
             now = asyncio.get_running_loop().time()
             if force or now - last[0] >= 3:
                 last[0] = now
-                status = await self._status(chat, status, text, stop)
+                cur["shown"] = now
+                status = await self._status(chat, status, full, stop)
+
+        async def ticker():  # кожні 5 с — минулий час і орієнтир, навіть коли сайт ще не віддає байтів
+            while True:
+                await asyncio.sleep(5)
+                if cur["text"] and asyncio.get_running_loop().time() - cur["shown"] >= 4.5:
+                    await stage(cur["text"], force=True, has_bar=cur["bar"])
+        old_tick = self.ticks.pop(chat, None)
+        if old_tick:
+            old_tick.cancel()
+        tick = self.ticks[chat] = asyncio.get_running_loop().create_task(ticker())
         with tempfile.TemporaryDirectory(prefix="orion-media-") as root:
             root = Path(root)
             for k, n in enumerate(nums, 1):
@@ -1581,9 +1827,10 @@ class Plugin(Base):
                         + f"\n📍 {esc(src)}{left}")
 
                 async def on_dl(done, total, speed, eta, head=head):
-                    await stage(f"{head}\n{bar(done, total, speed, eta)}")
+                    await stage(f"{head}\n{bar(done, total, speed, eta)}", has_bar=bool(total))
                 try:
-                    await stage(head + "…", force=True)
+                    cur["t"] = time.time()
+                    await stage(head + "\n⏳ чекаю відповідь сайту…", force=True)
                     path, tracks, info = await M.fetch(item, job.url, opts, work, progress=on_dl)
                     if path and (opts.mode != "video" or opts.cuts):
                         await stage(f"⚙️ Обробляю: {esc(item.title[:90])}…", force=True)
@@ -1612,10 +1859,18 @@ class Plugin(Base):
                         rel_line, rel_len, rel_btns, rel_f = self.related_parts(chat, who, rel_t, rel_g, rel_l)
                     if geotag:
                         rel_line, rel_len = f"\n📍 {esc(geotag[:60])}" + rel_line, rel_len + len(geotag[:60]) + 3
+                    gx = self.gctx.get(chat)
+                    if gx:  # 📦 позначка групи й посилання на попередній із неї
+                        prev = next((e for e in reversed(self.hist.items(chat)) if e.get("group") == gx["id"]), None)
+                        gl = f"\n📦 Група №{gx['id']} · {gx['i'] + 1}/{gx['n']}"
+                        rel_len += len(gl) + (len(" · попередній з групи") if prev else 0)
+                        if prev and self.mh_link(prev["id"]):
+                            gl += f' · <a href="{esc(self.mh_link(prev["id"]))}">попередній з групи</a>'
+                        rel_line = gl + rel_line
                     tail = (f"\n\n👤 {who_html}" if who else "\n") + (f" · {esc(site)}" if site else "") \
                         + (f' · <a href="{esc(job.url)}">🔗 Допис</a>' if str(job.url).startswith("http") else "") + song_html + rel_line
                     tail_len = len(f"\n\n👤 {who} · {site} · 🔗 Допис") + len(re.sub(r"<[^>]+>|&\w+;", "", song_html)) + rel_len
-                    recorded = rel is None
+                    recorded = rel is None and not gx  # «без тегів» у групі — запис лише для позначки групи
                     first = True
                     for out in outs + tracks:
                         cap = ""
@@ -1638,13 +1893,14 @@ class Plugin(Base):
                         await stage(up + "…", force=True)
 
                         async def on_up(done, total, up=up):
-                            await stage(f"{up}\n{bar(done, total)}")
+                            await stage(f"{up}\n{bar(done, total)}", has_bar=bool(total))
                         msg_ = await self.send_media(chat, out, cap, on_progress=on_up,
                                                      markup=None if recorded else self._url_markup([[b] for b in rel_btns]))
                         if not recorded and getattr(msg_, "message_id", None):  # 🔗 запам'ятовуємо для «попереднє …»
                             recorded = True
                             self.hist.add(chat, msg=msg_.message_id, author=R.norm_author(who), who=who, alink=link, site=site,
-                                          url=str(job.url), title=(desc or item.title or "")[:80], topics=rel_t, geos=rel_g, langs=rel_l, first=rel_f, geotag=geotag)
+                                          url=str(job.url), title=(desc or item.title or "")[:80], topics=rel_t, geos=rel_g, langs=rel_l, first=rel_f, geotag=geotag,
+                                          **({"group": gx["id"], "gi": gx["i"]} if gx else {}), **({"notag": True} if rel is None else {}))
                         sent.append(out.name)
                         kept = self.keep(out)
                         if kept:
@@ -1675,6 +1931,9 @@ class Plugin(Base):
                     code = getattr(getattr(exc, "response", None), "status_code", None)
                     failed.append(f"{n} · " + (f"сайт не віддав файл (HTTP {code}) — спробуйте ще раз або інший формат"
                                                if code else esc(type(exc).__name__)))
+            tick.cancel()
+            if sent:
+                self.note_time(site, time.time() - t0, len(nums))
             if bundle:
                 pack = root / (safe_name(job.items[nums[0] - 1].title, "media")[:60] + ".zip")
                 with zipfile.ZipFile(pack, "w", zipfile.ZIP_STORED) as z:
