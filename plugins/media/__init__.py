@@ -327,9 +327,20 @@ class Plugin(Base):
                     buttons.append((f"{R.icon(st)} Попереднє відео автора", url))
         return line, vis, buttons, [f"{a}:{b}" for a, b in first]
 
+    @staticmethod
+    def when_size(e):
+        """«22.11.2026 14:07 · 8.0 МБ» — точний час скачування й розмір файлу."""
+        return R.ts_text(e.get("ts")) + (f" · {mb(e['size'])}" if e.get("size") else "")
+
     def related_all(self, chat, e, limit=15):
         """Усе скачане, пов'язане з цим записом: за кожною темою, локацією й автором -> [(заголовок, [записи])]."""
-        es = [x for x in self.hist.items(chat) if x.get("id") != e.get("id") and not x.get("notag")]
+        seen, es = {R.norm_url(e.get("url", ""))}, []
+        for x in reversed(self.hist.items(chat)):  # той самий допис, скачаний кілька разів, — один раз (найновіший)
+            k = R.norm_url(x.get("url", "")) or str(x.get("id"))
+            if x.get("id") != e.get("id") and not x.get("notag") and k not in seen:
+                seen.add(k)
+                es.append(x)
+        es.reverse()
         out = []
         if e.get("author"):
             same = [x for x in es if x.get("author") == e["author"]]
@@ -346,7 +357,7 @@ class Plugin(Base):
                 out.append((f"📦 Група №{e['group']}", same))
         return [(h, list(reversed(lst))[:limit], len(lst)) for h, lst in out]
 
-    async def jump(self, chat, rid):
+    async def jump(self, chat, rid, head=None, extra_rows=None):
         """↩️ «попереднє …»: відповідь на той допис (дотик до цитати — і ви там) зі списком УСЬОГО пов'язаного:
         та сама тема, локація, автор, група. Список згорнутий — розгортається й гортається."""
         bot = self.host.bot()
@@ -354,20 +365,20 @@ class Plugin(Base):
         if not e:
             return await self.host.notify(chat, "Цього запису в історії скачаного вже немає.")
         parts = []
-        for head, lst, total in self.related_all(chat, e):
+        for sec, lst, total in self.related_all(chat, e):
             lines = []
             for x in lst:
                 url = self.mh_link(x["id"])
                 title = esc((x.get("title") or "файл").replace("\n", " ")[:50])
                 lines.append(("• " + (f'<a href="{esc(url)}">{title}</a>' if url else title)
-                              + f" · {R.icon(x.get('site'))} {esc(R.ts_text(x.get('ts'))[:10])}"))
+                              + f" · {R.icon(x.get('site'))} {esc(self.when_size(x))}"))
             more = f"\n…ще {total - len(lst)} — в «🗂 Архів скачаного»" if total > len(lst) else ""
-            parts.append(f"<b>{esc(head)}</b> · {total}\n" + "\n".join(lines) + more)
-        head = "⬆️ <b>Цей допис</b> — торкніться цитати, щоб перейти до нього"
+            parts.append(f"<b>{esc(sec)}</b> · {total}\n" + "\n".join(lines) + more)
+        head = head or f"⬆️ <b>Цей допис</b> — торкніться цитати, щоб перейти до нього\n🕓 Скачано {esc(self.when_size(e))}"
         body = (head + "\n\n🔗 <b>Пов'язане</b>\n<blockquote expandable>" + "\n\n".join(parts) + "</blockquote>") if parts \
             else head + "\n\nІнших пов'язаних завантажень поки немає."
         from footnotes import html_split
-        kb = self._markup([[("🏷 Категорії", self.cb("ted", rid))]])
+        kb = self._markup((extra_rows or []) + [[("🏷 Категорії", self.cb("ted", rid))]])
         chunks = html_split(body, 3900)
         try:
             for i, ch in enumerate(chunks):
@@ -423,7 +434,7 @@ class Plugin(Base):
             url = self.mh_link(e["id"])
             title = esc((e.get("title") or "файл")[:60])
             head = f'<a href="{esc(url)}">{title}</a>' if url else title
-            lines.append(f"• {head} · {R.icon(e.get('site'))} {esc(e.get('who') or '')} · {esc(R.ts_text(e.get('ts')))}")
+            lines.append(f"• {head} · {R.icon(e.get('site'))} {esc(e.get('who') or '')} · {esc(self.when_size(e))}")
         return "\n".join(lines)[:4000], [[("« " + name.split(" ", 1)[1], self.cb("arcl", kind))], [("« Архів", self.cb("arc"))]]
 
     def arc_extra(self, chat, k):
@@ -434,7 +445,7 @@ class Plugin(Base):
             title = esc((e.get("title") or "файл")[:60])
             head = f'<a href="{esc(url)}">{title}</a>' if url else title
             fx = (" · " + esc(self.hist.first_text([tuple(f.split(":", 1)) for f in e["first"]]))) if k == "first" and e.get("first") else ""
-            lines.append(f"• {head} · {R.icon(e.get('site'))} {esc(e.get('who') or '')}{fx} · {esc(R.ts_text(e.get('ts')))}")
+            lines.append(f"• {head} · {R.icon(e.get('site'))} {esc(e.get('who') or '')}{fx} · {esc(self.when_size(e))}")
         return "\n".join(lines)[:4000], [[("« Архів", self.cb("arc"))]]
 
     @staticmethod
@@ -482,7 +493,7 @@ class Plugin(Base):
             url = self.mh_link(e["id"])
             title = esc((e.get("title") or "файл")[:60])
             lines.append(f"{e.get('gi', 0) + 1}. " + (f'<a href="{esc(url)}">{title}</a>' if url else title)
-                         + f" · {R.icon(e.get('site'))} {esc(e.get('who') or '')}")
+                         + f" · {R.icon(e.get('site'))} {esc(e.get('who') or '')} · {esc(self.when_size(e))}")
         return "\n".join(lines)[:4000], [[("« Групи", self.cb("grl"))], [("« Архів", self.cb("arc"))]]
 
     def rel_screen(self, chat):
@@ -1089,13 +1100,20 @@ class Plugin(Base):
                     shutdown = True
                     raise
                 self.user_stop.discard(chat)
-                self.gctx.pop(chat, None)
-                await self.host.notify(chat, "⏹ Завдання зупинено.")
+                g = self.gctx.pop(chat, None)
+                if chat not in self.just_done and self.cur_url.get(chat):  # зупинили до кінця — посилання збережемо
+                    self.pend_keep(chat, self.cur_url[chat], "завантаження зупинено")
+                for i in (g or {}).get("left", [])[1:]:  # решта групи — теж у збережені
+                    self.pend_keep(chat, g["items"][i]["url"], "група зупинена")
+                await self.host.notify(chat, "⏹ Завдання зупинено." + (" Посилання збережено в «📌 Збережені» — нагадаю."
+                                                                        if self.pend_list(chat) else ""))
             except JobError as exc:
                 await self.host.notify(chat, f"⚠️ {esc(str(exc))[:3500]}")
             except Exception as exc:  # noqa: BLE001
                 log.exception("media job failed")
-                await self.host.notify(chat, f"⚠️ Не вдалося: {esc(type(exc).__name__)}")
+                if self.cur_url.get(chat) and chat not in self.just_done:  # збій бота чи мережі — не губимо
+                    self.pend_keep(chat, self.cur_url[chat], f"збій: {type(exc).__name__}")
+                await self.host.notify(chat, f"⚠️ Не вдалося: {esc(type(exc).__name__)}. Посилання збережено в «📌 Збережені» — нагадаю.")
             finally:
                 t_ = self.ticks.pop(chat, None)
                 if t_:
@@ -1128,6 +1146,18 @@ class Plugin(Base):
         else:
             data.pop(str(chat), None)
         (self.dir / "pending.json").write_text(json.dumps(data, ensure_ascii=False), "utf-8")
+
+    TRANSIENT = re.compile(r"(?i)timeout|timed out|тайм|час очікування|не відповіда|мереж|network|connect|з'єднан|502|503|504|429|"
+                           r"temporar|тимчасов|reset by peer|ssl|dns|unreachable|забагато запитів")
+
+    def pend_keep(self, chat, url, why):
+        """Збій мережі, бота чи випадкова зупинка — посилання не губиться: у збережені, з причиною."""
+        if not url:
+            return
+        lst = [e for e in self.pend_list(chat) if R.norm_url(e["url"]) != R.norm_url(url)]
+        lst.append({"url": url, "instr": self.instr.get(chat) or None, "ts": int(time.time()), "why": why[:120]})
+        self._pend_save(chat, lst[-self.PEND_MAX:])
+        self.pend_seen.pop(chat, None)
 
     def pend_add(self, chat, pairs):
         """Зберегти посилання (до 50; понад ліміт — найдавніші видаляються). -> текст для людини."""
@@ -1173,10 +1203,12 @@ class Plugin(Base):
         if not lst:
             return "📌 <b>Збережені посилання</b>\n\nПорожньо — усе завантажено.", [[("« Медіа", self.cb())]]
         lines = [f"📌 <b>Збережені посилання · {len(lst)} з {self.PEND_MAX}</b>",
-                 "Надіслані, поки бот завантажував інше. Лишаються в пам'яті, доки не завантажите (бот нагадуватиме). "
+                 "Надіслані, поки бот завантажував інше, а також ті, що не почались через збій мережі чи бота або зупинку (⚠️ причина). "
+                 "Лишаються в пам'яті, доки не завантажите (бот нагадуватиме) або не приберете 🗑. "
                  f"Понад {self.PEND_MAX} — найдавніші видаляються.", ""]
         for i, e in enumerate(lst, 1):
-            lines.append(f"{i}. {R.icon(M.site_name(e['url']))} <code>{esc(e['url'][:70])}</code> · {esc(R.ts_text(e['ts'])[:16])}")
+            lines.append(f"{i}. {R.icon(M.site_name(e['url']))} <code>{esc(e['url'][:70])}</code> · {esc(R.ts_text(e['ts'])[:16])}"
+                         + (f"\n    ⚠️ {esc(e['why'])}" if e.get("why") else ""))
         rows = [[(f"⬇️ Завантажити" + (f" усі · {len(lst)} (груповим)" if len(lst) > 1 else ""), self.cb("pgo"))]]
         dels = [(f"🗑 {i}", self.cb("pdel", i)) for i in range(1, min(len(lst), 20) + 1)]
         rows += [dels[k:k + 5] for k in range(0, len(dels), 5)]
@@ -1352,7 +1384,10 @@ class Plugin(Base):
                     why = nice if raw in nice else f"{nice} ({raw})"
                 else:
                     why = f"{type(exc).__name__}: {str(exc)[:150]}"
-                self.bad_add(chat, it["url"], why)
+                if self.TRANSIENT.search(why) or not isinstance(exc, JobError):  # збій мережі чи бота — у збережені
+                    self.pend_keep(chat, it["url"], "збій: " + why[:80])
+                else:
+                    self.bad_add(chat, it["url"], why)
             if why:
                 g.setdefault("failed", []).append({"n": i + 1, "url": it["url"], "why": re.sub(r"<[^>]+>", "", why)[:300]})
             g["left"].pop(0)
@@ -1412,6 +1447,7 @@ class Plugin(Base):
         self.instr[chat] = instr or {}
         self.cur_url[chat] = url
         self.force_now[chat] = force
+        self.just_done.discard(chat)
         self.live[chat] = (f"🔎 Шукаю: {esc(M.describe_source(url))}…", [])
         self._bg(chat, self.quick(chat, url))
         return None
@@ -1432,10 +1468,10 @@ class Plugin(Base):
         t = secrets.token_hex(4)
         self.offers[t] = (chat, url)
         self.instr[chat] = instr or {}
-        when = R.ts_text(old.get("ts"))
-        await self.host.notify(chat, f"♻️ <b>Це вже скачувалось</b> {esc(when)} — повторно не завантажую, ось той допис.",
-                               [[("⬇️ Все одно завантажити ще раз", self.cb("force", t))]])
-        await self.jump(chat, old["id"])
+        await self.jump(chat, old["id"],  # одним повідомленням: відповідь на той допис + меню
+                        head=(f"♻️ <b>Це вже скачувалось</b> — повторно не завантажую.\n🕓 {esc(self.when_size(old))}\n"
+                              "⬆️ Торкніться цитати, щоб перейти до того допису"),
+                        extra_rows=[[("⬇️ Все одно завантажити ще раз", self.cb("force", t))]])
 
     def in_app(self):
         return self.host.extra.get("in_app", lambda: False)()
@@ -1636,7 +1672,10 @@ class Plugin(Base):
             self._active(chat, done=True)
             return
         except JobError as exc:
-            self.bad_add(chat, self.cur_url.get(chat) or url, str(exc))
+            if self.TRANSIENT.search(str(exc)):  # збій мережі — не «бите»: у збережені, нагадаємо
+                self.pend_keep(chat, self.cur_url.get(chat) or url, "збій мережі: " + re.sub(r"<[^>]+>", "", str(exc))[:80])
+            else:
+                self.bad_add(chat, self.cur_url.get(chat) or url, str(exc))
             t = secrets.token_hex(4)
             self.offers[t] = (chat, url)
             rows = [[("🔁 Спробувати ще раз", self.cb("re", t))], [("🍪 Входи на сайти", self.cb("ck")), ("« Медіа", self.cb())]]
@@ -2271,7 +2310,7 @@ class Plugin(Base):
                         if not recorded and getattr(msg_, "message_id", None):  # 🔗 запам'ятовуємо для «попереднє …»
                             recorded = True
                             rid_ = self.hist.add(chat, msg=msg_.message_id, author=R.norm_author(who), who=who, alink=link, site=site,
-                                          url=str(job.url), src_url=self.cur_url.get(chat) or "", title=(desc or item.title or "")[:80], topics=rel_t, geos=rel_g, langs=rel_l, first=rel_f, geotag=geotag,
+                                          url=str(job.url), src_url=self.cur_url.get(chat) or "", size=size_, title=(desc or item.title or "")[:80], topics=rel_t, geos=rel_g, langs=rel_l, first=rel_f, geotag=geotag,
                                           **({"group": gx["id"], "gi": gx["i"]} if gx else {}), **({"notag": True} if rel is None else {}))
                             await self._cat_button(chat, msg_.message_id, rid_, rel_btns)
                         sent.append(out.name)
@@ -2410,7 +2449,7 @@ class Plugin(Base):
             tags_ = ", ".join([self.hist.name("t", k) for k in e.get("topics", [])[:2]] + [self.hist.name("g", k) for k in e.get("geos", [])[:2]])
             lines.append("• " + (f'<a href="{esc(url)}">{title}</a>' if url else title)
                          + f" · {R.icon(e.get('site'))} {esc(e.get('who') or '')}" + (f" · {esc(tags_)}" if tags_ else "")
-                         + f" · {esc(R.ts_text(e.get('ts'))[:10])}")
+                         + f" · {esc(self.when_size(e))}")
         if len(res) > 40:
             lines.append(f"\n…ще {len(res) - 40} — уточніть запит")
         body = lines[0] + "\n<blockquote expandable>" + "\n".join(lines[2:]) + "</blockquote>" if len(res) > 8 else "\n".join(lines)
@@ -2421,7 +2460,8 @@ class Plugin(Base):
         if not e:
             return "Цього запису вже немає.", [[("« Архів", self.cb("arc"))]]
         lines = [f"🏷 <b>Категорії</b> · {esc((e.get('title') or 'файл')[:60])}",
-                 f"{R.icon(e.get('site'))} {esc(e.get('who') or '')}" + (f" · 📦 Група №{e['group']}" if e.get("group") else ""),
+                 f"{R.icon(e.get('site'))} {esc(e.get('who') or '')}" + (f" · 📦 Група №{e['group']}" if e.get("group") else "")
+                 + f"\n🕓 Скачано {esc(self.when_size(e))}",
                  "<blockquote expandable>ℹ️ Як змінити\n🗑 — прибрати категорію. «➕ Додати» — напишіть теги через кому "
                  "(напр. «снігопад, Полісся»). Те саме можна, відповівши на сам файл: «тег снігопад», «прибери тег Карпати».</blockquote>", ""]
         rows = []
