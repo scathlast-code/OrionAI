@@ -19,3 +19,19 @@ def test_merge_and_own():
     assert G.own_tags("Полісся, озеро")["add"] == ["Полісся", "озеро"]
     assert G.own_tags("без тегів")["none"]
     assert G.instr_short(None) == "теги — сам визначу"
+
+
+def test_pending_limit(tmp_path):
+    import types
+    from plugins.media import Plugin
+    p = Plugin.__new__(Plugin)
+    p.dir = tmp_path
+    p.pend_seen = {}
+    msg = p.pend_add(1, [(f"https://x.com/a/{i}", None) for i in range(48)])
+    assert "майже повна" in msg
+    msg = p.pend_add(1, [(f"https://x.com/b/{i}", None) for i in range(5)])
+    assert "найдавніші 3" in msg and len(p.pend_list(1)) == 50 and p.pend_list(1)[0]["url"] == "https://x.com/a/3"
+    p.pend_add(1, [("https://x.com/b/0", None)])  # дубль не додається
+    assert len(p.pend_list(1)) == 50
+    p.pend_done(1, "https://x.com/b/0")
+    assert len(p.pend_list(1)) == 49

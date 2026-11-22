@@ -119,7 +119,7 @@ class Plugin(Base):
     summary = ("Завантаження відео, фото, аудіо й тексту дописів за посиланням із YouTube, Instagram, TikTok, Facebook, "
                "Threads, X, Telegram, Reddit, Vimeo та сотень інших сайтів: якість, MP3, GIF, без звуку, озвучка, субтитри, "
                "таймкоди, запис ефіру, ZIP. А також звіт і очищення метаданих власних файлів.")
-    VIEWS = {"ck", "tools", "help", "arc", "arcl", "rls", "utg", "gra", "grl"}
+    VIEWS = {"ck", "tools", "help", "arc", "arcl", "rls", "utg", "gra", "grl", "pend"}
 
     def __init__(self, host):
         super().__init__(host)
@@ -135,6 +135,9 @@ class Plugin(Base):
         self.gctx: dict[int, dict] = {}       # 📦 поточне групове завантаження чату
         self.gpend: dict[str, dict] = {}      # 📦 групи, що чекають вибору
         self.user_stop: set = set()
+        self.just_done: set = set()
+        self.cur_url: dict[int, str] = {}     # посилання поточного завантаження (як надіслала людина)
+        self.pend_seen: dict[int, float] = {} # коли востаннє нагадували про збережені посилання
         self.ticks: dict[int, asyncio.Task] = {}  # ✍️ вказівки про теги до поточного завантаження
         self.got: dict[int, list] = {}  # чат -> файли останнього завантаження (для перегляду в Mini App)  # чат -> останній стан швидкого завантаження (для Mini App)
         self.hist = R.History(self.dir / "history.json")  # 🔗 історія скачаного: автор · тема · місце
@@ -466,6 +469,9 @@ class Plugin(Base):
             rows.insert(0, [("⏹ Зупинити завдання", self.cb("stop"))])
         if chat in self.jobs:
             rows.insert(1, [("📋 Останній знайдений набір", self.cb("menu", self.jobs[chat].token))])
+        pl = self.pend_list(chat)
+        if pl:
+            rows.insert(0, [(f"📌 Збережені посилання · {len(pl)}", self.cb("pend"))])
         rows += [[(f"⭐ Якість за замовчуванням: {self.dq_label(chat)}", self.cb("dq"))],
                  [("🗂 Архів скачаного: автори · теми · місця", self.cb("arc"))],
                  [("🍪 Входи на сайти (cookies)", self.cb("ck")), ("🛠 Інструменти", self.cb("tools"))],
@@ -604,7 +610,9 @@ class Plugin(Base):
             return "Скасовано", self.home(chat)
         if a == "grgo" and x in self.gpend:
             if self.busy(chat):
-                return "⏳ Ще завантажую попереднє — дочекайтесь або зупиніть", None
+                g = self.gpend.pop(x)
+                return None, (self.pend_add(chat, [(it["url"], G.merge_instr(g["common"], it["own"])) for it in g["items"]]),
+                              [[("📌 Збережені", self.cb("pend"))]])
             g = self.gpend.pop(x)
             gid = self.next_group(chat)
             items = [{"url": it["url"], "mode": it["mode"] or g["mode"], "instr": G.merge_instr(g["common"], it["own"])}
@@ -612,6 +620,27 @@ class Plugin(Base):
             self.gctx[chat] = {"id": gid, "items": items, "left": list(range(len(items))), "n": len(items)}
             self._bg(chat, self.group_run(chat))
             return f"📦 Група №{gid}: починаю", None
+        if a == "pend":
+            return None, self.pend_screen(chat)
+        if a == "pgo":
+            lst = self.pend_list(chat)
+            if not lst:
+                return "Порожньо", self.pend_screen(chat)
+            if self.busy(chat):
+                return "⏳ Ще завантажую — запропоную, щойно закінчу", None
+            if len(lst) == 1:
+                return self.start_quick(chat, lst[0]["url"], lst[0].get("instr")) or "🔎 Шукаю…", None
+            tok = self.group_offer_pairs(chat, [(e["url"], e.get("instr"), "") for e in lst])
+            return None, self.group_screen(chat, tok)
+        if a == "pdel" and x.isdigit():
+            lst = self.pend_list(chat)
+            if 0 < int(x) <= len(lst):
+                del lst[int(x) - 1]
+                self._pend_save(chat, lst)
+            return "🗑 Прибрано", self.pend_screen(chat)
+        if a == "pclr":
+            self._pend_save(chat, [])
+            return "🗑 Пам'ять очищено", self.pend_screen(chat)
         if a == "grl":
             return None, self.group_list(chat, int(x) if x.isdigit() else None)
         if a == "utg":
@@ -980,10 +1009,100 @@ class Plugin(Base):
                     t_.cancel()
                 if not shutdown:
                     self._active(chat, done=True)
+                    if not self.gctx.get(chat):
+                        asyncio.get_running_loop().create_task(self._remind_later(chat))
         # Чистий контекст: якщо завдання почали з Mini App, його повідомлення й файли мають іти в справжній чат,
         # а не в «перехоплювач» запиту застосунку, який уже завершився.
         task = asyncio.get_running_loop().create_task(wrap(), context=contextvars.Context())
         self.tasks[chat] = task
+
+    # ---------------------------------------------------------------- 📌 посилання, надіслані під час іншого завантаження
+    PEND_MAX = 50
+
+    def _pend(self):
+        try:
+            return json.loads((self.dir / "pending.json").read_text("utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def pend_list(self, chat):
+        return self._pend().get(str(chat), [])
+
+    def _pend_save(self, chat, lst):
+        data = self._pend()
+        if lst:
+            data[str(chat)] = lst
+        else:
+            data.pop(str(chat), None)
+        (self.dir / "pending.json").write_text(json.dumps(data, ensure_ascii=False), "utf-8")
+
+    def pend_add(self, chat, pairs):
+        """Зберегти посилання (до 50; понад ліміт — найдавніші видаляються). -> текст для людини."""
+        lst = self.pend_list(chat)
+        have = {e["url"] for e in lst}
+        added = 0
+        for url, instr in pairs:
+            if url not in have:
+                lst.append({"url": url, "instr": instr or None, "ts": int(time.time())})
+                have.add(url)
+                added += 1
+        dropped = max(0, len(lst) - self.PEND_MAX)
+        lst = lst[dropped:]
+        self._pend_save(chat, lst)
+        self.pend_seen.pop(chat, None)  # нове — нагадаємо одразу після поточного
+        msg = (f"⏳ Ще завантажую попереднє. 📌 Посилання збережено" + (f" ({added})" if added > 1 else "")
+               + f" — у пам'яті {len(lst)} з {self.PEND_MAX}. Щойно закінчу — запропоную завантажити"
+               + (" всі разом груповим завантаженням." if len(lst) > 1 else "."))
+        if dropped:
+            msg += f"\n⚠️ Перевищено ліміт {self.PEND_MAX}: найдавніші {dropped} посилань видалено."
+        elif len(lst) >= self.PEND_MAX - 5:
+            msg += f"\n⚠️ Пам'ять майже повна: понад {self.PEND_MAX} найдавніші посилання видалятимуться."
+        return msg
+
+    def pend_done(self, chat, url):
+        lst = self.pend_list(chat)
+        if any(e["url"] == url for e in lst):
+            self._pend_save(chat, [e for e in lst if e["url"] != url])
+
+    def pend_screen(self, chat):
+        lst = self.pend_list(chat)
+        if not lst:
+            return "📌 <b>Збережені посилання</b>\n\nПорожньо — усе завантажено.", [[("« Медіа", self.cb())]]
+        lines = [f"📌 <b>Збережені посилання · {len(lst)} з {self.PEND_MAX}</b>",
+                 "Надіслані, поки бот завантажував інше. Лишаються в пам'яті, доки не завантажите (бот нагадуватиме). "
+                 f"Понад {self.PEND_MAX} — найдавніші видаляються.", ""]
+        for i, e in enumerate(lst, 1):
+            lines.append(f"{i}. {R.icon(M.site_name(e['url']))} <code>{esc(e['url'][:70])}</code> · {esc(R.ts_text(e['ts'])[:16])}")
+        rows = [[(f"⬇️ Завантажити" + (f" усі · {len(lst)} (груповим)" if len(lst) > 1 else ""), self.cb("pgo"))]]
+        dels = [(f"🗑 {i}", self.cb("pdel", i)) for i in range(1, min(len(lst), 20) + 1)]
+        rows += [dels[k:k + 5] for k in range(0, len(dels), 5)]
+        rows += [[("🗑 Очистити все", self.cb("pclr"))], [("« Медіа", self.cb())]]
+        return "\n".join(lines)[:4000], rows
+
+    async def pend_remind(self, chat):
+        """Після завершення завантаження: є збережені посилання — пропонуємо (повторно — не частіше ніж раз на 20 хв)."""
+        if chat not in self.just_done:  # лише після справжнього завершеного завантаження, не посеред вибору
+            return
+        self.just_done.discard(chat)
+        lst = self.pend_list(chat)
+        if not lst or self.busy(chat):
+            return
+        last = self.pend_seen.get(chat)
+        if last and time.time() - last < 1200:
+            return
+        self.pend_seen[chat] = time.time()
+        again = " (нагадую)" if last else ""
+        if len(lst) == 1:
+            t = (f"📌 У пам'яті посилання, яке ви надіслали під час завантаження{again}:\n<code>{esc(lst[0]['url'][:200])}</code>\n"
+                 f"Воно лишиться, доки не завантажите. Пам'ять — до {self.PEND_MAX} посилань, понад ліміт найдавніші видаляються.")
+            rows = [[("⬇️ Завантажити", self.cb("pgo"))], [("📌 Збережені", self.cb("pend")), ("🗑 Прибрати", self.cb("pclr"))]]
+            await self.host.notify(chat, t, rows)
+        else:
+            tok = self.group_offer_pairs(chat, [(e["url"], e.get("instr"), "") for e in lst])
+            t, rows = self.group_screen(chat, tok)
+            head = (f"📌 У пам'яті {len(lst)} з {self.PEND_MAX} посилань, надісланих під час завантаження{again} — завантажити груповим? "
+                    f"Вони лишаться, доки не завантажите; понад {self.PEND_MAX} найдавніші видаляються.\n\n")
+            await self.host.notify(chat, head + t, rows[:-1] + [[("📌 Збережені", self.cb("pend")), ("✖️ Пізніше", self.cb("grx", tok))]])
 
     # ---------------------------------------------------------------- 📦 групове завантаження
     def group_offer(self, chat, text):
@@ -992,6 +1111,9 @@ class Plugin(Base):
         if not sp:
             return None
         common, items = sp
+        return self.group_offer_pairs(chat, items, common)
+
+    def group_offer_pairs(self, chat, items, common=None):
         tok = secrets.token_hex(3)
         self.gpend[tok] = {"chat": chat, "common": common, "mode": "auto",
                            "items": [{"url": u, "own": ins, "raw": raw, "mode": ""} for u, ins, raw in items[:30]]}
@@ -1059,6 +1181,7 @@ class Plugin(Base):
     async def group_one(self, chat, url, mode):
         """Одне посилання групи без жодних питань: знайти й одразу завантажити в обраному вигляді."""
         src = M.describe_source(url)
+        self.cur_url[chat] = url
         status = await self._status(chat, None, f"🔎 Шукаю: <b>{esc(src)}</b>…")
         url = await M.resolve_share(url)
         with tempfile.TemporaryDirectory(prefix="orion-media-") as work:
@@ -1078,9 +1201,10 @@ class Plugin(Base):
     def start_quick(self, chat, url, instr=None):
         """Повертає текст лише якщо почати не можна; інакше все показує саме повідомлення-статус.
         instr — вказівки людини про теги («сортуй по тегу полісся», «без тегів»)."""
-        if self.busy(chat):
-            return "⏳ Ще завантажую попереднє — дочекайтесь або зупиніть: /media"
+        if self.busy(chat):  # 📌 не губимо: запам'ятовуємо й запропонуємо, щойно закінчимо
+            return self.pend_add(chat, [(url, instr)])
         self.instr[chat] = instr or {}
+        self.cur_url[chat] = url
         self.live[chat] = (f"🔎 Шукаю: {esc(M.describe_source(url))}…", [])
         self._bg(chat, self.quick(chat, url))
         return None
@@ -1156,6 +1280,13 @@ class Plugin(Base):
         new = await self.host.notify(chat, text, rows) or msg
         self._active_mid(chat, new)
         return new
+
+    async def _remind_later(self, chat):
+        await asyncio.sleep(2)
+        try:
+            await self.pend_remind(chat)
+        except Exception:  # noqa: BLE001
+            log.exception("pending remind failed")
 
     def _active_mid(self, chat, msg):
         """Статус переїхав у нове повідомлення — запам'ятати, щоб після перезапуску виправити саме його."""
@@ -1934,6 +2065,10 @@ class Plugin(Base):
             tick.cancel()
             if sent:
                 self.note_time(site, time.time() - t0, len(nums))
+                self.just_done.add(chat)
+                for u_ in {self.cur_url.get(chat), job.url}:  # 📌 завантажене зникає зі збережених
+                    if u_:
+                        self.pend_done(chat, u_)
             if bundle:
                 pack = root / (safe_name(job.items[nums[0] - 1].title, "media")[:60] + ".zip")
                 with zipfile.ZipFile(pack, "w", zipfile.ZIP_STORED) as z:
