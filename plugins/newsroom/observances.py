@@ -421,7 +421,10 @@ class ObservancesUI:
             except Exception:  # noqa: BLE001
                 known = []
             order = sorted(enumerate(items, 1), key=lambda p: -self.db_imp_title(p[1].get("title")))  # ❗ важливе — першим
+            gone = self.hidden_people()
             for k, it in order:
+                if str(it.get("author") or "").upper() in gone:
+                    it = {**it, "author": ""}
                 im = self.db_imp_title(it.get("title"))
                 lines.append(("‼️ " if im == 2 else "❗ " if im else "") + f"{k}. {esc(it['title'])}"
                              + (f" · ✍️ {DB.person(it['author'])}" if it.get("author") else "")
@@ -659,6 +662,14 @@ class ObservancesUI:
             self._cplan_task = asyncio.get_running_loop().create_task(go())
         except RuntimeError:
             pass
+
+    def hidden_people(self):
+        """Люди з «🗞 Редакції», яких заархівували (вже не працюють) або видалили (додані помилково) — їх не показуємо в плані."""
+        red = self.host.extra.get("plugin", lambda pid: None)("red")
+        try:
+            return {n.upper() for n in red.people_off("archived") + red.people_off("removed")} if red else set()
+        except Exception:  # noqa: BLE001
+            return set()
 
     def cplan_on(self, d):
         return (self.store.get("cplan_data") or {}).get(d.isoformat(), [])
@@ -961,9 +972,12 @@ class ObservancesUI:
             hit = by_t.get(k) or next((v for kk, v in by_t.items() if len(kk) > 8 and (kk in k or k in kk)), None)
             if not hit:
                 return ""
+            gone = self.hidden_people()
+            hit = [({**i, "author": ""} if str(i.get("author") or "").upper() in gone else i) for i in hit]
             hit = [i for i in hit if i.get("author")] or hit
             seen_ = set()
-            hit = [i for i in hit if not ((i.get("author"), i.get("where")) in seen_ or seen_.add((i.get("author"), i.get("where"))))]
+            key_ = lambda i: (str(i.get("author") or "").upper(), i.get("where") or "")  # той самий автор із плану й з «Редакції» — один раз
+            hit = [i for i in hit if not (key_(i) in seen_ or seen_.add(key_(i)))]
             ref = "" if r.get("source") == "Контент-план" else " · " + self.cplan_ref(d)
             if not any(i.get("author") for i in hit):  # ◽ сірий — за день ніхто не відповідає (призначити — у «🗞 Редакція»)
                 return " · ◽" + ref

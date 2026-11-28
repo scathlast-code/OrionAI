@@ -79,7 +79,7 @@ class Plugin(Base):
     admin_only = False
     summary = ("Новини, завдання, рішення й обговорення з редакційних чатів — списками з посиланнями на повідомлення й відповідальними; "
                "завдання з контент-плану з виконавцями. У чати бот сам нічого не пише.")
-    VIEWS = {"", "l", "i", "ch", "pp", "pc", "rep", "who", "po", "me"}
+    VIEWS = {"", "l", "i", "ch", "pp", "pc", "rep", "who", "po", "me", "parc", "prem"}
     REPORT_URL = "https://docs.google.com/presentation/d/1akz9pZoUv576-nLXmIJ-4nQBHTElNLcP/edit"
 
     def __init__(self, host):
@@ -108,8 +108,26 @@ class Plugin(Base):
                 names.update(i["author"] for i in items if i.get("author"))
         with closing(self.db()) as con:
             names.update(r[0] for r in con.execute("SELECT name FROM people"))
-            gone = {r[0] for r in con.execute("SELECT name FROM people WHERE src='removed'")}
+            gone = {r[0] for r in con.execute("SELECT name FROM people WHERE src IN ('removed', 'archived')")}
         return sorted(n for n in names if n and n not in gone)
+
+    def people_off(self, src):
+        """🗄 архів (уже не працюють) або 🗑 видалені (додані помилково)."""
+        with closing(self.db()) as con:
+            return sorted(r[0] for r in con.execute("SELECT name FROM people WHERE src=?", (src,)))
+
+    def set_person(self, name, src):
+        with closing(self.db()) as con, con:
+            con.execute("INSERT INTO people(name,src,added) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET src=excluded.src", (name, src, time.time()))
+            if src == "removed":  # помилково додане — прибираємо прив'язки й з усіх завдань
+                con.execute("DELETE FROM accounts WHERE name=?", (name,))
+                con.execute("UPDATE items SET who='' WHERE upper(who)=upper(?)", (name,))
+            elif src == "archived":  # уже не працює — відкриті завдання звільняються (виконані лишаються в історії з іменем)
+                con.execute("UPDATE items SET who='' WHERE upper(who)=upper(?) AND done=0", (name,))
+
+    def open_tasks_of(self, name):
+        with closing(self.db()) as con:
+            return con.execute("SELECT COUNT(*) FROM items WHERE kind='task' AND hidden=0 AND done=0 AND who=?", (name,)).fetchone()[0]
 
     # ---------------------------------------------------------------- 📥 тихий збір із чатів
     @staticmethod
@@ -180,6 +198,7 @@ class Plugin(Base):
         data = news.store.get("cplan_data") or {}
         t0 = dt.date.today()
         lo, hi = (t0 - dt.timedelta(days=1)).isoformat(), (t0 + dt.timedelta(days=60)).isoformat()
+        gone = {n.upper() for n in self.people_off("archived") + self.people_off("removed")}  # архівованим і видаленим завдань не даємо
         with closing(self.db()) as con, con:
             for day, items in data.items():
                 if not (lo <= day <= hi):
@@ -191,7 +210,8 @@ class Plugin(Base):
                     key = f"p{day}|{i['title']}|{where}"
                     con.execute("INSERT OR IGNORE INTO items(chat,msg,kind,text,author,who,url,at,day,reason,where_,key) "
                                 "VALUES(0,0,'task',?,?,?,?,?,?,?,?,?)",
-                                (i["title"], "контент-план", i.get("author") or "", i.get("src") or "", time.time(), day, reason, where, key))
+                                (i["title"], "контент-план", "" if str(i.get("author") or "").upper() in gone else (i.get("author") or ""),
+                                 i.get("src") or "", time.time(), day, reason, where, key))
 
     def up(self, uid):
         with closing(self.db()) as con:
@@ -571,8 +591,22 @@ class Plugin(Base):
             tg = (" → " + ", ".join(("@" + esc(a["username"])) if a.get("username") else "акаунт" for a in acc)) if acc else ""
             lines.append(f"• <code>{esc(n.upper())}</code>{tg}")
         btns = [(n, self.cb("pc", k)) for k, n in enumerate(ppl)][:30]
-        rows = [btns[i:i + 3] for i in range(0, len(btns), 3)] + [[("➕ Додати людину", self.cb("ppadd"))], [("« Редакція", self.cb())]]
+        arch, rem = self.people_off("archived"), self.people_off("removed")
+        extra = ([(f"🗄 Архів · {len(arch)}", self.cb("parc"))] if arch else []) + ([(f"🗑 Видалені · {len(rem)}", self.cb("prem"))] if rem else [])
+        rows = [btns[i:i + 3] for i in range(0, len(btns), 3)] + [[("➕ Додати людину", self.cb("ppadd"))]] + ([extra] if extra else []) + [[("« Редакція", self.cb())]]
         return "\n".join(lines)[:4000], rows
+
+    def people_off_screen(self, chat, src):
+        names = self.people_off(src)
+        if src == "archived":
+            head = ("🗄 <b>Архів людей</b>\n\nТі, хто вже не працює в редакції. Їх немає у списках, виборі відповідального й контент-плані "
+                    "в боті; відкриті завдання звільнено, а виконані лишаються в історії з іменем. «↩️» — повернути.")
+        else:
+            head = ("🗑 <b>Видалені</b>\n\nІмена, додані помилково (або з помилкою в контент-плані). Бот більше їх не показує, "
+                    "навіть якщо ім'я знову з'явиться в плані. «↩️» — повернути.")
+        lines = [head, ""] + [f"• <code>{esc(n.upper())}</code>" for n in names]
+        btns = [(f"↩️ {n}", self.cb("pback", src[:1], k)) for k, n in enumerate(names)][:30]
+        return "\n".join(lines)[:4000], [btns[i:i + 2] for i in range(0, len(btns), 2)] + [[("« Люди", self.cb("pp"))]]
 
     def person_screen(self, chat, k):
         ppl = self.people()
@@ -589,7 +623,11 @@ class Plugin(Base):
         rows = [[("🙋 Це я", self.cb("pme", k)), ("➕ @нікнейм", self.cb("pnick", k))]]
         rows += [[(f"🔓 Відв'язати {('@' + a['username']) if a.get('username') else 'акаунт ' + str(i + 1)}", self.cb("punl", k, a["id"]))]
                  for i, a in enumerate(acc)][:8]
-        rows += [[("✖️ Прибрати зі списку", self.cb("ppdel", k))], [("« Люди", self.cb("pp"))]]
+        n_open = self.open_tasks_of(n)
+        if n_open:
+            lines.append(f"\n📌 Відкритих завдань: {n_open}")
+        rows += [[("🗄 Архівувати (вже не працює)", self.cb("parch", k))], [("🗑 Видалити (додано помилково)", self.cb("pdelq", k))],
+                 [("« Люди", self.cb("pp"))]]
         return "\n".join(lines), rows
 
     def add_account(self, name, uid=None, username=""):
@@ -876,13 +914,28 @@ class Plugin(Base):
         if a == "ppadd":
             self.ask(chat, "pp")
             return None, ("➕ Напишіть ім'я (можна кілька через кому).", [[("« Люди", self.cb("pp"))]])
-        if a == "ppdel":
+        if a in ("ppdel", "pdel", "parch", "pdelq"):
             ppl = self.people()
-            if x and x.isdigit() and int(x) < len(ppl):
+            if not (x and x.isdigit() and int(x) < len(ppl)):
+                return None, self.people_screen(chat)
+            name = ppl[int(x)]
+            if a == "pdelq":  # видалення — з підтвердженням
+                n_open = self.open_tasks_of(name)
+                return None, (f"🗑 <b>Видалити «{esc(name)}»?</b>\n\nДля імен, доданих помилково. Прив'язки до Telegram приберуться, "
+                              "ім'я зникне із завдань і з контент-плану в боті (сама таблиця не змінюється)."
+                              + (f"\n\n⚠️ На цю людину записано відкритих завдань: {n_open}. Якщо людина справжня, але вже не працює, — краще «🗄 Архівувати»." if n_open else ""),
+                              [[("🗑 Так, видалити", self.cb("pdel", x))], [("🗄 Архівувати замість цього", self.cb("parch", x))], [("« Назад", self.cb("pc", x))]])
+            self.set_person(name, "archived" if a == "parch" else "removed")
+            return ("🗄 В архіві" if a == "parch" else "🗑 Видалено"), self.people_screen(chat)
+        if a in ("parc", "prem"):
+            return None, self.people_off_screen(chat, "archived" if a == "parc" else "removed")
+        if a == "pback":
+            src = "archived" if x == "a" else "removed"
+            names = self.people_off(src)
+            if y and y.isdigit() and int(y) < len(names):
                 with closing(self.db()) as con, con:
-                    con.execute("INSERT INTO people(name,src,added) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET src='removed'",
-                                (ppl[int(x)], "removed", time.time()))
-            return None, self.people_screen(chat)
+                    con.execute("UPDATE people SET src='manual' WHERE name=?", (names[int(y)],))
+            return "↩️ Повернуто", (self.people_off_screen(chat, src) if len(names) > 1 else self.people_screen(chat))
         if a == "pc":
             return None, self.person_screen(chat, x)
         if a in ("pme", "pnick", "punl"):
