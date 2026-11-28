@@ -15,17 +15,21 @@ from plugins import esc
 
 log = logging.getLogger("orion.newsroom.cards")
 
-SIZES = {"sq": ("1:1", (1080, 1080), "Instagram, Facebook, Telegram"), "pt": ("4:5", (1080, 1350), "стрічка Instagram"),
-         "st": ("9:16", (1080, 1920), "сторіс, Reels, Shorts")}
-# 🌿 Фірмовий стиль GreenPost (з брендбука 2020): темно-зелений, світло-зелений, темно-синій; шрифт Lora (жирний)
-NAVY, GREEN, LEAF, WHITE = (16, 42, 49), (37, 107, 74), (140, 195, 148), (255, 255, 255)
+# Розміри — за шаблоном редакції: квадрат для більшості мереж, вертикаль 1170×1540 для Instagram і TikTok
+SIZES = {"sq": ("1080×1080", (1080, 1080), "Telegram, Facebook, Threads, Tumblr, YouTube, X"),
+         "ig": ("1170×1540", (1170, 1540), "Instagram, TikTok")}
+# 🌿 Фірмові кольори GreenPost (брендбук 2020 + шаблон карток): тло міняється, решта стилю — та сама
+NAVY, GREEN, LEAF, WHITE, MIST = (16, 42, 49), (37, 107, 74), (140, 195, 148), (255, 255, 255), (208, 220, 206)
+BG = {"mist": ("🩶", "світло-сіро-зелений (як у шаблоні)", MIST), "white": ("⚪", "білий", WHITE),
+      "leaf": ("🟢", "світло-зелений", LEAF), "green": ("🌲", "темно-зелений", GREEN), "navy": ("🔵", "темно-синій", NAVY)}
+DARK_BG = {"green", "navy"}
 THEMES = {"dark": ("🌑 Темна", "фото з темно-синім затемненням, білий текст, біле лого"),
-          "light": ("⚪ Світла", "біле тло або світла смуга під текстом, темно-синій текст, кольорове лого"),
-          "green": ("🌿 Зелена", "темно-зелене тло/смуга, білий текст, біле лого")}
+          "light": ("⚪ Світла", "світла смуга під текстом, темно-синій текст, кольорове лого"),
+          "green": ("🌿 Зелена", "темно-зелена смуга під текстом, білий текст, біле лого")}
 POS = {"bottom": "унизу", "top": "угорі", "center": "по центру"}
 SHADE = {"light": ("легке", 140), "mid": ("середнє", 195), "strong": ("сильне", 235)}
-DEFAULTS = {"theme": "dark", "pos": "bottom", "shade": "mid", "upper": False, "sizes": ["sq", "pt", "st"], "brand": "greenpost.ua",
-            "label": True, "logo": True}
+DEFAULTS = {"bg": "mist", "upper": False, "sizes": ["sq", "ig"], "brand": "", "label": False, "logo": True,
+            "theme": "dark", "pos": "bottom", "shade": "mid", "plabel": True, "pbrand": "greenpost.ua"}
 BRAND = Path(__file__).with_name("brand")
 FONT_DIRS = ["/usr/share/fonts/truetype/dejavu", "/usr/share/fonts/dejavu"]
 
@@ -77,13 +81,77 @@ def fit_text(draw, text, width, max_h, start=92, low=40, max_lines=6):
 
 
 def render(photo, headline, cfg, key="sq", label="", logo=None):
-    """-> JPEG-байти картки потрібного формату у фірмовому стилі."""
+    """З фото — стиль «на фото» (render_photo), без фото — шаблон GreenPost."""
+    if photo:
+        return render_photo(photo, headline, cfg, key, label, logo)
+    return render_template(headline, cfg, key, label, logo)
+
+
+def render_template(headline, cfg, key="sq", label="", logo=None):
+    """-> JPEG-байти картки за шаблоном GreenPost: суцільне фірмове тло, заголовок Lora жирним по центру,
+    логотип по центру внизу (ширина ≈ 42% картки, відступ знизу ≈ 4.7%)."""
+    W, H = SIZES.get(key, SIZES["sq"])[1]
+    bg = cfg.get("bg") if cfg.get("bg") in BG else "mist"
+    dark = bg in DARK_BG
+    ink = WHITE if dark else NAVY
+    img = Image.new("RGB", (W, H), BG[bg][2])
+    draw = ImageDraw.Draw(img)
+    pad = int(W * 0.09)
+    # логотип
+    lg_bytes = logo or (brand_logo("dark" if dark else "light") if cfg.get("logo", True) else None)
+    logo_top = H - int(H * 0.047)
+    if lg_bytes:
+        try:
+            lg = Image.open(io.BytesIO(lg_bytes)).convert("RGBA")
+            lw = int(W * 0.417)
+            lg = lg.resize((lw, max(1, int(lg.height * lw / lg.width))), Image.LANCZOS)
+            logo_top = H - int(H * 0.047) - lg.height
+            img.paste(lg, ((W - lw) // 2, logo_top), lg)
+        except Exception:  # noqa: BLE001 — зіпсований логотип не має ламати картку
+            log.info("logo paste failed", exc_info=True)
+    brand = (cfg.get("brand") or "").strip()
+    bottom = logo_top - int(H * 0.05)
+    if brand:
+        bf = font(int(W * 0.033), bold=False)
+        bw = draw.textlength(brand, font=bf)
+        draw.text(((W - bw) / 2, bottom - int(W * 0.04)), brand, font=bf, fill=ink)
+        bottom -= int(W * 0.07)
+    # заголовок по центру вільного поля
+    text = headline.upper() if cfg.get("upper") else headline
+    top = int(H * 0.08)
+    fnt, lines, size = fit_text(draw, text, W - 2 * pad, bottom - top - 100, start=int(W * 0.085), low=int(W * 0.04), max_lines=7)
+    lh = int(size * 1.22)
+    lab_h = 0
+    if label and cfg.get("label"):
+        lab_h = int(W * 0.05) + 30
+    block = len(lines) * lh + lab_h
+    y = top + max(0, (bottom - top - block) // 2)
+    if lab_h:
+        lf = font(int(W * 0.031))
+        t = label.upper() if cfg.get("upper") else label
+        tw = int(draw.textlength(t, font=lf)) + 44
+        x0 = (W - tw) // 2
+        draw.rounded_rectangle((x0, y, x0 + tw, y + int(W * 0.05)), int(W * 0.025), fill=(LEAF if bg != "leaf" else WHITE))
+        draw.text((x0 + 22, y + int(W * 0.005)), t, font=lf, fill=NAVY)
+        y += lab_h
+    for ln in lines:
+        w = draw.textlength(ln, font=fnt)
+        draw.text(((W - w) / 2, y), ln, font=fnt, fill=ink)
+        y += lh
+    out = io.BytesIO()
+    img.save(out, "JPEG", quality=93, optimize=True)
+    return out.getvalue()
+
+
+def render_photo(photo, headline, cfg, key="sq", label="", logo=None):
+    """-> JPEG-байти картки «на фото»: фото на все тло, заголовок Lora поверх (теми темна/світла/зелена)."""
     W, H = SIZES[key][1]
     theme = cfg.get("theme") if cfg.get("theme") in THEMES else "dark"
+    cfg = {**cfg, "label": cfg.get("plabel", True), "brand": cfg.get("pbrand", "greenpost.ua")}
     bg = {"dark": NAVY, "light": WHITE, "green": GREEN}[theme]
     ink = NAVY if theme == "light" else WHITE
     pad = 80
-    safe = 250 if key == "st" else pad  # сторіс: верх і низ перекриває інтерфейс Instagram
+    safe = 200 if key == "ig" else pad  # TikTok перекриває низ і верх інтерфейсом — текст туди не ставимо
     if photo:
         img = ImageOps.exif_transpose(Image.open(io.BytesIO(photo))).convert("RGB")
         img = ImageOps.fit(img, (W, H), Image.LANCZOS, centering=(0.5, 0.4))
@@ -91,7 +159,7 @@ def render(photo, headline, cfg, key="sq", label="", logo=None):
         img = Image.new("RGB", (W, H), bg)
     text = headline.upper() if cfg.get("upper") else headline
     draw = ImageDraw.Draw(img)
-    zone_h = int(H * (0.44 if key != "st" else 0.36))
+    zone_h = int(H * (0.44 if key != "ig" else 0.40))
     fnt, lines, size = fit_text(draw, text, W - 2 * pad - 10, zone_h - 120)
     lh = int(size * 1.2)
     block = len(lines) * lh
@@ -174,130 +242,155 @@ def og_image(html):
 
 
 class CardsUI:
-    """Мікс до «Новинарні»: екрани й надсилання карток."""
+    """Мікс до «Новинарні»: картки за шаблоном GreenPost."""
 
     def cd_cfg(self):
-        return {**DEFAULTS, **(self.store.get("cd_cfg") or {})}
+        c = {**DEFAULTS, **(self.store.get("cd_cfg") or {})}
+        c["sizes"] = [k for k in c["sizes"] if k in SIZES] or list(SIZES)
+        return c
 
     def cd_save(self, **kw):
         self.store.set("cd_cfg", {**(self.store.get("cd_cfg") or {}), **kw})
 
-    def cd_photo_path(self, did):
-        return self.dir / f"card_{did}.jpg"
-
     def cd_logo(self):
         p = self.dir / "card_logo.png"
         return p.read_bytes() if p.exists() else None
+
+    def _cd_label(self, d):
+        return d.get("category") or d.get("region") or ""
 
     def cd_screen(self, did):
         d = self.store.draft(did)
         if not d:
             return "Новину не знайдено.", [[("« Новинарня", self.cb())]]
         c = self.cd_cfg()
+        text = (f"🖼 <b>Картки до новини #{did}</b>\n<b>{esc(d['headline'])}</b>\n\n"
+                "Шаблон GreenPost: фірмове тло, заголовок шрифтом Lora по центру, логотип унизу.\n\n"
+                f"Тло: {BG[c['bg']][0]} {BG[c['bg']][1]}\n"
+                + "\n".join(f"{'✅' if k in c['sizes'] else '▫️'} {SIZES[k][0]} — {SIZES[k][2]}" for k in SIZES)
+                + "\n\nНатисніть колір тла — картки прийдуть одразу. Або зробіть картку на фото: "
+                f"тема {THEMES[c['theme']][0]}, заголовок {POS[c['pos']]}.")
+        colors = [((("● " if k == c["bg"] else "") + v[0]), self.cb("cdn", did, k)) for k, v in BG.items()]
         has = self.cd_photo_path(did).exists()
-        fm = " · ".join(f"{SIZES[k][0]}" for k in ["sq", "pt", "st"] if k in c["sizes"])
-        text = (f"🖼 <b>Картка до новини #{did}</b>\n<b>{esc(d['headline'])}</b>\n\n"
-                "Заголовок на фото у вашому стилі — готові зображення для стрічки й сторіс.\n\n"
-                f"Формати: {fm or 'не вибрано'}\nФото: {'вибране раніше ✅' if has else 'ще не вибрано'}")
-        rows = [[("📷 Своє фото", self.cb("cdp", did)), ("🌐 Фото з джерела", self.cb("cdu", did))],
-                [("🎨 Без фото", self.cb("cdn", did))] + ([("🔁 Ще раз з тим самим фото", self.cb("cdr", did))] if has else []),
+        rows = [colors, [("🖼 Зробити картки", self.cb("cdn", did))],
+                [("📷 На своєму фото", self.cb("cdp", did)), ("🌐 На фото з джерела", self.cb("cdu", did))]]
+        if has:
+            rows.append([("🔁 Те саме фото ще раз", self.cb("cdr", did))])
+        rows += [
                 [("⚙️ Вигляд карток", self.cb("cds", did)), ("« Новина", self.cb("d", did))]]
         return text, rows
+
+    def cd_photo_path(self, did):
+        return self.dir / f"card_{did}.jpg"
 
     def cd_settings(self, did=0):
         c = self.cd_cfg()
         back = self.cb("cd", did) if did else self.cb("set")
-        text = ("⚙️ <b>Вигляд карток</b>\n\nДіє для всіх новин.\n\n"
-                f"🎨 Тема: {THEMES[c['theme']][0]} — {THEMES[c['theme']][1]}\n📐 Заголовок: {POS[c['pos']]}\n🌑 Затемнення фото: {SHADE[c['shade']][0]}\n"
-                f"🔠 Великі літери: {'так' if c['upper'] else 'ні'}\n🏷 Плашка рубрики: {'так' if c['label'] else 'ні'}\n"
-                f"✒️ Підпис: {esc(c['brand'].strip()) or 'немає'}\n🖼 Логотип: {'свій' if self.cd_logo() else 'GreenPost' if c['logo'] else 'без логотипа'}\n"
-                "🔤 Шрифт: Lora (жирний), кольори GreenPost\n\n"
+        text = ("⚙️ <b>Вигляд карток</b>\n\nДіє для всіх новин. Два стилі: шаблон GreenPost (без фото — міняється лише тло) і картка на фото. Розміри завжди: 1080×1080 і 1170×1540.\n\n"
+                f"🎨 Тло за замовчуванням: {BG[c['bg']][0]} {BG[c['bg']][1]}\n"
+                f"🔠 Великі літери: {'так' if c['upper'] else 'ні'}\n🏷 Плашка рубрики над заголовком: {'так' if c['label'] else 'ні'}\n"
+                f"✒️ Рядок над логотипом: {esc(c['brand'].strip()) or 'немає'}\n"
+                f"🖼 Логотип: {'свій' if self.cd_logo() else 'GreenPost' if c['logo'] else 'без логотипа'}\n"
+                "🔤 Шрифт: Lora (жирний)\n\n"
+                f"<b>Картки на фото</b>: тема {THEMES[c['theme']][0]} — {THEMES[c['theme']][1]}; заголовок {POS[c['pos']]}; "
+                f"затемнення {SHADE[c['shade']][0]}\n\n"
                 + "\n".join(f"{'✅' if k in c['sizes'] else '▫️'} {SIZES[k][0]} — {SIZES[k][2]}" for k in SIZES))
-        rows = [[("🎨 Тема", self.cb("cdc", "theme", did)), ("📐 Де заголовок", self.cb("cdc", "pos", did))],
-                [("🌑 Затемнення", self.cb("cdc", "shade", did)), ("🔠 Великі літери", self.cb("cdc", "upper", did))],
-                [("🏷 Плашка рубрики", self.cb("cdc", "label", did)), ("✒️ Підпис на картці", self.cb("cdb", did))],
+        rows = [[(f"🎨 Тло за замовчуванням: {BG[c['bg']][0]}", self.cb("cdc", "bg", did))],
+                [("🔠 Великі літери", self.cb("cdc", "upper", did)), ("🏷 Плашка рубрики", self.cb("cdc", "label", did))],
                 [((("✅ " if k in c["sizes"] else "▫️ ") + SIZES[k][0]), self.cb("cdz", k, did)) for k in SIZES],
-                [("🌿 Лого GreenPost: " + ("так" if c["logo"] else "ні"), self.cb("cdc", "logo", did))],
+                [("✒️ Рядок над логотипом", self.cb("cdb", did)), ("🌿 Лого GreenPost: " + ("так" if c["logo"] else "ні"), self.cb("cdc", "logo", did))],
+                [("📷 Тема на фото", self.cb("cdc", "theme", did)), ("📐 Де заголовок", self.cb("cdc", "pos", did)),
+                 ("🌑 Затемнення", self.cb("cdc", "shade", did))],
                 [("🖼 Своє лого", self.cb("cdl", did))] + ([("🗑 Прибрати своє лого", self.cb("cdlx", did))] if self.cd_logo() else []),
                 [("« Назад", back)]]
         return text, rows
 
-    async def cd_send(self, chat, did, photo):
-        d = self.store.draft(did)
-        bot = self.host.bot()
+    def _cd_images(self, d, bg=None, photo=None):
+        c = self.cd_cfg()
+        if bg in BG:
+            c["bg"] = bg
+        return [(k, render(photo, d["headline"], c, k, self._cd_label(d), self.cd_logo())) for k in SIZES if k in c["sizes"]]
+
+    @staticmethod
+    def _cd_name(did, k):
+        return f"kartka_{did}_{SIZES[k][0].replace('×', 'x')}.jpg"
+
+    async def cd_send(self, chat, did, bg=None, photo=None):
+        d, bot = self.store.draft(did), self.host.bot()
         if not d or not bot:
             return
-        c = self.cd_cfg()
-        keys = [k for k in ["sq", "pt", "st"] if k in c["sizes"]] or ["sq"]
-        label = d.get("category") or d.get("region") or ""
         from telegram import InputFile, InputMediaPhoto
-        imgs = [(k, render(photo, d["headline"], c, k, label, self.cd_logo())) for k in keys]
-        self.store.set(f"cdlast:{chat}", did)
-        media = [InputMediaPhoto(InputFile(io.BytesIO(b), filename=f"kartka_{did}_{SIZES[k][0].replace(':', 'x')}.jpg"),
-                                 caption=(f"🖼 Картки до #{did}: " + ", ".join(SIZES[x][0] for x, _ in imgs)) if i == 0 else None)
+        imgs = self._cd_images(d, bg, photo)
+        self.store.set(f"cdbg:{did}", bg or self.cd_cfg()["bg"])
+        self.store.set(f"cdph:{did}", bool(photo))
+        cap = f"🖼 Картки до #{did}: " + ", ".join(f"{SIZES[k][0]} ({SIZES[k][2]})" for k, _ in imgs)
+        media = [InputMediaPhoto(InputFile(io.BytesIO(b), filename=self._cd_name(did, k)), caption=cap if i == 0 else None)
                  for i, (k, b) in enumerate(imgs)]
         if len(media) == 1:
-            await bot.send_photo(chat, media[0].media, caption=media[0].caption)
+            await bot.send_photo(chat, media[0].media, caption=cap)
         else:
             await bot.send_media_group(chat, media)
         await self.host.notify(chat, "🖼 Готово. Telegram трохи стискає фото — для публікації візьміть файли без стиснення.",
                                [[("📎 Файлами без стиснення", self.cb("cdf", did))],
-                                [("🔁 Інше фото", self.cb("cd", did)), ("⚙️ Вигляд карток", self.cb("cds", did))],
+                                [("🎨 Інше тло", self.cb("cd", did)), ("⚙️ Вигляд карток", self.cb("cds", did))],
                                 [("« Новина", self.cb("d", did))]])
 
     async def cd_files(self, chat, did):
         bot, d = self.host.bot(), self.store.draft(did)
-        p = self.cd_photo_path(did)
-        photo = p.read_bytes() if p.exists() else None
-        c = self.cd_cfg()
+        if not bot or not d:
+            return
         from telegram import InputFile
-        for k in [k for k in ["sq", "pt", "st"] if k in c["sizes"]] or ["sq"]:
-            b = render(photo, d["headline"], c, k, d.get("category") or d.get("region") or "", self.cd_logo())
-            await bot.send_document(chat, InputFile(io.BytesIO(b), filename=f"kartka_{did}_{SIZES[k][0].replace(':', 'x')}.jpg"))
+        p = self.cd_photo_path(did)
+        photo = p.read_bytes() if self.store.get(f"cdph:{did}") and p.exists() else None
+        for k, b in self._cd_images(d, self.store.get(f"cdbg:{did}"), photo):
+            await bot.send_document(chat, InputFile(io.BytesIO(b), filename=self._cd_name(did, k)))
 
-    async def cd_route(self, chat, a, x, y):
+    async def cd_route(self, chat, a, x, y, z=None):
         if a == "cd":
             return None, self.cd_screen(int(x))
+        if a == "cdn":
+            self._bg(self.cd_send(chat, int(x), y if y in BG else None))
+            return "🖼 Малюю…", None
         if a == "cdp":
             self.cd_arm[chat] = ("photo", int(x))
-            return None, ("📷 <b>Надішліть фото</b> одним повідомленням (як фото або файлом — файлом якість краща).",
-                          [[("✖️ Скасувати", self.cb("cd", x))]])
-        if a == "cdl":
-            self.cd_arm[chat] = ("logo", int(x or 0))
-            return None, ("🖼 <b>Надішліть логотип</b> файлом PNG з прозорим тлом (стане в куток картки).",
-                          [[("✖️ Скасувати", self.cb("cds", x or 0))]])
-        if a == "cdlx":
-            (self.dir / "card_logo.png").unlink(missing_ok=True)
-            return "🗑 Прибрано", self.cd_settings(int(x or 0))
-        if a in ("cdn", "cdr", "cdu"):
+            return None, ("📷 <b>Надішліть фото</b> одним повідомленням (файлом — якість краща).", [[("✖️ Скасувати", self.cb("cd", x))]])
+        if a in ("cdr", "cdu"):
             did = int(x)
-            if a == "cdn":
-                self.cd_photo_path(did).unlink(missing_ok=True)
-                photo = None
-            elif a == "cdr":
+            if a == "cdr":
                 p = self.cd_photo_path(did)
                 photo = p.read_bytes() if p.exists() else None
             else:
                 photo = await self.cd_source_photo(did)
-                if not photo:
-                    return "Фото в джерелі не знайдено", self.cd_screen(did)
-                self.cd_photo_path(did).write_bytes(photo)
-            self._bg(self.cd_send(chat, did, photo))
+                if photo:
+                    self.cd_photo_path(did).write_bytes(photo)
+            if not photo:
+                return "Фото не знайдено", self.cd_screen(did)
+            self._bg(self.cd_send(chat, did, None, photo))
             return "🖼 Малюю…", None
         if a == "cdf":
             self._bg(self.cd_files(chat, int(x)))
             return "📎 Надсилаю файлами", None
+        if a == "cdl":
+            self.cd_arm[chat] = ("logo", int(x or 0))
+            return None, ("🖼 <b>Надішліть логотип</b> файлом PNG з прозорим тлом (стане по центру внизу).",
+                          [[("✖️ Скасувати", self.cb("cds", x or 0))]])
+        if a == "cdlx":
+            (self.dir / "card_logo.png").unlink(missing_ok=True)
+            return "🗑 Прибрано", self.cd_settings(int(x or 0))
         if a == "cds":
             return None, self.cd_settings(int(x or 0))
-        if a == "cdc":
+        if a == "cdc":  # x — що змінити; y — новина (для «Назад»); далі — значення
             c = self.cd_cfg()
-            cyc = {"theme": list(THEMES), "pos": list(POS), "shade": list(SHADE)}
-            if x in cyc:
-                v = cyc[x][(cyc[x].index(c[x]) + 1) % len(cyc[x])] if c[x] in cyc[x] else cyc[x][0]
-                self.cd_save(**{x: v})
+            did, _, val = (y or "0").partition(".")
+            if x == "bg":
+                ks = list(BG)
+                self.cd_save(bg=val if val in BG else ks[(ks.index(c["bg"]) + 1) % len(ks)] if c["bg"] in ks else ks[0])
+            elif x in ("theme", "pos", "shade"):
+                cyc = {"theme": list(THEMES), "pos": list(POS), "shade": list(SHADE)}[x]
+                self.cd_save(**{x: cyc[(cyc.index(c[x]) + 1) % len(cyc)] if c[x] in cyc else cyc[0]})
             elif x in ("upper", "label", "logo"):
                 self.cd_save(**{x: not c[x]})
-            return None, self.cd_settings(int(y or 0))
+            return None, self.cd_settings(int(did or 0))
         if a == "cdz":
             s = self.cd_cfg()["sizes"]
             s = [k for k in s if k != x] if x in s else [k for k in SIZES if k in s or k == x]
@@ -305,32 +398,14 @@ class CardsUI:
             return None, self.cd_settings(int(y or 0))
         if a == "cdb":
             self.ask(chat, "cdb", int(x or 0))
-            return None, ("✒️ <b>Підпис на картках</b> — назва видання чи адреса сайту, напр. «greenpost.ua». «-» — без підпису.",
+            return None, ("✒️ <b>Рядок над логотипом</b> — напр. адреса сайту «greenpost.ua». «-» — без рядка (як у шаблоні).",
                           [[("✖️ Скасувати", "m:cancel")]])
         return None, self.cd_screen(int(x))
 
     async def cd_text(self, chat, key, data, text):
         t = text.strip()
-        self.cd_save(brand=" " if t in ("-", "—") else t[:60])
+        self.cd_save(brand="" if t in ("-", "—") else t[:60])
         return "Збережено", self.cd_settings(int(data or 0))
-
-    async def cd_source_photo(self, did):
-        """Головне зображення сторінки першого джерела новини (og:image)."""
-        d = self.store.draft(did)
-        import httpx
-        for url in (d.get("sources") or [])[:3]:
-            try:
-                async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as cl:
-                    r = await cl.get(url)
-                    img = og_image(r.text[:400_000])
-                    if not img:
-                        continue
-                    r2 = await cl.get(img)
-                    if r2.status_code == 200 and r2.content[:3] in (b"\xff\xd8\xff", b"\x89PN", b"RIF", b"GIF"):
-                        return r2.content
-            except Exception:  # noqa: BLE001
-                log.info("og image failed for %s", url, exc_info=True)
-        return None
 
     async def cd_on_file(self, update, ctx):
         msg = update.message
@@ -341,13 +416,30 @@ class CardsUI:
         kind, did = armed
         f = (msg.photo[-1] if msg.photo else None) or (msg.document if msg.document and (msg.document.mime_type or "").startswith("image/") else None)
         if not f:
-            await msg.reply_text("Потрібне зображення. Натисніть кнопку ще раз і надішліть фото.")
+            await msg.reply_text("Потрібне зображення. Натисніть «🖼 Своє лого» ще раз і надішліть PNG.")
             return True
         data = bytes(await (await ctx.bot.get_file(f.file_id)).download_as_bytearray())
-        if kind == "logo":
-            (self.dir / "card_logo.png").write_bytes(data)
-            await self.host.notify(chat, *self.cd_settings(did))
+        if kind == "photo":
+            self.cd_photo_path(did).write_bytes(data)
+            await self.cd_send(chat, did, None, data)
             return True
-        self.cd_photo_path(did).write_bytes(data)
-        await self.cd_send(chat, did, data)
+        (self.dir / "card_logo.png").write_bytes(data)
+        await self.host.notify(chat, *self.cd_settings(did))
         return True
+
+    async def cd_source_photo(self, did):
+        """Головне зображення сторінки першого джерела новини (og:image)."""
+        d = self.store.draft(did)
+        import httpx
+        for url in (d.get("sources") or [])[:3]:
+            try:
+                async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as cl:
+                    img = og_image((await cl.get(url)).text[:400_000])
+                    if not img:
+                        continue
+                    r = await cl.get(img)
+                    if r.status_code == 200 and r.content[:3] in (b"\xff\xd8\xff", b"\x89PN", b"RIF", b"GIF"):
+                        return r.content
+            except Exception:  # noqa: BLE001
+                log.info("og image failed for %s", url, exc_info=True)
+        return None
