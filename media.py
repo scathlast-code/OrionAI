@@ -308,9 +308,17 @@ async def stt_gemini(data, filename, language=None):
         {"text": "Дослівно розшифруй мовлення з цього запису тією мовою, якою говорять (не перекладай). "
                  "Якщо це відео без мовлення — коротко опиши українською, що на ньому видно. Лише текст, без пояснень."},
         {"inline_data": {"mime_type": mime, "data": _b64.b64encode(data).decode()}}]}]}
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_STT_MODEL}:generateContent?key={GEMINI_KEY}"
-    async with httpx.AsyncClient(timeout=120) as c:
-        r = await c.post(url, json=body)
+    r = None
+    # обрана модель (GEMINI_STT_MODEL / GEMINI_MODEL) може не приймати звук — тоді пробуємо стабільні моделі зі слухом
+    for model in dict.fromkeys([GEMINI_STT_MODEL, "gemini-flash-latest", "gemini-2.5-flash", "gemini-2.0-flash"]):
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_KEY}"
+        async with httpx.AsyncClient(timeout=120) as c:
+            r = await c.post(url, json=body)
+        if r.status_code == 200:
+            break
+        log.warning("gemini_stt %s: HTTP %s %s", model, r.status_code, r.text[:300].replace(GEMINI_KEY or "§", "…"))
+        if r.status_code in (401, 403):  # ключ не підходить — інші моделі не допоможуть
+            break
     if r.status_code != 200:
         raise MediaError("gemini_stt", "bad_request" if r.status_code < 500 else "network", f"HTTP {r.status_code}: {r.text[:200]}")
     try:
