@@ -56,3 +56,9 @@ def test_embed_music():
          '<div><span>22 год · 9</span></div></html>')
     assert M._embed_music(h) == ("Twinkling Lights (Reimagined)", "Auni")
     assert M._embed_music('<p><span>Ранок · Вечір</span></p>') is None
+
+
+def test_embed_music_split_spans():
+    h = ('<html><div><a href="/audio/123"><svg></svg></a><div><span>Twinkling Lights (Reimagined)</span><span>·</span>'
+         '<span>Auni</span></div></div></html>')
+    assert M._embed_music(h) == ("Twinkling Lights (Reimagined)", "Auni")

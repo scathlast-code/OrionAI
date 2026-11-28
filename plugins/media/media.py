@@ -704,8 +704,17 @@ MUSIC_JSON_RE = re.compile(r'"music_info"\s*:\s*\{.*?"title"\s*:\s*"([^"]{1,120}
 SKIP_LINE_RE = re.compile(r"(?i)\d+\s*(год|хв|дн|тиж|h|m|d|w)\b|^\d|@|http|відповід|repl|like|threads", re.I)
 
 
-def _embed_music(text):
-    """Музика під дописом Threads («▶ Twinkling Lights (Reimagined) · Auni») -> (назва, виконавець) або None."""
+def _music_split(t):
+    t = re.sub(r"\s+", " ", t or "").strip()
+    parts = [x.strip() for x in re.split(r"\s[·•]\s|\s?·\s?", t) if x.strip()]
+    if len(parts) == 2 and all(1 < len(x) <= 80 for x in parts) and not SKIP_LINE_RE.search(t):
+        return parts[0], parts[1]
+    return None
+
+
+def _embed_music(text, code=""):
+    """Музика під дописом Threads («▶ Twinkling Lights (Reimagined) · Auni») -> (назва, виконавець) або None.
+    Шукаємо в JSON, далі — рядок «Назва · Виконавець» поруч зі значком (svg) чи позначкою звуку; «·» може бути окремим елементом."""
     m = MUSIC_JSON_RE.search(text or "")
     if m:
         try:
@@ -716,19 +725,32 @@ def _embed_music(text):
         doc = read_html((text or "").encode("utf-8"))
     except Exception:  # noqa: BLE001
         return None
+    seen = []
     for node in doc.xpath("//*[contains(text(), '·')]"):
-        if node.xpath("ancestor::*[self::script or self::style]"):
+        if node.xpath("ancestor-or-self::*[self::script or self::style or self::title]"):
             continue
-        t = re.sub(r"\s+", " ", node.text_content() or "").strip()
-        parts = [x.strip() for x in t.split("·")]
-        if len(parts) != 2 or not all(1 < len(x) <= 80 for x in parts) or SKIP_LINE_RE.search(t):
-            continue
-        box = node.getparent()
-        near = " ".join((box.get("class") or "", box.get("aria-label") or "", node.get("class") or "",
-                         " ".join(e.get("aria-label") or "" for e in (box.getparent() if box is not None and box.getparent() is not None else box).iter())
-                         if box is not None else "")).lower()
-        if box is not None and (re.search(r"music|audio|sound|музик|аудіо|play", near) or box.xpath(".//svg")):
-            return parts[0], parts[1]
+        box = node
+        for _ in range(4):  # сам елемент або 1–3 рівні вгору, поки текст не стане «Назва · Виконавець»
+            got = _music_split(box.text_content())
+            if got:
+                near = " ".join(filter(None, [box.get("class"), box.get("aria-label"), box.get("role")])).lower()
+                around = box.getparent() if box.getparent() is not None else box
+                if box.xpath(".//svg") or around.xpath("./*[.//svg]") or re.search(r"music|audio|sound|song|музик|аудіо|play", near) \
+                        or any(re.search(r"music|audio|song|play|музик|аудіо", (e.get("aria-label") or "") + (e.get("href") or ""), re.I)
+                               for e in around.iter()):
+                    return got
+                seen.append(box.text_content()[:80])
+                break
+            box = box.getparent()
+            if box is None:
+                break
+    if seen:
+        log.info("threads %s: рядки з «·» без значка звуку: %s", code, [re.sub(r"\s+", " ", x) for x in seen[:5]])
+    # для налаштування: як виглядає розмітка біля «·» (без адрес), щоб наступного разу знайти музику точно
+    body = re.sub(r"<script.*?</script>|<style.*?</style>", " ", text or "", flags=re.S)
+    for mm in list(re.finditer(r"·|&#183;|&middot;", body))[:3]:
+        snip = re.sub(r"https?://\S+?(?=[\"' ])", "…", body[max(0, mm.start() - 350): mm.end() + 250])
+        log.info("threads %s: біля «·»: %s", code, re.sub(r"\s+", " ", snip))
     return None
 
 
@@ -836,7 +858,7 @@ async def threads_probe(url, work):
             if not links:
                 links = _embed_media(etext, efinal)
             raw = _raw_post_images(etext)
-            mus = _embed_music(etext)
+            mus = _embed_music(etext, code)
             if mus and not info.get("track"):  # 🎵 накладена музика, як її показує сам Threads
                 info["track"], info["artist"] = mus[0], mus[1]
                 info["music_on_post"] = True  # Threads: музика прикріплена до допису, у файлі відео її може не бути
