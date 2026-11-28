@@ -78,10 +78,15 @@ def cycle(chat_id, kind):
     return nxt
 
 
+ESSENTIAL = {"tasks": "loud", "media": "loud", "warn": "loud", "system": "loud", "news": "silent", "morning": "silent",
+             "space": "silent", "backup": "off", "other": "silent"}
+
+
 def set_all(chat_id, value):
     saved = {}
     for k, (_n, can_off, default) in KINDS.items():
-        saved[k] = value if (value != "off" or can_off) else "silent"
+        v = ESSENTIAL.get(k, "silent") if value == "essential" else value
+        saved[k] = v if (v != "off" or can_off) else "silent"
     if _set:
         _set(chat_id, saved)
 
@@ -120,4 +125,6 @@ def screen(chat_id):
     lines += ["", "ℹ️ Режиму «лише вібрація» Telegram не має, а тихі повідомлення все одно позначаються непрочитаними — "
               "це обмеження Telegram, бот на нього не впливає."]
     rows.append([("🔔 Усе гучно", "m:ntf:a:loud"), ("🔕 Усе тихо", "m:ntf:a:silent")])
+    rows.append([("⭐ Лише найважливіше гучно", "m:ntf:a:essential")])
+    lines.append("⭐ «Лише найважливіше» — гучно відповіді, завантаження, попередження про дні й збої; решта тихо, резервні копії — без сповіщень.")
     return "\n".join(lines), rows
