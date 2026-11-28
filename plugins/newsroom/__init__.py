@@ -41,6 +41,7 @@ from .cards import CardsUI
 from .styleguide import StyleUI
 from .ourswrote import OursWroteUI
 from .alerts import AlertsUI
+from .weekstats import WeekStatsUI
 from .echo import KINDS as ECHO_KINDS, Echo
 from .collectors import MTProto, WebCollector
 
@@ -120,7 +121,7 @@ def src_links(sources, sep=" · "):
     return sep.join(f'<a href="{esc(s)}">{esc(_dom(s))}</a>' if str(s).startswith("http") else esc(s) for s in sources)
 
 
-class Plugin(AlertsUI, OursWroteUI, StyleUI, CardsUI, QueueUI, CrosspostUI, ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Base):
+class Plugin(WeekStatsUI, AlertsUI, OursWroteUI, StyleUI, CardsUI, QueueUI, CrosspostUI, ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Base):
     id = "news"
     icon = "✍️"
     title = "Публікації"
@@ -130,7 +131,7 @@ class Plugin(AlertsUI, OursWroteUI, StyleUI, CardsUI, QueueUI, CrosspostUI, Repo
                "переписує за правилами редакції на моделях Оріона, тримає точну довжину, готує зведення за добу й "
                "публікує в канал лише після вашого схвалення.\n\n"
                "Автоматичний рерайт — не фактчек: перед публікацією звіряйте цифри й імена (кнопка «🔎 Звірити» допомагає, але не замінює редактора).")
-    VIEWS = {"al", "ow", "ows", "sty", "styd", "cd", "cds", "pql", "pq", "pqh", "xp", "xps", "ls", "d", "src", "dg", "so", "set", "q", "help", "ver", "len", "rules",
+    VIEWS = {"ws", "wst", "al", "ow", "ows", "sty", "styd", "cd", "cds", "pql", "pq", "pqh", "xp", "xps", "ls", "d", "src", "dg", "so", "set", "q", "help", "ver", "len", "rules",
              "L", "Lo", "Ls", "Lsort", "Lbulk", "Le", "Lacc", "Lhelp", "Elst", "Lmerge",
              "H1", "H2", "H3", "H4", "H5", "D", "Dm", "Fl", "Fo", "Ff", "Fi", "Fmv", "Fbl", "Tg", "Tgi", "Tp", "Bk", "Bkl",
              "Sp", "Ou", "Ours", "Sl", "St", "Wt", "more", "acs", "ace", "sch", "fld", "flds", "echo", "eci", "cls", "ctp", "cte", "cmk", "csl", "obh", "obt", "obc", "obd", "ob", "obi", "obl", "obs", "obup", "obws", "obdy", "obcp", "obcm"}
@@ -352,7 +353,7 @@ class Plugin(AlertsUI, OursWroteUI, StyleUI, CardsUI, QueueUI, CrosspostUI, Repo
             self.queue.put_nowait(iid)
         loop = asyncio.get_running_loop()
         self._tasks = [loop.create_task(self._worker()), loop.create_task(self._rss_loop()),
-                       loop.create_task(self._lists_loop()), loop.create_task(self._mt_loop()), loop.create_task(self._tags_loop()), loop.create_task(self._sched_loop()), loop.create_task(self._pq_loop()), loop.create_task(self._obs_loop()), loop.create_task(self.cplan_watch()),
+                       loop.create_task(self._lists_loop()), loop.create_task(self._mt_loop()), loop.create_task(self._tags_loop()), loop.create_task(self._sched_loop()), loop.create_task(self._pq_loop()), loop.create_task(self._ws_loop()), loop.create_task(self._obs_loop()), loop.create_task(self.cplan_watch()),
                        loop.create_task(self._report_loop())]
         await asyncio.gather(*self._tasks)
 
@@ -855,7 +856,7 @@ class Plugin(AlertsUI, OursWroteUI, StyleUI, CardsUI, QueueUI, CrosspostUI, Repo
             [("🔎 Знайти й написати", self.cb("D"))],
             [(f"🗓 Черга публікацій · {sum(1 for r in self.pq() if r['st'] in ('wait', 'pause'))}", self.cb("pql")),
              ("🔎 Пошук у наших", self.cb("ows"))],
-            [("⚡ Термінові сповіщення" + (" ✅" if self.al_cfg()["on"] else ""), self.cb("al"))],
+            [("⚡ Термінові сповіщення" + (" ✅" if self.al_cfg()["on"] else ""), self.cb("al")), ("📈 Статистика тижня", self.cb("ws"))],
             [("📡 Джерела", self.cb("H1")), ("⚙️ Налаштування новинарні", self.cb("H2"))],
             [("🗂 Архів", self.cb("H5")), ("ℹ️ Довідка", self.cb("help"))],
         ]
@@ -1206,6 +1207,8 @@ class Plugin(AlertsUI, OursWroteUI, StyleUI, CardsUI, QueueUI, CrosspostUI, Repo
             return await self.actions_route(chat, a, x, y)
         if a in ("rp", "rpsel", "rpt", "rpin", "rpshow", "rpau", "rpun", "rpa", "rgo"):
             return await self.report_route(chat, a, x, y)
+        if a in ("ws", "wst", "wsa", "wsq"):
+            return await self.ws_route(chat, a, x, y)
         if a in ("al", "alc", "ali", "alh", "alm"):
             return await self.al_route(chat, a, x, y)
         if a in ("ow", "owa", "ows", "owq"):
