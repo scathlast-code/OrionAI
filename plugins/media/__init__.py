@@ -404,10 +404,12 @@ class Plugin(Base):
                         R.ai_prompt(caption or "", "", [], [], seen=bool(pic), notes=notes, nimg=nimg),
                         system=R.AI_SYSTEM, label="⚠️ Перевірка файлу", image=pic), 70 if pic else 40)
                     if re.search(r"\{.*\}", ans or "", re.S):
-                        risks |= R.parse_risks(ans)
-                    seen = R.parse_seen(ans)
-                    if seen:
-                        self.__dict__.setdefault("_seen", {})[chat] = seen
+                        risks |= R.parse_risks(ans) - {"music"}  # ШІ звуку не чує — про музику судить лише Shazam
+                        seen_t = R.parse_seen(ans)
+                        if R.swear_hits(seen_t):
+                            risks.add("swear")
+                        if seen_t and R.guess_lang(seen_t) == "ru":
+                            risks.add("ru")
                         break
                 except Exception:  # noqa: BLE001
                     log.info("scan: ШІ не перевірив файл", exc_info=True)
@@ -542,7 +544,7 @@ class Plugin(Base):
         v = next((x for x in data.get("streams", []) if x.get("codec_type") == "video"), {})
         w, h = int(v.get("width") or 0), int(v.get("height") or 0)
         if w and h and min(w, h) < 720:
-            issues.append(f"низька роздільність {w}×{h} (для мереж — від 1080)")
+            issues.append(f"низька роздільність {w}×{h} (для мереж краще {'1080×1920' if h > w else '1920×1080' if w > h else '1080×1080'})")
         if suf in self.VIDEO_EXT and v:
             try:
                 br = float(v.get("bit_rate") or (data.get("format") or {}).get("bit_rate") or 0)
@@ -621,7 +623,10 @@ class Plugin(Base):
                     about = R.parse_about(ans)
                     if about:
                         self._about[chat] = about
-                    risks |= R.parse_risks(ans)
+                    risks |= R.parse_risks(ans) - {"music"}  # ШІ звуку не чує — про музику судять лише Shazam і дані сайту
+                    seen = R.parse_seen(ans)
+                    if seen:
+                        self.__dict__.setdefault("_seen", {})[chat] = seen
                     if a_t or a_g or about:
                         break
                 except Exception:  # noqa: BLE001 — ШІ недоступний: лишається словник
@@ -635,7 +640,7 @@ class Plugin(Base):
         on_post = (ctx or {}).get("music_on_post")  # лише Threads: музика на дописі, а не обов'язково у відео
         if (ctx or {}).get("song_overlay") and on_post:
             inside = await self.post_music_in_file((ctx or {}).get("media") or media, (ctx or {}).get("song", ""))
-            if inside is not False:  # є у файлі або не вдалося перевірити — попереджаємо; немає — файл без цієї музики
+            if inside:  # лише коли Shazam почув цю пісню в самому файлі; немає чи не вдалося перевірити — без попередження
                 risks.add("music")
             log.info("related: музика допису у файлі: %s", inside)
         elif (ctx or {}).get("song_overlay") or re.search(r"(?i)\[(?:music|музика|музыка)\]|♪", said):
@@ -1257,7 +1262,7 @@ class Plugin(Base):
         if a in ("og", "ox", "oa", "os", "osv", "oso", "osm", "opt", "ofm"):
             job = self.job_by(chat, x)
             if not job:
-                return "Посилання застаріло — надішліть його ще раз", None
+                return self.revive(chat, x)
             if a == "ofm":  # 📦 формат файлу — по колу з тих, що підходять до цих файлів
                 vis, _aud, imgs = self.parts(job)
                 fm = self.file_formats(job, len(vis) - len(imgs), imgs)
@@ -1287,7 +1292,7 @@ class Plugin(Base):
         if a in ("pil", "pi", "pim", "pif", "pia", "pir"):  # 🔢 окремо для кожного файлу
             job = self.job_by(chat, x)
             if not job:
-                return "Посилання застаріло — надішліть його ще раз", None
+                return self.revive(chat, x)
             if a == "pil":
                 return None, self.per_screen(chat, job)
             if a == "pir":
@@ -1335,12 +1340,12 @@ class Plugin(Base):
         if a in ("fau", "fab", "fvf", "fvs"):
             job = self.job_by(chat, x)
             if not job:
-                return "Посилання застаріло — надішліть його ще раз", None
+                return self.revive(chat, x)
             return await self.fmt_extra(chat, job, a, y)
         if a in ("fq", "fa", "fp", "ff", "fr", "fall", "sp", "spn"):
             job = self.job_by(chat, x)
             if not job:
-                return "Посилання застаріло — надішліть його ще раз", None
+                return self.revive(chat, x)
             if self.busy(chat) and a != "fp":
                 return "⏳ Ще завантажую попереднє", None
             if a == "fq":
@@ -2345,6 +2350,7 @@ class Plugin(Base):
         job.options.height = 1080  # до 1080p, щоб не впертись у межу Telegram
         job.__dict__["src"] = src
         self.jobs[chat] = job
+        self.remember_token(job.token, url)  # кнопки під дописом мають працювати й після оновлення бота
         self._active(chat, done=True)
         if M.is_story(url) and len(job.items) > 1:  # кілька сторіс за день: вибір
             await self.show_stories(chat, job, status)
@@ -2902,6 +2908,31 @@ class Plugin(Base):
                 await self.host.bot().send_message(chat, c, parse_mode="HTML", disable_web_page_preview=True,
                                                    reply_markup=self._markup(rows) if last else None)
         self.live[chat] = (chunks[0][:3500], rows)
+
+    def remember_token(self, tok, url):
+        p = self.dir / "tokens.json"
+        try:
+            data = json.loads(p.read_text()) if p.is_file() else {}
+        except (OSError, ValueError):
+            data = {}
+        data[tok] = url
+        if len(data) > 400:
+            data = dict(list(data.items())[-400:])
+        try:
+            p.write_text(json.dumps(data))
+        except OSError:
+            pass
+
+    def revive(self, chat, tok):
+        """Кнопка зі старого допису (бот за цей час оновлювався й забув завдання): відкриваємо те саме посилання заново."""
+        try:
+            url = json.loads((self.dir / "tokens.json").read_text()).get(tok)
+        except (OSError, ValueError):
+            url = None
+        if not url:
+            return "Посилання застаріло — надішліть його ще раз", None
+        res = self.start_quick(chat, url, force=True)
+        return (res or "🔄 Бот оновлювався — відкриваю це посилання заново"), (self.live_screen(chat) if self.in_app() else None)
 
     def job_by(self, chat, tok):
         job = self.jobs.get(chat)

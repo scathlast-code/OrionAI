@@ -4732,7 +4732,7 @@ def scr_canva(chat_id):
     if not canva.configured():
         text = (
             "<b>🖌 Canva</b>\n\n▫️ Ще не налаштовано на сервері.\n\n"
-            "Потрібні змінні <code>CANVA_CLIENT_ID</code>, <code>CANVA_CLIENT_SECRET</code> і <code>PUBLIC_URL</code>."
+            "Потрібні змінні <code>CANVA_CLIENT_ID</code> і <code>CANVA_CLIENT_SECRET</code> (адреса бота береться з домену Railway сама)."
         )
         return text, [[("ℹ️ Як підключити", "help:g:canva")], [("« Створити", "m:cr")]]
     if not canva.connected():

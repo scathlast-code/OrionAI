@@ -32,7 +32,7 @@ log = logging.getLogger("canva")
 
 CLIENT_ID = env("CANVA_CLIENT_ID", "")
 CLIENT_SECRET = env("CANVA_CLIENT_SECRET", "")
-PUBLIC_URL = env("PUBLIC_URL", "").rstrip("/")
+PUBLIC_URL = (env("PUBLIC_URL", "") or (f"https://{env('RAILWAY_PUBLIC_DOMAIN', '')}" if env("RAILWAY_PUBLIC_DOMAIN", "") else "")).rstrip("/")  # без PUBLIC_URL — домен Railway
 AUTH_URL = env("CANVA_AUTH_URL", "https://www.canva.com/api/oauth/authorize")
 TOKEN_URL = env("CANVA_TOKEN_URL", "https://api.canva.com/rest/v1/oauth/token")
 MCP_URL = env("CANVA_MCP_URL", "https://api.canva.com/connect/v1/mcp")
