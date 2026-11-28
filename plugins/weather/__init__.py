@@ -113,7 +113,12 @@ class WeatherPlugin(Plugin):
         self.save(c)
 
     def morning_on(self, chat) -> bool:
-        return (self.cfg().get("morning") or {}).get(str(chat), True)
+        """Окремий ранковий звіт погоди — лише якщо людина сама його увімкнула (погода й так є в зведенні «Сьогодні»)."""
+        c = self.cfg()
+        if c.get("morning_v") != 2:  # раніше було «увімкнено для всіх» — тепер окремо лише на вимогу
+            c["morning"], c["morning_v"] = {}, 2
+            self.save(c)
+        return (c.get("morning") or {}).get(str(chat), False)
 
     def morning_time(self, chat) -> str:
         return (self.cfg().get("mtime") or {}).get(str(chat)) or DEFAULT_TIME
@@ -121,13 +126,14 @@ class WeatherPlugin(Plugin):
     def set_morning(self, chat, hm):
         """hm = "ГГ:ХХ" — надсилати о цій порі; None — не надсилати."""
         c = self.cfg()
+        c["morning_v"] = 2
         c.setdefault("morning", {})[str(chat)] = bool(hm)
         if hm:
             c.setdefault("mtime", {})[str(chat)] = hm
         self.save(c)
 
     def morning_label(self, chat):
-        return f"🌅 Вранці: {self.morning_time(chat)}" if self.morning_on(chat) else "🌅 Вранці: ні"
+        return f"🌅 Окремо вранці: {self.morning_time(chat)}" if self.morning_on(chat) else "🌅 Окремо вранці: ні"
 
     def users(self):
         get = self.host.extra.get("users")
@@ -536,9 +542,6 @@ class WeatherPlugin(Plugin):
             for uid in (only if only is not None else self.users()):
                 if not self.morning_on(uid) or not notify.wanted(uid, "morning"):
                     continue
-                news = self.host.extra.get("plugin", lambda pid: None)("news")
-                if news and hasattr(news, "morning_digest_for") and news.morning_digest_for(uid):
-                    continue  # погода вже є в повному ранковому зведенні «Сьогодні» — без другого повідомлення
                 try:
                     await self.host.notify(uid, await self.morning_text(uid),
                                            [[("📜 Прикмети й звичаї дня", self.cb("lore")), ("🌤 Погода", self.cb())]] + src_rows())
@@ -769,7 +772,8 @@ class WeatherPlugin(Plugin):
             cur = self.morning_time(chat) if self.morning_on(chat) else ""
             tm = [(("✅ " if h == cur else "") + h, self.cb("mts", h.replace(":", ""))) for h in TIMES]
             rows = [tm[:4], tm[4:], [("⌨️ Свій час", self.cb("mti")), ("✖️ Не надсилати", self.cb("mts", "off"))], [("« Погода", self.cb())]]
-            return None, ("🌅 <b>Ранковий прогноз</b>\n\nО котрій щодня надсилати вам погоду? Зараз: "
+            return None, ("🌅 <b>Окремий ранковий прогноз</b>\n\nПогода вже щоранку є у зведенні «🌅 Сьогодні». "
+                          "Тут можна додатково отримувати окреме повідомлення лише з погодою. Зараз: "
                           + (f"<b>{cur}</b>" if cur else "<b>не надсилати</b>")
                           + "\n\nГучно чи тихо — у 🎛 Поведінка → 🔔 Сповіщення.", rows)
         if a == "mts":

@@ -1808,10 +1808,15 @@ class ObservancesUI:
                             self.store.set("obs_last_fetch", now.date().isoformat())
                     hm = self.store.get("obs_time") or "07:30"
                     today = now.date().isoformat()
-                    if (self.store.get("obs_morning") is not False and now.strftime("%H:%M") == hm and sent_day != now.date()
+                    hh, mm = (int(x) for x in hm.split(":"))
+                    late = (now.hour * 60 + now.minute) - (hh * 60 + mm)
+                    # не точна хвилина, а вікно 0–20 хв: інакше довге завантаження (контент-план, прогноз) о 07:29
+                    # «перескакувало» 07:30 — і зведення того дня не приходило зовсім
+                    if (self.store.get("obs_morning") is not False and 0 <= late <= 20 and sent_day != now.date()
                             and self.store.get("obs_sent") != today):  # один раз на день, навіть після перезапуску
                         sent_day = now.date()
                         self.store.set("obs_sent", today)
+                        log.info("ранкове зведення «Сьогодні»: час %s, запізнення %d хв", hm, late)
                         await self.send_digest()
             except asyncio.CancelledError:
                 raise
@@ -1842,6 +1847,9 @@ class ObservancesUI:
                             text, rows = await self.obs_digest(uid)
                             text = "🌅 " + text
                         await self.host.notify(uid, text, rows)
+                        log.info("ранкове зведення надіслано %s", uid)
+                    else:
+                        log.info("ранкове зведення: %s вимкнув ранкові сповіщення", uid)
                 with notify.kind("warn"):
                     if not notify.wanted(uid, "warn"):
                         continue
