@@ -8365,9 +8365,24 @@ async def on_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     forwarded = msg.forward_origin is not None
     if not forwarded:
         await ctx.bot.send_chat_action(chat_id, ChatAction.TYPING)
-    file = await att.get_file()
-    data = bytes(await file.download_as_bytearray())
-    name = getattr(att, "file_name", None) or ("voice.ogg" if msg.voice else "audio.mp4")
+    big = getattr(PLUGINS.get("med"), "big", None)
+    if (getattr(att, "file_size", 0) or 0) > 20 * 1024 * 1024 and big and big.ready():  # більше 20 МБ — напряму через MTProto
+        import tempfile as _tf
+        with _tf.TemporaryDirectory() as _tmp:
+            p_ = await big.download(chat_id, msg.message_id, Path(_tmp) / "in.bin")
+            _aud = Path(_tmp) / "a.mp3"
+            try:  # до голосу: менший файл для розшифровки
+                pr = await asyncio.create_subprocess_exec("ffmpeg", "-loglevel", "error", "-y", "-i", str(p_), "-vn", "-ac", "1", "-ar", "16000",
+                                                          "-b:a", "48k", str(_aud))
+                await pr.wait()
+                data = _aud.read_bytes() if _aud.exists() else p_.read_bytes()
+            except Exception:  # noqa: BLE001
+                data = p_.read_bytes()
+        name = "audio.mp3"
+    else:
+        file = await att.get_file()
+        data = bytes(await file.download_as_bytearray())
+        name = getattr(att, "file_name", None) or ("voice.ogg" if msg.voice else "audio.mp4")
     try:
         if forwarded:
             text, prov, errors = await media.transcribe(data, name)
