@@ -135,7 +135,7 @@ class Plugin(ExtrasUI, ToolsUI, WeekStatsUI, AlertsUI, OursWroteUI, StyleUI, Car
                "Автоматичний рерайт — не фактчек: перед публікацією звіряйте цифри й імена (кнопка «🔎 Звірити» допомагає, але не замінює редактора).")
     VIEWS = {"tl", "tv", "tm", "seo", "en", "pll", "cr", "crl", "lv", "yago", "nl", "ws", "wst", "al", "ow", "ows", "sty", "styd", "cd", "cds", "pql", "pq", "pqh", "xp", "xps", "ls", "d", "src", "dg", "so", "set", "q", "help", "ver", "len", "rules",
              "L", "Lo", "Ls", "Lsort", "Lbulk", "Le", "Lacc", "Lhelp", "Elst", "Lmerge",
-             "H1", "H2", "H3", "H4", "H5", "D", "Dm", "Fl", "Fo", "Ff", "Fi", "Fmv", "Fbl", "Tg", "Tgi", "Tp", "Bk", "Bkl",
+             "H1", "H2", "H3", "H4", "H5", "H6", "H7", "D", "Dm", "Fl", "Fo", "Ff", "Fi", "Fmv", "Fbl", "Tg", "Tgi", "Tp", "Bk", "Bkl",
              "Sp", "Ou", "Ours", "Sl", "St", "Wt", "more", "acs", "ace", "sch", "fld", "flds", "echo", "eci", "cls", "ctp", "cte", "cmk", "csl", "obh", "obt", "obc", "obd", "ob", "obi", "obl", "obs", "obup", "obws", "obdy", "obcp", "obcm"}
 
     def __init__(self, host):
@@ -937,19 +937,45 @@ class Plugin(ExtrasUI, ToolsUI, WeekStatsUI, AlertsUI, OursWroteUI, StyleUI, Car
         return text, rows
 
     def hub_H2(self, chat):
+        """⚙️ Усі налаштування новинарні — 5 груп; у кожній — коротко, що там зараз."""
         st = self.store
+        al = self.al_cfg()
         text = ("⚙️ <b>Налаштування новинарні</b>\n\n"
-                f"📤 Публікація: {esc(st.get('publish_title') or 'канал не підключено')}\n"
-                f"✍️ Як писати: довжина {int(st.get('target') or 0) or 'вільна'}, {'свої правила' if st.get('rules') else 'базові правила'}, "
-                f"Word UA+RU {'так' if st.get('word_bilingual') else 'ні'}\n"
-                f"🛡 Фільтри: блокувань {len(self.desk.blocks())}, антиспам {st.get('spam_level') or 'soft'}\n"
-                f"↪️ Переслане — у новинарню: {'так' if st.get('forward_auto') else 'ні'}\n"
-                f"🔔 Сповіщення про автоматичні чернетки: {'так' if st.get('notify') else 'ні'}")
+                f"📤 <b>Публікація</b> — канал: {esc(st.get('publish_title') or 'не підключено')}; години черги: {', '.join(self.pq_slots()[:4])}\n"
+                f"✍️ <b>Як писати</b> — довжина {int(st.get('target') or 0) or 'вільна'}, {'свої правила' if st.get('rules') else 'базові правила'}, словник редакції\n"
+                f"🛡 <b>Фільтри</b> — блокувань {len(self.desk.blocks())}, антиспам {st.get('spam_level') or 'soft'}\n"
+                f"🔔 <b>Сповіщення</b> — чернетки: {'так' if st.get('notify') else 'ні'}; термінові: {'так' if al.get('on') else 'ні'}; "
+                f"звіт щопонеділка: {'так' if st.get('ws_auto') is not False else 'ні'}\n"
+                f"🧩 <b>Робота з новинами</b> — кнопки під новиною, переслане → новинарня: {'так' if st.get('forward_auto') else 'ні'}")
         rows = [[("📤 Публікація", self.cb("set")), ("✍️ Як писати", self.cb("H3"))],
-                [("🧩 Кнопки під новиною", self.cb("acs")), ("🛡 Фільтри", self.cb("H4"))],
-                [(("↪️ Переслане → новинарня: так" if st.get("forward_auto") else "↪️ Переслане → новинарня: ні"), self.cb("Hfwd"))],
-                [(("🔔 Сповіщення: так" if st.get("notify") else "🔕 Сповіщення: ні"), self.cb("tg", "notify"))],
+                [("🛡 Фільтри", self.cb("H4")), ("🔔 Сповіщення", self.cb("H6"))],
+                [("🧩 Робота з новинами", self.cb("H7"))],
                 [("« Новинарня", self.cb())]]
+        return text, rows
+
+    def hub_H6(self, chat):
+        """🔔 Усі сповіщення новинарні в одному місці."""
+        st, al = self.store, self.al_cfg()
+        hm = st.get("obs_time") or "07:30"
+        text = ("🔔 <b>Сповіщення новинарні</b>\n\n"
+                "• <b>Нові автоматичні чернетки</b> — повідомлення, коли бот сам підготував чернетку з джерел.\n"
+                "• <b>Термінові</b> — одразу, коли в джерелах щось важливе (тихі години й ліміт на день — усередині).\n"
+                "• <b>Звіт тижня</b> — щопонеділка: що зайшло і найкращі години.\n"
+                f"• <b>Теми дня</b> (дати й події) — щоранку о {esc(hm)}, налаштування — у «🗓 Дати».")
+        rows = [[(("🔔 Чернетки: так" if st.get("notify") else "🔕 Чернетки: ні"), self.cb("H6t", "notify"))],
+                [("⚡ Термінові" + (" ✅" if al.get("on") else " · вимк."), self.cb("al"))],
+                [("📬 Звіт щопонеділка: " + ("так" if st.get("ws_auto") is not False else "ні"), self.cb("H6t", "ws"))],
+                [("« Налаштування новинарні", self.cb("H2"))]]
+        return text, rows
+
+    def hub_H7(self, chat):
+        st = self.store
+        text = ("🧩 <b>Робота з новинами</b>\n\n"
+                "• <b>Кнопки під новиною</b> — які дії показувати під кожною чернеткою і в якому порядку.\n"
+                "• <b>Переслане → новинарня</b> — будь-який пересланий у бот допис одразу стає чернеткою (без питання).")
+        rows = [[("🧩 Кнопки під новиною", self.cb("acs"))],
+                [(("↪️ Переслане → новинарня: так" if st.get("forward_auto") else "↪️ Переслане → новинарня: ні"), self.cb("Hfwd"))],
+                [("« Налаштування новинарні", self.cb("H2"))]]
         return text, rows
 
     def hub_H3(self, chat):
@@ -961,7 +987,7 @@ class Plugin(ExtrasUI, ToolsUI, WeekStatsUI, AlertsUI, OursWroteUI, StyleUI, Car
                 f"📄 Велика стаття одразу у Word українською й російською: {'так' if st.get('word_bilingual') else 'ні'}")
         rows = [[("📏 Довжина за замовчуванням", self.cb("setlen")), ("📜 Правила", self.cb("rules"))],
                 [("📐 Шаблони", self.cb("Wt")), ("🗂 Теми пошуку", self.cb("Tp"))],
-                [("🗺 Тематика медіа", self.cb("Dst"))],
+                [("🗺 Тематика медіа", self.cb("Dst")), ("📖 Словник редакції", self.cb("styd"))],
                 [(("📄 Word UA+RU: так" if st.get("word_bilingual") else "📄 Word UA+RU: ні"), self.cb("Dwb"))],
                 [("« Налаштування новинарні", self.cb("H2"))]]
         return text, rows
@@ -1144,8 +1170,8 @@ class Plugin(ExtrasUI, ToolsUI, WeekStatsUI, AlertsUI, OursWroteUI, StyleUI, Car
             [("📤 Підключити канал", self.cb("pubch"))] + ([("✖️ Відключити", self.cb("pubchx"))] if st.get("publish_chat") else []),
             [(("🚀 Одразу: так" if st.get("publish_on_approve") else "🚀 Одразу: ні"), self.cb("tg", "publish_on_approve")),
              (("🔗 Джерела: так" if st.get("show_sources") else "🔗 Джерела: ні"), self.cb("tg", "show_sources"))],
-            [("✒️ Підпис", self.cb("sig")), ("⚙️ Версії для мереж", self.cb("xps"))],
-            [("⚙️ Вигляд карток", self.cb("cds")), ("📖 Словник редакції", self.cb("styd"))],
+            [("✒️ Підпис", self.cb("sig")), ("🕘 Години черги", self.cb("pqh"))],
+            [("⚙️ Версії для мереж", self.cb("xps")), ("⚙️ Вигляд карток", self.cb("cds"))],
             [("« Налаштування новинарні", self.cb("H2"))],
         ]
         return text, rows
@@ -1248,11 +1274,17 @@ class Plugin(ExtrasUI, ToolsUI, WeekStatsUI, AlertsUI, OursWroteUI, StyleUI, Car
             if r:
                 self.desk.add_block("source", r["source"])
             return "🚫 Джерело заблоковано", self.echo_screen()
-        if a in ("H1", "H2", "H3", "H4", "H5"):
+        if a in ("H1", "H2", "H3", "H4", "H5", "H6", "H7"):
             return None, getattr(self, "hub_" + a)(chat)
+        if a == "H6t":  # перемикачі сповіщень — лишаємось на цьому ж екрані
+            if x == "notify":
+                st.set("notify", not st.get("notify"))
+            elif x == "ws":
+                st.set("ws_auto", st.get("ws_auto") is False)
+            return None, self.hub_H6(chat)
         if a == "Hfwd":
             st.set("forward_auto", not st.get("forward_auto"))
-            return None, self.hub_H2(chat)
+            return None, self.hub_H7(chat)
         if a == "toai":
             it = st.item(int(x))
             st.set_item(int(x), status="skipped", error="користувач: це не новина")
