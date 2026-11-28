@@ -556,7 +556,9 @@ class Plugin(Base):
         pl = self.pend_list(chat)
         if pl:
             rows.insert(0, [(f"📌 Збережені посилання · {len(pl)}", self.cb("pend"))])
+        view = self.pref(chat, "view", "mosaic")
         rows += [[(f"⭐ Якість за замовчуванням: {self.dq_label(chat)}", self.cb("dq"))],
+                 [("🖼 Кілька файлів: " + ("мозаїка" if view != "carousel" else "гортання ◀️▶️"), self.cb("view"))],
                  [("🗂 Архів скачаного: автори · теми · місця", self.cb("arc"))],
                  [("🍪 Входи на сайти (cookies)", self.cb("ck")), ("🛠 Інструменти", self.cb("tools"))],
                  [("🩺 Перевірити, які сайти працюють", self.cb("chk"))]]
@@ -664,6 +666,11 @@ class Plugin(Base):
         if a == "unarm":
             self.armed.pop(chat, None)
             return "Скасовано", self.home(chat)
+        if a == "view":  # 🖼 мозаїка (альбом, усе видно одразу) ⇄ 🎠 гортання (одне повідомлення з кнопками)
+            new = "carousel" if self.pref(chat, "view", "mosaic") != "carousel" else "mosaic"
+            self.set_pref(chat, "view", new)
+            return ("🖼 Мозаїка: усі файли одним дописом, дії — посиланнями в підписі" if new == "mosaic" else
+                    "🎠 Гортання: одне повідомлення з кнопками, файли ◀️ 1/N ▶️"), self.home(chat)
         if a == "dq":
             return None, self.dq_screen(chat)
         if a == "dqs" and x in dict(self.DQ):
@@ -2575,11 +2582,15 @@ class Plugin(Base):
                 msgs = None
                 size_all = sum(a["out"].stat().st_size for a in album)  # розмір — ДО keep(): він переносить файли
                 car = None
-                try:  # 🎠 одне повідомлення з кнопками, файли гортаються ◀️ 1/N ▶️ (власник обрав замість альбому)
-                    car = await self.send_carousel(chat, album, stage)
-                    msgs = [car] if car else None
-                except Exception:  # noqa: BLE001
-                    log.exception("carousel failed — надсилаю альбомом")
+                try:
+                    if self.pref(chat, "view", "mosaic") == "carousel":  # 🎠 гортання ◀️ 1/N ▶️ — одне повідомлення з кнопками
+                        car = await self.send_carousel(chat, album, stage)
+                        msgs = [car] if car else None
+                    else:  # 🖼 мозаїка: усі файли одним дописом (альбом до 10); дії — посиланнями в підписі
+                        raise LookupError("mosaic")
+                except Exception as exc:  # noqa: BLE001
+                    if not isinstance(exc, LookupError):
+                        log.exception("carousel failed — надсилаю альбомом")
                     try:
                         msgs = await self.send_album(chat, album)
                     except Exception:  # noqa: BLE001 — альбом не пройшов: ті самі файли окремо, щоб нічого не загубити
