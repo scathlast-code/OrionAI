@@ -297,6 +297,29 @@ MIME_BY_EXT = {"ogg": "audio/ogg", "oga": "audio/ogg", "opus": "audio/ogg", "mp3
                "mpeg": "video/mpeg", "3gp": "video/3gpp"}
 
 
+_GEM_MODELS = {"t": 0, "list": []}
+
+
+async def _gemini_flash_models():
+    """Актуальні моделі Gemini «flash», що вміють generateContent (список від Google, кеш на 6 год)."""
+    if _GEM_MODELS["list"] and time.time() - _GEM_MODELS["t"] < 6 * 3600:
+        return _GEM_MODELS["list"]
+    out = []
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.get(f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_KEY}&pageSize=200")
+        for m in (r.json().get("models") or []) if r.status_code == 200 else []:
+            name = str(m.get("name") or "").removeprefix("models/")
+            if "generateContent" in (m.get("supportedGenerationMethods") or []) and "flash" in name \
+                    and not re.search(r"image|tts|live|embed|thinking|exp", name):
+                out.append(name)
+    except Exception:  # noqa: BLE001
+        log.info("gemini: список моделей не отримано", exc_info=True)
+    out.sort(key=lambda n: ("latest" not in n, "lite" in n, n), reverse=False)
+    _GEM_MODELS.update(t=time.time(), list=out[:8])
+    return _GEM_MODELS["list"]
+
+
 async def stt_gemini(data, filename, language=None):
     """Розшифровка через Gemini: приймає і голосові, і відео (до ~20 МБ), будь-якою мовою — дослівно, без перекладу."""
     import base64 as _b64
@@ -309,14 +332,23 @@ async def stt_gemini(data, filename, language=None):
                  "Якщо це відео без мовлення — коротко опиши українською, що на ньому видно. Лише текст, без пояснень."},
         {"inline_data": {"mime_type": mime, "data": _b64.b64encode(data).decode()}}]}]}
     r = None
-    # обрана модель (GEMINI_STT_MODEL / GEMINI_MODEL) може не приймати звук — тоді пробуємо стабільні моделі зі слухом
-    for model in dict.fromkeys([GEMINI_STT_MODEL, "gemini-flash-latest", "gemini-2.5-flash", "gemini-2.0-flash"]):
+    # обрана модель може бути перевантажена (503) чи не приймати звук; назви моделей змінюються — беремо живий список від Google
+    models = [GEMINI_STT_MODEL, "gemini-flash-latest", "gemini-flash-lite-latest"] + await _gemini_flash_models()
+    tried = 0
+    for model in dict.fromkeys(models):
+        if tried >= 5:
+            break
+        tried += 1
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_KEY}"
-        async with httpx.AsyncClient(timeout=120) as c:
-            r = await c.post(url, json=body)
+        for attempt in range(2):  # 503 «перевантажено» — ще раз за 3 с
+            async with httpx.AsyncClient(timeout=120) as c:
+                r = await c.post(url, json=body)
+            if r.status_code != 503:
+                break
+            await asyncio.sleep(3)
         if r.status_code == 200:
             break
-        log.warning("gemini_stt %s: HTTP %s %s", model, r.status_code, r.text[:300].replace(GEMINI_KEY or "§", "…"))
+        log.warning("gemini_stt %s: HTTP %s %s", model, r.status_code, r.text[:200].replace(GEMINI_KEY or "§", "…"))
         if r.status_code in (401, 403):  # ключ не підходить — інші моделі не допоможуть
             break
     if r.status_code != 200:

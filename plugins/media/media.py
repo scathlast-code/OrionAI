@@ -1777,12 +1777,14 @@ async def separate(path, work, progress=None):
     import importlib
     import sys
     try:
-        importlib.import_module("demucs")
+        for mod in ("demucs", "numpy", "torchaudio", "soundfile"):  # numpy й soundfile pip не ставив разом із torch — Demucs падав
+            importlib.import_module(mod)
     except ImportError:
         if progress:
             await progress("📦 Перший запуск: встановлюю розділювач звуку Demucs (≈3–5 хв)…")
         await run(sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check",
-                  "--extra-index-url", "https://download.pytorch.org/whl/cpu", "torch", "torchaudio", "demucs", timeout=1500)
+                  "--extra-index-url", "https://download.pytorch.org/whl/cpu", "torch", "torchaudio", "demucs", "numpy", "soundfile",
+                  timeout=1500)
         importlib.invalidate_caches()
     wav = work / "sep-in.wav"
     await run(*FF, "-i", path, "-vn", "-ac", "2", "-ar", "44100", wav, timeout=600)
