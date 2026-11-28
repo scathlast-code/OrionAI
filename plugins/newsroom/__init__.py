@@ -35,6 +35,7 @@ from .actions import ActionsUI
 from .digestmode import DigestMode
 from .observances import ObservancesUI
 from .report import ReportUI
+from .crosspost import CrosspostUI
 from .echo import KINDS as ECHO_KINDS, Echo
 from .collectors import MTProto, WebCollector
 
@@ -114,7 +115,7 @@ def src_links(sources, sep=" · "):
     return sep.join(f'<a href="{esc(s)}">{esc(_dom(s))}</a>' if str(s).startswith("http") else esc(s) for s in sources)
 
 
-class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Base):
+class Plugin(CrosspostUI, ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Base):
     id = "news"
     icon = "✍️"
     title = "Публікації"
@@ -124,7 +125,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
                "переписує за правилами редакції на моделях Оріона, тримає точну довжину, готує зведення за добу й "
                "публікує в канал лише після вашого схвалення.\n\n"
                "Автоматичний рерайт — не фактчек: перед публікацією звіряйте цифри й імена (кнопка «🔎 Звірити» допомагає, але не замінює редактора).")
-    VIEWS = {"ls", "d", "src", "dg", "so", "set", "q", "help", "ver", "len", "rules",
+    VIEWS = {"xp", "xps", "ls", "d", "src", "dg", "so", "set", "q", "help", "ver", "len", "rules",
              "L", "Lo", "Ls", "Lsort", "Lbulk", "Le", "Lacc", "Lhelp", "Elst", "Lmerge",
              "H1", "H2", "H3", "H4", "H5", "D", "Dm", "Fl", "Fo", "Ff", "Fi", "Fmv", "Fbl", "Tg", "Tgi", "Tp", "Bk", "Bkl",
              "Sp", "Ou", "Ours", "Sl", "St", "Wt", "more", "acs", "ace", "sch", "fld", "flds", "echo", "eci", "cls", "ctp", "cte", "cmk", "csl", "obh", "obt", "obc", "obd", "ob", "obi", "obl", "obs", "obup", "obws", "obdy", "obcp", "obcm"}
@@ -1020,6 +1021,8 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
         if d["status"] in ("draft", "length_mismatch"):
             rows.append([("✅ Схвалити", self.cb("ok", i)), ("🔁 Переписати", self.cb("rw", i)), ("✍️ Правка", self.cb("ed", i))])
         rows += self.action_rows(i)          # 🧩 ваші програмовані кнопки
+        xp = self.xp_get(i)
+        rows.append([("📲 Під мережі" + (f" · {sum(1 for k in xp if not k.startswith('_'))}" if xp else ""), self.cb("xp", i))])
         rows.append([("🌐 Переклад", self.cb("tr", i)), ("⋯ Ще", self.cb("more", i)), ("« Чернетки", self.cb("ls", "new"))])
         return text, rows
 
@@ -1117,7 +1120,7 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
             [("📤 Підключити канал", self.cb("pubch"))] + ([("✖️ Відключити", self.cb("pubchx"))] if st.get("publish_chat") else []),
             [(("🚀 Одразу: так" if st.get("publish_on_approve") else "🚀 Одразу: ні"), self.cb("tg", "publish_on_approve")),
              (("🔗 Джерела: так" if st.get("show_sources") else "🔗 Джерела: ні"), self.cb("tg", "show_sources"))],
-            [("✒️ Підпис", self.cb("sig"))],
+            [("✒️ Підпис", self.cb("sig")), ("📲 Під мережі", self.cb("xps"))],
             [("« Налаштування новинарні", self.cb("H2"))],
         ]
         return text, rows
@@ -1183,6 +1186,8 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
             return await self.actions_route(chat, a, x, y)
         if a in ("rp", "rpsel", "rpt", "rpin", "rpshow", "rpau", "rpun", "rpa", "rgo"):
             return await self.report_route(chat, a, x, y)
+        if a in ("xp", "xpg", "xps", "xpt", "xpc", "xpr"):
+            return await self.xp_route(chat, a, x, y)
         if a in ("SN", "SNk", "SNadd"):
             return self.social_route(chat, a, x)
         if a == "echo":
@@ -1399,6 +1404,8 @@ class Plugin(ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Ba
         st = self.store
         if key[:1] in ("L", "E"):
             return await self.lists_text(chat, key, data, text)
+        if key == "xpr":
+            return await self.xp_text(chat, key, data, text)
         if key == "ecb":
             st.set("brands", text.strip()[:500])
             return "Збережено", self.echo_screen()
