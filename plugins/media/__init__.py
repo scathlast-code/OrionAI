@@ -212,8 +212,9 @@ class Plugin(Base):
            ("see", "👁 ШІ дивиться на фото й кадри відео всього допису"),
            ("hear", "👂 ШІ слухає, що говорять у відео (початок, для змісту)"),
            ("about", "🧠 Рядок «що це» в підписі (зміст, місце, мета допису)"),
-           ("risk", "⚠️ Попереджати: російська мова, матюки, музика (авторські права)"),
+           ("risk", "⚠️ Попереджати: російська мова, матюки, музика (авторські права), створене ШІ"),
            ("risk_up", "⚠️ Перевіряти так само й файли, які я надсилаю в бот"),
+           ("shz", "🎧 Сайт не вказав музику — шукати її в самому звуці (Shazam, і змішану з голосом)"),
            ("geo_author", "🧭 Немає місця в дописі — брати з інших дописів автора чи його сторінки"))
 
     def rel_on(self, chat, k):
@@ -382,6 +383,12 @@ class Plugin(Base):
             risks.add("ru")
         if re.search(r"(?i)\[(?:music|музика|музыка)\]|♪", said):
             risks.add("music")
+        if R.ai_marks_in_file(path):
+            risks.add("ai")
+        if Path(path).suffix.lower() in self.VIDEO_EXT + self.AUD_EXT and self.rel_on(chat, "shz") and await self._has_audio(path):
+            got = await self._shazam(path)  # 🎧 відома пісня у звуці файлу
+            if got:
+                risks.add("music")
         if self.rel_on(chat, "ai") and (img or notes or len((caption or "").strip()) >= 2):
             for pic in ((img, None) if img else (None,)):
                 try:
@@ -405,7 +412,7 @@ class Plugin(Base):
         if not msg or not self.rel_on(msg.chat_id, "risk") or not self.rel_on(msg.chat_id, "risk_up"):
             return
         file, default = message_attachment(msg)
-        if not file:
+        if not file or msg.forward_origin:  # лише власні файли людини; репости не перевіряємо
             return
         mime = getattr(file, "mime_type", "") or ""
         if msg.document and not mime.startswith(("image/", "video/", "audio/")):
@@ -529,6 +536,9 @@ class Plugin(Base):
                 risks.add("swear")
             if R.guess_lang(seen_t) == "ru":
                 risks.add("ru")
+        med_ = (ctx or {}).get("media") or media
+        if (med_ and R.ai_marks_in_file(med_)) or R.ai_marks_in_info((ctx or {}).get("info") or {}):
+            risks.add("ai")  # позначка ШІ у файлі (C2PA) чи в даних сайту — надійніше за здогад
         self.__dict__.setdefault("_said", {})[chat] = said.split(": ", 1)[-1] if said else ""
         self.__dict__.setdefault("_risk", {})[chat] = risks if self.rel_on(chat, "risk") else set()
         topics, geos = R.merge(a_t, d_t), R.merge(a_g, d_g)
@@ -2488,7 +2498,7 @@ class Plugin(Base):
         elif song:
             lines.append(f"🎙 Звук: оригінальний звук автора ({esc(song[1][:80])})")
         elif vids:
-            lines.append("🎵 Яку музику накладено, сайт не вказав — «🔎 Розпізнати» дізнається за звуком.")
+            lines.append("🎵 Сайт не вказав музику — бот сам пошукає її у звуці під час завантаження (або «🔎 Розпізнати» зараз).")
         elif imgs and sound_url_pre:
             lines.append("🎵 До фото прикріплено звук — «🎵 Звук до фото окремо» скачає його окремим файлом.")
         elif imgs:
@@ -2995,10 +3005,21 @@ class Plugin(Base):
                             if u2 and str(u2).startswith("http"):
                                 others.append(str(u2))
                         s2 = self.song_of(job)
+                        detected = None
+                        if not s2 and media0 and Path(media0).suffix.lower() in self.VIDEO_EXT + self.AUD_EXT \
+                                and self.rel_on(chat, "shz") and await self._has_audio(media0):
+                            detected = await self._shazam(media0)  # 🎧 сайт не вказав — шукаємо музику в самому звуці (і змішану з голосом)
+                            if detected:
+                                job.__dict__.update(song=(detected[0], detected[1], True),
+                                                    song_info={"artist": detected[0], "title": detected[1], "url": "", "original": False,
+                                                               "detected": True})
+                                s2 = self.song_of(job)
+                                log.info("related: музика у звуці: %s — %s", detected[0][:40], detected[1][:60])
                         files = ", ".join(sorted({(Path(M.urlsplit(str(i.url)).path).suffix or "?").lstrip(".") for i in job.items}))[:80]
                         rel = await self.detect(chat, desc or "", geotag, who, link, self.instr.get(chat), media=media0,
                                                 ctx={"others": others[:3], "song": (self.song_name(s2) + ("" if s2[2] else " (оригінальний звук автора)")) if s2 else "",
                                                      "song_overlay": bool(s2 and s2[2]),
+                                                     "info": info or item.info or {},
                                                      "music_on_post": bool((info or {}).get("music_on_post") or (item.info or {}).get("music_on_post")), "files": files, "site": site})
                         guess = self.__dict__.get("_geo_guess", {}).pop(chat, None)
                         rc[rkey] = (time.time(), rel, guess, self.__dict__.get("_about", {}).pop(chat, ""),
@@ -3037,6 +3058,10 @@ class Plugin(Base):
                         gname = ", ".join(self.hist.name("g", k) for k in guess[0])[:60]
                         gl = f"\n📍 Імовірна локація: {esc(gname)} ({guess[1]})"
                         rel_line, rel_len = gl + rel_line, rel_len + len(gl)
+                    song = job.__dict__.get("song")  # могли щойно розпізнати у звуці
+                    if song and song[2] and not song_html:
+                        heard_mark = " (розпізнано у звуці)" if (job.__dict__.get("song_info") or {}).get("detected") else ""
+                        song_html = f"\n🎵 {esc(self.song_name(song))}{heard_mark}"
                     if risks:  # ⚠️ небезпека для публікації — першим рядком серед тегів
                         rl = "\n" + esc(R.risks_line(risks, rsong[:60]))
                         rel_line, rel_len = rl + rel_line, rel_len + len(rl)

@@ -20,3 +20,4 @@ yt-dlp[default]          # 📥 Медіа: завантаження з YouTube,
 bgutil-ytdlp-pot-provider==2.0.2   # 📥 YouTube: плагін yt-dlp для токенів PO Token (скрипт — у Dockerfile)
 gallery-dl               # 📥 Медіа: альбоми й каруселі
 lxml>=5,<7               # 📥 Медіа: розбір сторінок і очищення HTML
+shazamio>=0.9  # 🎧 розпізнавання музики у звуці відео (і змішаної з голосом)

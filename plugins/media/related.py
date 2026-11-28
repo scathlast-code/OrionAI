@@ -218,7 +218,10 @@ AI_SYSTEM = ("Ти розумієш, що саме людина скачує з 
              "немає — порожньо. Враховуй його для тем, місця й небезпек. "
              'risks — список небезпек для публікації: "ru" — у тексті, написах на кадрах чи мові у відео є російська мова; '
              '"swear" — нецензурна лексика (матюки) в тексті, написах чи мові; "music" — у відео звучить музика чи пісня '
-             "(накладена або фонова; може бути захищена авторським правом). Немає — []. "
+             "(накладена або фонова; може бути захищена авторським правом); "
+             '"ai" — є явні ознаки, що зображення, відео, текст, музика чи голос створені штучним інтелектом '
+             "(неприродні руки й обличчя, «пливкі» написи, типова ШІ-картинка, позначка AI/ШІ, шаблонний ШІ-текст); тоді ще "
+             '"ai_kinds": ["image","video","text","music","voice"] — що саме. Лише за явними ознаками, не за підозрою. Немає — []. '
              "name — українською, називний відмінок, коротко (1–3 слова), тема з малої літери, місце з великої. "
              "phrase — продовження слів «попереднє …» з правильним прийменником і відмінком (з Волині, зі снігопадом, про вибори, із Закарпаття). "
              "Теми: 1–3 головні, що видно в дописі (погода, явище, подія, тварини, люди, справа, настрій тощо). "
@@ -237,7 +240,42 @@ SWEAR_RE = re.compile(r"(?i)(?<![а-яіїєґa-z])(?:х[уy][йяюеєїі]\w*
                       r"[єеїё]б[ау](?:ть|н|л|ш|т)\w*|(?:за|ви|від|до|на|по|роз|у|з)[єеїё]б\w*|муд[ао]к\w*|муд[іи]л\w*|"
                       r"підар\w*|пидор\w*|педик\w*|залуп\w*|г[ао]ндон\w*|сук[аио](?![а-яіїєґ])|сучк\w*|"
                       r"fuck\w*|shit\w*|bitch\w*|motherf\w*|cunt\w*)")
-RISK_LABEL = {"ru": "російська мова", "swear": "нецензурна лексика", "music": "музика — можливі авторські права"}
+RISK_LABEL = {"ru": "російська мова", "swear": "нецензурна лексика", "music": "музика — можливі авторські права",
+              "ai": "ймовірно створено ШІ"}
+AI_KINDS = {"image": "зображення", "video": "відео", "text": "текст", "music": "музика", "voice": "голос"}
+AI_MARK_RE = re.compile(rb"c2pa|trainedAlgorithmicMedia|compositeWithTrainedAlgorithmicMedia|Made with AI|AI[- ]generated|"
+                        rb"DALL[\xb7\-. ]?E|Midjourney|Stable Diffusion|Firefly|Sora|Runway|Suno|Udio|ElevenLabs", re.I)
+
+
+def ai_marks_in_file(path):
+    """Позначки ШІ в самому файлі (C2PA, IPTC «trainedAlgorithmicMedia», назви генераторів у метаданих) -> True/False."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(1_500_000)
+            try:
+                f.seek(-500_000, 2)
+                tail = f.read()
+            except OSError:
+                tail = b""
+        return bool(AI_MARK_RE.search(head) or AI_MARK_RE.search(tail))
+    except OSError:
+        return False
+
+
+def ai_marks_in_info(info, _d=0):
+    """Позначки «створено ШІ» в даних сайту (Instagram/TikTok/Facebook/YouTube ставлять їх у різних полях)."""
+    if _d > 5:
+        return False
+    if isinstance(info, dict):
+        for k, v in info.items():
+            kl = str(k).lower()
+            if re.search(r"aigc|ai_generated|gen_ai|genai|ai_label|is_ai|ai_info|synthetic|altered_or_synthetic", kl) and v not in (None, False, 0, "", [], {}):
+                return True
+            if isinstance(v, (dict, list)) and ai_marks_in_info(v, _d + 1):
+                return True
+    elif isinstance(info, list):
+        return any(ai_marks_in_info(x, _d + 1) for x in info[:50])
+    return False
 
 
 def swear_hits(text):
@@ -254,14 +292,23 @@ def parse_risks(answer):
         v = json.loads(m.group(0)).get("risks") or []
     except ValueError:
         return set()
-    return {str(x).strip().lower() for x in v if str(x).strip().lower() in RISK_LABEL} if isinstance(v, list) else set()
+    out = {str(x).strip().lower() for x in v if str(x).strip().lower() in RISK_LABEL} if isinstance(v, list) else set()
+    if "ai" in out:
+        try:
+            kinds = json.loads(m.group(0)).get("ai_kinds") or []
+        except ValueError:
+            kinds = []
+        out |= {"ai:" + str(k).lower() for k in kinds if str(k).lower() in AI_KINDS}
+    return out
 
 
 def risks_line(risks, song=""):
     """⚠️ рядок для підпису: що небезпечного знайшов бот."""
     if not risks:
         return ""
-    parts = [RISK_LABEL[k] + (f" ({song})" if k == "music" and song else "") for k in ("ru", "swear", "music") if k in risks]
+    kinds = [AI_KINDS[k[3:]] for k in sorted(risks) if k.startswith("ai:") and k[3:] in AI_KINDS]
+    parts = [RISK_LABEL[k] + (f" ({song})" if k == "music" and song else "") + (f" ({', '.join(kinds)})" if k == "ai" and kinds else "")
+             for k in ("ru", "swear", "music", "ai") if k in risks]
     return "⚠️ Увага: " + " · ".join(parts)
 
 

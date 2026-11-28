@@ -1646,7 +1646,8 @@ _TITLE_KEYS = ("title", "song_name", "track", "name", "audio_title", "music_titl
 _ARTIST_KEYS = ("display_artist", "artist", "authorName", "author_name", "author", "artist_name", "ig_artist", "owner")
 _URL_KEYS = ("playUrl", "play_url", "progressive_download_url", "download_url", "audio_url", "url", "fast_start_progressive_download_url")
 _MUSIC_KEYS = ("music_asset_info", "music_info", "music_metadata", "original_sound_info", "music", "sound", "audio", "song",
-               "clips_metadata", "audio_info")
+               "clips_metadata", "audio_info", "music_attribution_info", "music_sticker", "story_music_stickers",
+               "audio_attribution_info", "attributed_music", "music_consumption_info", "song_info")
 
 
 def _s(v):
