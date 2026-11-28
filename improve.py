@@ -83,7 +83,14 @@ def add(user, where_, screen="", target="", action="", excerpt="", note="", bot=
     with closing(db()) as con, con:
         cur = con.execute("INSERT INTO marks(at,user,bot,where_,screen,target,action,excerpt,note) VALUES(?,?,?,?,?,?,?,?,?)",
                           (time.time(), int(user or 0), bot[:20], where_[:20], screen[:200], target[:200], action[:120], excerpt[:600], note[:2000]))
-        return cur.lastrowid
+        mid = cur.lastrowid
+    if where_ != "chat":  # з Mini App та кнопок «💡» — теж у журнал помилок (з чату пише bug_mark)
+        try:
+            import errlog
+            errlog.add("людина", f"{action or 'позначка'}: {note or excerpt}"[:600], where=f"позначка #{mid}", screen=screen[:120])
+        except Exception:  # noqa: BLE001
+            pass
+    return mid
 
 
 def set_note(mid, note):

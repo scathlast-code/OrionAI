@@ -49,6 +49,19 @@ class Big:
             self._client = c
             return c
 
+    async def resolve(self, username: str):
+        """@нікнейм -> (ID, ім'я) через Telegram (бот може знайти будь-кого з публічним нікнеймом) або None."""
+        try:
+            from telethon.tl.functions.contacts import ResolveUsernameRequest
+            c = await self.client()
+            r = await c(ResolveUsernameRequest(username.lstrip("@")))
+            u = next((x for x in r.users if getattr(x, "id", None)), None)
+            if not u or getattr(u, "bot", False):
+                return None
+            return u.id, " ".join(filter(None, [getattr(u, "first_name", ""), getattr(u, "last_name", "")])) or username
+        except Exception:  # noqa: BLE001 — немає такого нікнейму чи MTProto недоступний
+            return None
+
     async def send(self, chat: int, path: Path, caption: str = "", progress=None, video=None, html=False, thumb=None):
         """Надсилає файл (до 2 ГБ): документом або, якщо video (dict з width/height/duration), — відео з плеєром.
         progress(done, total) — для показу відсотків."""

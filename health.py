@@ -81,6 +81,11 @@ def fail(kind, detail=""):
     """Збій сервісу. 3 поспіль (або вичерпаний ліміт) — попередження власнику."""
     _fails[kind] = _fails.get(kind, 0) + 1
     _last[kind] = str(detail)[:300]
+    try:  # 🧯 кожен збій — і в журнал помилок
+        import errlog
+        errlog.add("сторож", f"{SERVICES.get(kind, (kind,))[0]}: {str(detail)[:300]}", where=kind)
+    except Exception:  # noqa: BLE001
+        pass
     name, needs, fix = SERVICES.get(kind, (kind, "", ""))
     quota = bool(QUOTA_RE.search(str(detail)))
     key = f"{kind}:{'quota' if quota else 'fail'}"

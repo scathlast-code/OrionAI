@@ -316,6 +316,11 @@ def refresh_providers():
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+try:  # 🧯 журнал помилок: помилки коду, збої сервісів і «баг …» від людини — для ШІ, що виправляє
+    import errlog as _errlog
+    _errlog.install()
+except Exception:  # noqa: BLE001
+    pass
 log = logging.getLogger("bot")
 
 
@@ -2032,7 +2037,17 @@ async def _ask_llm(history, user_content, preferred=None, fallback=True, exclude
                   "Оформлюй відповідь охайно й наочно (Markdown): на початку короткий рядок-заголовок з доречним емодзі, "
                   "ключові цифри й назви **жирним**, переліки — списками з емодзі чи «•», дані по днях/пунктах — окремими рядками, "
                   "джерело — гіперпосиланням [назва](url) одразу після речення з фактом (не окремим списком наприкінці); новин, цитат, дат і цифр не вигадуй. Коротке привітання чи проста відповідь — без зайвого оформлення.")
-    messages = [{"role": "system", "content": SYSTEM_PROMPT + today_line + ("\n" + hint if hint else "") + ("\n\n" + extra if extra else "")}] + history + [{"role": "user", "content": user_content}]
+    errs = ""
+    if isinstance(user_content, str) and re.search(r"(?i)помилк|баг|не працю|зламал|збій|збо[їя]|глюч|виправ|чому не|error|bug", user_content):
+        try:  # 🧯 питають про проблеми бота — ШІ бачить журнал помилок і знає, де шукати
+            import errlog as _el
+            sm = _el.summary_for_ai()
+            if sm:
+                errs = ("\n\n🧯 Журнал помилок бота за 3 доби (людина — повідомив власник; сторож — збої сервісів; журнал — помилки коду). "
+                        "Якщо питання про роботу бота — спирайся на нього, називай конкретну причину й що зробити; не вигадуй:\n" + sm)
+        except Exception:  # noqa: BLE001
+            pass
+    messages = [{"role": "system", "content": SYSTEM_PROMPT + today_line + ("\n" + hint if hint else "") + ("\n\n" + extra if extra else "") + errs}] + history + [{"role": "user", "content": user_content}]
     # Search happens in the bot, not in the language model. Works even for models
     # that reject OpenAI tool-calling (e.g. some OpenRouter free models).
     own = USER_WORDS.get()  # шукаємо в інтернеті лише за словами людини, а не за описом розділу чи цитатою (інакше шукав зайве)
@@ -2307,6 +2322,11 @@ def remember_name(user):
         kv_set("names", json.dumps(d))
     except Exception:  # noqa: BLE001
         pass
+    try:  # учасник змінив чи прибрав нікнейм — оновлюємо запис; доступ тримається за ID, тож не губиться
+        with closing(db()) as con, con:
+            con.execute("UPDATE members SET name=?, username=? WHERE user_id=?", (cur[0], cur[1], user.id))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def known_name(uid):
@@ -2422,12 +2442,46 @@ async def access_request(bot, user, via=""):
 async def _grant_access(raw):
     """Дати доступ до бота й застосунку за @ім'ям або ID (з інших розділів, напр. 👥 Люди редакції). -> текст результату."""
     raw = str(raw).strip()
-    if raw.isdigit() and member_status(int(raw)) == "approved":
-        return "уже має доступ"
-    key = preinvite_add(raw)
-    if tg_app and await push_invite(tg_app.bot, key):
-        return "доступ відкрито — людина вже отримала привітання"
-    return "дозвіл додано — доступ відкриється, щойно людина натисне «Старт» у боті або відкриє застосунок"
+    uid, nick = (int(raw), "") if raw.isdigit() else (None, raw if raw.startswith("@") else "@" + raw)
+    if nick:  # 🔗 нікнейм → ID: з учасників, з тих, хто писав боту, або через Telegram — доступ тримається за ID
+        uid = uid_by_username(nick)
+        if not uid:
+            big = getattr(PLUGINS.get("med"), "big", None)
+            if big and big.ready():
+                got = await big.resolve(nick)
+                uid = got[0] if got else None
+    else:
+        known = (json.loads(kv_get("names") or "{}").get(str(uid)) or ["", ""])
+        nick = ("@" + known[1]) if known[1] else ""
+    who = " · ".join(filter(None, [nick, f"ID {uid}" if uid else ""]))
+    if uid and member_status(uid) == "approved":
+        return f"уже має доступ ({who})"
+    keys = [preinvite_add(str(uid))] if uid else []
+    if nick:
+        keys.append(preinvite_add(nick))  # і за ID, і за нікнеймом: змінить чи прибере нікнейм — доступ не загубиться
+    for key in keys:
+        if tg_app and await push_invite(tg_app.bot, key):
+            return f"доступ відкрито — людина вже отримала привітання ({who})"
+    return (f"дозвіл додано ({who}) — доступ відкриється, щойно людина натисне «Старт» у боті або відкриє застосунок"
+            + ("" if uid else ". ID поки невідомий — бот запам'ятає його при першому зверненні, далі нікнейм уже не потрібен"))
+
+
+def uid_by_username(nick):
+    """ID за @нікнеймом: серед учасників бота або тих, хто йому писав."""
+    n = nick.lstrip("@").lower()
+    if not n:
+        return None
+    with closing(db()) as con:
+        r = con.execute("SELECT user_id FROM members WHERE lower(username)=?", (n,)).fetchone()
+    if r:
+        return r["user_id"]
+    try:
+        for k, v in json.loads(kv_get("names") or "{}").items():
+            if (v[1] or "").lower() == n and k.isdigit():
+                return int(k)
+    except Exception:  # noqa: BLE001
+        pass
+    return None
 
 
 def request_link_code(new=False):
@@ -4418,7 +4472,8 @@ def scr_access():
     for m in pending:
         who = (m["name"] or f"ID {m['user_id']}") + (f" @{m['username']}" if m["username"] else "")
         rows.append([(f"✅ {who}", f"m:accok:{m['user_id']}"), ("❌", f"m:accno:{m['user_id']}")])
-    rows += [[(f"👤 {m['name'] or 'ID ' + str(m['user_id'])}", f"m:mem:{m['user_id']}")] for m in approved]
+    rows += [[(f"👤 {m['name'] or 'ID ' + str(m['user_id'])}" + (f" · @{m['username']}" if m["username"] else " · без нікнейму")
+               + f" · {m['user_id']}", f"m:mem:{m['user_id']}")] for m in approved]  # і нікнейм, і ID — доступ тримається за ID
     rows += [[(f"🚫 Скасувати запрошення …{inv['code'][-4:]}", f"m:invx:{inv['code']}")] for inv in invites]
     full = members_full()
     lines.append("\n" + ("🔓 Учасники мають усі права, як власник: налаштування, новинарня, плагіни, схвалення інших."
@@ -5984,6 +6039,28 @@ def storage_warning():
     return (f"⚠️ Дані бота лежать у {folder}, але там не підключено Railway Volume — після кожного оновлення чи перезапуску "
             "розмови, налаштування й доступи зникнуть. Railway → сервіс → Settings/⋯ → Attach Volume → Mount path "
             f"<code>{folder}</code>. Докладно: docs/20-railway.md")
+
+
+def scr_errlog(chat_id, src=""):
+    """🧯 Журнал помилок: останні збої з джерелом (людина / сторож / журнал), скільки разів і де."""
+    import errlog as _el
+    rows = _el.recent(25, source=src or None)
+    tabs = [("● " if (src or "") == k else "") + t for k, t in (("", "Усі"), ("людина", "🙋 Мої"), ("сторож", "🩺 Сервіси"), ("журнал", "🐛 Код"))]
+    keys = ["", "людина", "сторож", "журнал"]
+    lines = ["🧯 <b>Журнал помилок</b>", "",
+             "Усе, що зламалось: 🙋 що ви написали боту («баг …», скриншот із підписом), 🩺 збої сервісів, 🐛 помилки коду. "
+             "Коли питаєте ШІ бота про помилки, він бачить цей журнал; файл можна надіслати будь-якому ШІ.", ""]
+    if not rows:
+        lines.append("Записів немає — усе працює.")
+    icon = {"людина": "🙋", "сторож": "🩺", "журнал": "🐛"}
+    for r in rows:
+        first = r["text"].splitlines()[0][:150]
+        lines.append(f"{icon.get(r['source'], '•')} {_el.fmt_time(r['last'])}" + (f" ×{r['n']}" if r.get("n", 1) > 1 else "")
+                     + (f" · {esc(r['where'][:30])}" if r.get("where") else "") + f"\n   {esc(first)}")
+    rows_kb = [[(t, f"m:errlog:{k}" if k else "m:errlog") for t, k in zip(tabs, keys)],
+               [("📄 Файл для ШІ", "m:errlog:f")] + ([("🧹 Очистити", "m:errlog:x")] if is_admin_id(chat_id) else []),
+               [("⬅️", "m:hub:diag"), HOME]]
+    return "\n".join(lines)[:4000], rows_kb
 
 
 def diag_collect(chat_id):
@@ -8454,7 +8531,7 @@ async def finish_wizard(update, ctx, chat_id):
 
 
 EDITOR_ACTIONS = {"btn", "bi", "bmv", "bup", "bdn", "bset", "lren", "lunren", "bgnew", "bgdel", "brl", "brldel", "breset"}
-VIEW_ACTIONS = {"devbk", "appm", "sbx", "imp", "home", "dl", "d", "f", "tl", "t", "md", "lim", "st", "nt", "cr", "canva", "pins", "box", "it", "acc",
+VIEW_ACTIONS = {"errlog", "devbk", "appm", "sbx", "imp", "home", "dl", "d", "f", "tl", "t", "md", "lim", "st", "nt", "cr", "canva", "pins", "box", "it", "acc",
                 "mem", "mdl", "mdv", "btn", "bi", "brl", "voice", "cpl", "cp", "bk", "fr", "svc", "sv", "svls", "diag", "jl", "j", "bks", "bkt", "bkls", "bkrs", "bkfmt", "bkscope", "lib", "mi", "note", "bl", "pr", "pri", "backup", "qask", "rm", "rw", "cl", "why", "mdtest", "hub", "today", "prem", "ava", "minfo", "xs", "ag", "clfree"}
 
 
@@ -8525,6 +8602,7 @@ HUBS = {
     ]),
     "diag": ("🖥 Сервер", "Стан бота, режим роботи сервера, модулі, журнал і корисні посилання.", [
         ("🩺 Стан", "m:diag", 6, "open"),
+        ("🧯 Журнал помилок", "m:errlog", 3, "open"),
         ("🔌 Модулі (плагіни)", "m:pl", 3, "open"),
         ("⚡ Режим роботи", "m:rm", 2, "all"),
         ("📒 Журнал запитів", "m:jl", 1, "open"),
@@ -10070,6 +10148,18 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         toast = await cluster_route(NODE, a, arg)
         await worker_pass(force_cluster=True)
         screen = scr_cluster(chat_id)
+    elif a == "errlog":  # 🧯 журнал помилок
+        import errlog as _el
+        if arg == "x" and is_admin_id(chat_id):
+            _el.clear()
+            toast = "Журнал очищено"
+        elif arg == "f":
+            if q:
+                await q.answer()
+            await update.effective_chat.send_document(InputFile(io.BytesIO(_el.export_md()), filename="orion-errlog.md"),
+                                                      caption="🧯 Журнал помилок за 14 днів — можна надіслати будь-якому ШІ, щоб знайшов і виправив")
+            return
+        screen = scr_errlog(chat_id, arg or "")
     elif a == "diag":
         screen = scr_diag(chat_id, arg or "sum")
     elif a == "fr":
@@ -11779,6 +11869,13 @@ async def bug_mark(update, ctx, note, wish=False, bug=True):
         sc = LAST_SCREEN.get(chat_id) or (L.current(chat_id) or "", "", [], 0)
         mid = improve.add(update.effective_user.id, "chat", sc[0] or (L.current(chat_id) or ""), BUG_KINDS[(bug, wish)], "",
                           (sc[1] or "")[:600], note or ("(скриншот)" if msg.photo else "(голосове чи відео)" if (msg.voice or msg.video or msg.video_note or msg.audio) else ""))
+    try:  # 🧯 і в журнал помилок — щоб ШІ бачив, що саме людина помітила і де
+        import errlog as _el
+        sc_ = LAST_SCREEN.get(chat_id) or (L.current(chat_id) or "", "", [], 0)
+        _el.add("людина", ("💡 " if wish and not bug else "🐞 ") + (note or "скриншот / голосове без тексту"),
+                where=f"позначка #{mid}", screen=str(sc_[0] or "")[:120])
+    except Exception:  # noqa: BLE001
+        pass
     if msg.photo:
         data = bytes(await (await msg.photo[-1].get_file()).download_as_bytearray())
         improve.set_image(mid, data)
