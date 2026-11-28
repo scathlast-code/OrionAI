@@ -5994,6 +5994,15 @@ def diag_collect(chat_id):
     sw = storage_warning()
     if sw:
         bad.append(re.sub(r"<[^>]+>", "", sw))
+    try:  # 🩺 сервіси, що зараз збоять (сторож здоров'я)
+        import health
+        for name, n, last in health.status():
+            bad.append(f"{name}: {n} збої поспіль" + (f" — {last[:120]}" if last else ""))
+        rep = health.disk_report(DB_PATH)
+        if rep:
+            (bad if rep[0] >= health.DISK_PCT else ok).append(f"💾 Диск: {rep[0]:.0f} % ({rep[1] / 1048576:.0f} з {rep[2] / 1048576:.0f} МБ), база {rep[3] / 1048576:.1f} МБ")
+    except Exception:  # noqa: BLE001
+        pass
     if hub.ready:
         st, until = plan_state(hub.peer_plan)
         ok.append("🧭 Головний бот підключений · зараз " + ("не спить" if st == "awake" else "спить" + (f" до {datetime.fromtimestamp(until, TZ).strftime('%H:%M')}" if until else "")))
@@ -12863,6 +12872,18 @@ async def main():
         BACKGROUND.add(asyncio.create_task(premium_loop()))
         ACTLOG.add(0, "система", "запуск бота", "нова база" if not DB_EXISTED else "")
         await PLUGINS.start()
+        try:  # 🩺 сторож здоров'я: тихі поломки сервісів і заповнення диска — повідомленням власнику
+            import health
+
+            async def _health_note(text):
+                if owner_id():
+                    import notify as _nt
+                    with _nt.kind("system"):
+                        await tg_app.bot.send_message(owner_id(), text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+            health.setup(_health_note, kv_get, kv_set)
+            BACKGROUND.add(asyncio.create_task(health.disk_loop(DB_PATH)))
+        except Exception:  # noqa: BLE001
+            log.warning("health не запустився", exc_info=True)
         try:
             import loopwatch  # 🩺 зависання циклу → у журнал зі стеком
             loopwatch.start()
