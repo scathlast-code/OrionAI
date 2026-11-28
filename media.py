@@ -312,7 +312,7 @@ async def stt_gemini(data, filename, language=None):
     async with httpx.AsyncClient(timeout=120) as c:
         r = await c.post(url, json=body)
     if r.status_code != 200:
-        raise MediaError("gemini_stt", "bad_request" if r.status_code < 500 else "network", f"HTTP {r.status_code}")
+        raise MediaError("gemini_stt", "bad_request" if r.status_code < 500 else "network", f"HTTP {r.status_code}: {r.text[:200]}")
     try:
         parts = r.json()["candidates"][0]["content"]["parts"]
         return "".join(p.get("text", "") for p in parts).strip()

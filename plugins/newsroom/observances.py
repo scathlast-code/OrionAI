@@ -25,6 +25,7 @@ log = logging.getLogger("orion.plugins.newsroom.obs")
 MONTHS_GEN = ["січня", "лютого", "березня", "квітня", "травня", "червня", "липня", "серпня", "вересня", "жовтня", "листопада", "грудня"]
 MONTHS = ["Січень", "Лютий", "Березень", "Квітень", "Травень", "Червень", "Липень", "Серпень", "Вересень", "Жовтень", "Листопад", "Грудень"]
 CP_ICON = {"Сайт": "🌐", "Блог": "📝", "Соцмережі": "📣"}
+CP_LETTER = {"Сайт": "С", "Блог": "Б", "Соцмережі": "М"}  # вузькі позначки для клітинок календаря
 WD = ["пн", "вт", "ср", "чт", "пт", "сб", "нд"]
 KINDS = {"day": "📌 день", "week": "🗓 тиждень", "month": "📆 місяць / місячник", "year": "🎆 рік"}
 
@@ -390,10 +391,12 @@ class ObservancesUI:
         for day in range(1, calendar.monthrange(y, m)[1] + 1):
             x = dt.date(y, m, day)
             its = data.get(x.isoformat(), [])
-            kinds = [CP_ICON[w] for w in ("Сайт", "Блог", "Соцмережі") if any(i.get("where") == w for i in its)]
-            mark = "⭐" if len(kinds) == 3 else "".join(kinds) or ("✍️" if its else "")
-            imp = "❗" if any(self.db_imp_title(i.get("title")) for i in its) else ""
-            label = (f"🟢{day}" if x == today else f"👉{day}" if (day_mode and x == sel) else f"{day}") + imp + mark
+            # Telegram не дає зменшити шрифт кнопок — тому в клітинці лише вузькі знаки: С/Б/М замість емодзі (не обрізається)
+            kinds = [CP_LETTER[w] for w in ("Сайт", "Блог", "Соцмережі") if any(i.get("where") == w for i in its)]
+            mark = "★" if len(kinds) == 3 else "".join(kinds) or ("·" if its else "")
+            imp = "!" if any(self.db_imp_title(i.get("title")) for i in its) else ""
+            suf = (imp + mark)[:2]
+            label = (f"[{day}]" if x == today else f"›{day}" if (day_mode and x == sel) else f"{day}") + suf
             week.append((label, self.cb("obcp", x.strftime("%Y%m%d"))))
             if len(week) == 7:
                 rows.append(week)
@@ -404,8 +407,8 @@ class ObservancesUI:
         rows.append([("🗓 Загальний календар", self.cb("obc", sel.strftime("%Y%m"))), ("« Теми дня", self.cb("obh", "m"))])
         month_n = sum(len(v) for k, v in data.items() if k.startswith(f"{y}-{m:02d}"))
         lines = [f"📋 <b>Контент-план · {MONTHS[m - 1]} {y}</b> · тем {month_n}",
-                 "🌐 — на сайт · 📝 — у блог · 📣 — у соцмережі · ⭐ — усе разом · ✍️ — лише тема дня · ❗ — важлива тема "
-                 "(екологія, здоров'я, агро, енергетика, свята) · 🟢 — сьогодні · 👉 — обраний день. Торкніться дня, щоб побачити план.", ""]
+                 "С — на сайт · Б — у блог · М — у соцмережі · ★ — усе разом · «·» — лише тема дня · ! — важлива тема "
+                 "(екологія, здоров'я, агро, енергетика, свята) · [28] — сьогодні · › — обраний день. Торкніться дня, щоб побачити план.", ""]
         if day_mode and self.host.is_admin(chat):  # ✏️ правки людини — у саму таблицю, з підтвердженням
             items_ = data.get(sel.isoformat(), [])
             ed = [(f"✏️ {k + 1}", self.cb("obce", f"{sel:%Y%m%d}.{k}")) for k in range(min(len(items_), 8))]
@@ -1729,8 +1732,8 @@ class ObservancesUI:
             x = dt.date(y, m, day)
             rs = self.obs_on(x, chat)
             top = max((r["imp_"] for r in rs if r["kind"] == "day"), default=-1)
-            mark = "‼️" if top == 2 else "❗" if top == 1 else ("⭐" if any(r["fav"] for r in rs) else "•" if rs else "")
-            label = (f"🟢{day}" if x == today else str(day)) + mark
+            mark = "!!" if top == 2 else "!" if top == 1 else ("★" if any(r["fav"] for r in rs) else "·" if rs else "")  # вузькі знаки — не обрізаються
+            label = (f"[{day}]" if x == today else str(day)) + mark
             week.append((label, self.cb("obd", x.strftime("%Y%m%d"))))
             if len(week) == 7:
                 rows.append(week)
@@ -1741,7 +1744,7 @@ class ObservancesUI:
         nxt = (dt.date(y, m, 28) + dt.timedelta(days=5)).strftime("%Y%m")
         rows.append([("◀️ " + MONTHS[int(prev[4:]) - 1], self.cb("obc", prev)), (MONTHS[int(nxt[4:]) - 1] + " ▶️", self.cb("obc", nxt))])
         rows.append([("➕ Свій день", self.cb("oba")), ("« Теми дня", self.cb("obh"))])
-        return (f"🗓 <b>{MONTHS[m - 1]} {y}</b>\n‼️ дуже важливий · ❗ важливий · ⭐ обраний · • є теми · 🟢 — сьогодні.\n"
+        return (f"🗓 <b>{MONTHS[m - 1]} {y}</b>\n!! дуже важливий · ! важливий · ★ обраний · «·» є теми · [28] — сьогодні.\n"
                 "Торкніться дня — теми, списки, додавання й редагування."), rows
 
     def obs_day(self, ymd, chat=None):

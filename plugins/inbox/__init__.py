@@ -583,8 +583,9 @@ class Plugin(Base):
             self.reply_to[chat] = (int(x), int(y))
             return None, ("↩️ Наступне ваше повідомлення бот опублікує відповіддю на цей коментар.", [[("✖️ Скасувати", self.cb("rx"))]])
         if a == "who":
+            same = self.get("who") == x
             self.set("who", x)
-            return None, self.settings()
+            return ("Уже вибрано" if same else "Збережено"), self.settings()
         if a == "ack":
             self.set("ack", "0" if self.get("ack") == "1" else "1")
             return None, self.settings()
