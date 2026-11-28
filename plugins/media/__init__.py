@@ -209,7 +209,9 @@ class Plugin(Base):
     # ================================================================ 🔗 пов'язане скачане
     REL = (("a", "👤 Автор"), ("t", "🏷 Тема (і «без теми»)"), ("g", "📍 Локація (і «без локації»)"), ("l", "🗣 Мова"),
            ("f", "🆕 Вперше"), ("ai", "🤖 Визначати тему, локацію й мову за допомогою ШІ"),
-           ("see", "👁 ШІ дивиться на фото й кадр відео (тема за вмістом)"),
+           ("see", "👁 ШІ дивиться на фото й кадри відео всього допису"),
+           ("hear", "👂 ШІ слухає, що говорять у відео (початок, для змісту)"),
+           ("about", "🧠 Рядок «що це» в підписі (зміст, місце, мета допису)"),
            ("geo_author", "🧭 Немає місця в дописі — брати з інших дописів автора чи його сторінки"))
 
     def rel_on(self, chat, k):
@@ -250,37 +252,117 @@ class Plugin(Base):
             found.append((kind, self.hist.learn_user(kind, name, phrase)))
         return found
 
+    VIDEO_EXT = (".mp4", ".mov", ".mkv", ".webm", ".m4v")
+    IMG_EXT = (".jpg", ".jpeg", ".png", ".webp", ".heic")
+    AUD_EXT = (".mp3", ".m4a", ".ogg", ".opus", ".wav", ".flac", ".aac")
+
+    @classmethod
+    async def _frames(cls, path, n=3):
+        """Кадри з відео (на 0, 4, 8… с) як байти JPEG — щоб ШІ бачив, що відбувається, а не лише перший кадр."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-loglevel", "error", "-i", str(path), "-vf", "fps=1/4,scale=512:-2", "-frames:v", str(n),
+                f"{tmp}/f%02d.jpg")
+            try:
+                await asyncio.wait_for(proc.wait(), 40)
+            except asyncio.TimeoutError:
+                proc.kill()
+            return [f.read_bytes() for f in sorted(Path(tmp).glob("f*.jpg"))]
+
     @staticmethod
-    async def _frame_b64(path):
-        """Кадр для ШІ (до 768 пікс., JPEG у base64): саме фото або кадр з 1-ї секунди відео."""
-        import base64
-        import io
+    async def _fetch_small(url, limit=4_000_000):
+        """Інше фото чи обкладинка з допису за адресою (ще не скачане) — для аналізу всього допису."""
         try:
-            from PIL import Image
-            p = Path(path)
-            if p.suffix.lower() in (".mp4", ".mov", ".mkv", ".webm", ".m4v"):
-                out = p.with_suffix(".frame.jpg")
-                proc = await asyncio.create_subprocess_exec("ffmpeg", "-y", "-loglevel", "error", "-ss", "1", "-i", str(p),
-                                                            "-frames:v", "1", str(out))
-                await asyncio.wait_for(proc.wait(), 30)
-                if not out.exists():
-                    return None
-                p = out
-            def enc():
-                im = Image.open(p).convert("RGB")
-                im.thumbnail((768, 768))
-                buf = io.BytesIO()
-                im.save(buf, "JPEG", quality=80)
-                return base64.b64encode(buf.getvalue()).decode()
-            data = await asyncio.to_thread(enc)
-            if p.name.endswith(".frame.jpg"):
-                p.unlink(missing_ok=True)
-            return data
-        except Exception:  # noqa: BLE001 — без кадру: теги лише з тексту
-            log.info("related: кадр для ШІ не вийшов", exc_info=True)
+            async with M.open_url(url, agent=M.BROWSER) as r:
+                buf = bytearray()
+                async for chunk in r.aiter_bytes(65536):
+                    buf.extend(chunk)
+                    if len(buf) > limit:
+                        return None
+                return bytes(buf)
+        except Exception:  # noqa: BLE001
             return None
 
-    async def detect(self, chat, text, geotag, who, alink, instr=None, media=None):
+    @staticmethod
+    def _collage(blobs):
+        """До 4 зображень — одна картинка-сітка 2×2 (до 1024 пікс.): будь-яка модель із зором бачить увесь допис одним запитом."""
+        import base64
+        import io
+        from PIL import Image
+        ims = []
+        for b in blobs:
+            try:
+                im = Image.open(io.BytesIO(b)).convert("RGB")
+                im.thumbnail((512, 512))
+                ims.append(im)
+            except Exception:  # noqa: BLE001
+                continue
+        if not ims:
+            return None
+        ims = ims[:4]
+        if len(ims) == 1:
+            canvas = ims[0]
+        else:
+            cols = 2
+            rows = (len(ims) + 1) // 2
+            canvas = Image.new("RGB", (cols * 512, rows * 512), (255, 255, 255))
+            for i, im in enumerate(ims):
+                x, y = (i % cols) * 512, (i // cols) * 512
+                canvas.paste(im, (x + (512 - im.width) // 2, y + (512 - im.height) // 2))
+        buf = io.BytesIO()
+        canvas.save(buf, "JPEG", quality=80)
+        return base64.b64encode(buf.getvalue()).decode()
+
+    async def _hear(self, path, seconds=45):
+        """Що говорять у відео чи аудіо (перші ~45 с) — для розуміння змісту; без сервісу розшифровки — порожньо."""
+        import tempfile
+        try:
+            import media as core
+            with tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / "a.mp3"
+                proc = await asyncio.create_subprocess_exec("ffmpeg", "-y", "-loglevel", "error", "-i", str(path), "-t", str(seconds),
+                                                            "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k", str(out))
+                await asyncio.wait_for(proc.wait(), 40)
+                if not out.exists() or out.stat().st_size < 2000:
+                    return ""
+                text, _p, _e = await asyncio.wait_for(core.transcribe(out.read_bytes(), "a.mp3"), 45)
+                return (text or "").strip()[:800]
+        except Exception:  # noqa: BLE001 — немає звуку чи сервісу: аналіз без мови
+            log.info("related: розшифровка для аналізу не вийшла", exc_info=True)
+            return ""
+
+    async def understand(self, chat, ctx):
+        """🧠 Що саме скачують: кадри фото й відео всього допису (сітка), мова у відео, музика, типи файлів.
+        ctx: media — уже скачаний файл; others — адреси інших фото/обкладинок допису; song; files. -> (картинка base64, текст)."""
+        ctx = ctx or {}
+        blobs, notes = [], []
+        media = ctx.get("media")
+        suf = Path(media).suffix.lower() if media else ""
+        see, hear = self.rel_on(chat, "see"), self.rel_on(chat, "hear")
+        if media and see:
+            if suf in self.VIDEO_EXT:
+                blobs += await self._frames(media, 3 if not ctx.get("others") else 1)
+            elif suf in self.IMG_EXT:
+                try:
+                    blobs.append(Path(media).read_bytes())
+                except OSError:
+                    pass
+        if see and ctx.get("others"):
+            got = await asyncio.gather(*(self._fetch_small(u) for u in ctx["others"][: max(0, 4 - len(blobs))]))
+            blobs += [g for g in got if g]
+        if media and hear and suf in self.VIDEO_EXT + self.AUD_EXT:
+            said = await self._hear(media)
+            if said:
+                notes.append(f"Що говорять/звучить у відео (розшифровка початку): {said}")
+        if ctx.get("song"):
+            notes.append(f"Музика в дописі: {ctx['song']}")
+        if ctx.get("files"):
+            notes.append(f"Файли допису: {ctx['files']}")
+        img = await asyncio.to_thread(self._collage, blobs) if blobs else None
+        return img, "\n".join(notes), len(blobs)
+
+    async def detect(self, chat, text, geotag, who, alink, instr=None, media=None, ctx=None):
         """Тема, локація, мова: ШІ (без обмежень) + словник + збережені теги людини + її вказівки до посилання;
         мова без тексту — як переважно пише автор. -> (ключі тем, ключі локацій, ключі мов) або None — «без тегів»."""
         instr = instr or {}
@@ -289,18 +371,29 @@ class Plugin(Base):
         d_t, d_g = R.tags(f"{text}\n{geotag}")
         a_t, a_g, lang = [], [], ""
         body = (text or "").strip()
-        img = await self._frame_b64(media) if media and self.rel_on(chat, "ai") and self.rel_on(chat, "see") else None
-        if self.rel_on(chat, "ai") and (len(body) >= 2 or geotag or img):  # навіть «Саржин яр» — це вже місце
-            for pic in ((img, None) if img else (None,)):  # модель без зору — повтор лише за текстом
+        self.__dict__.setdefault("_about", {}).pop(chat, None)
+        img, notes, nimg = (None, "", 0)
+        if self.rel_on(chat, "ai"):
+            ctx = dict(ctx or {}, media=media or (ctx or {}).get("media"))
+            try:
+                img, notes, nimg = await self.understand(chat, ctx)
+            except Exception:  # noqa: BLE001
+                log.info("related: аналіз допису не вийшов", exc_info=True)
+        if self.rel_on(chat, "ai") and (len(body) >= 2 or geotag or img or notes):  # навіть «Саржин яр» — це вже місце
+            for pic in ((img, None) if img else (None,)):  # модель без зору — повтор без картинки
                 try:
                     ans, _m = await asyncio.wait_for(self.host.ask_ai(
-                        R.ai_prompt(body, geotag, self.hist.known("t"), self.hist.known("g"), seen=bool(pic)),
-                        system=R.AI_SYSTEM, label="🔗 Тема й локація", image=pic), 60 if pic else 40)
+                        R.ai_prompt(body, geotag, self.hist.known("t"), self.hist.known("g"), seen=bool(pic), notes=notes,
+                                    nimg=nimg, site=(ctx or {}).get("site", ""), who=who or ""),
+                        system=R.AI_SYSTEM, label="🔗 Що в дописі", image=pic), 70 if pic else 40)
                     a_t, a_g, lang = R.parse_ai(ans)
-                    if a_t or a_g:
+                    about = R.parse_about(ans)
+                    if about:
+                        self._about[chat] = about
+                    if a_t or a_g or about:
                         break
                 except Exception:  # noqa: BLE001 — ШІ недоступний: лишається словник
-                    log.info("related: ШІ не визначив тему%s", " за кадром" if pic else " — беру словник")
+                    log.info("related: ШІ не визначив тему%s", " за кадрами" if pic else " — беру словник")
         topics, geos = R.merge(a_t, d_t), R.merge(a_g, d_g)
         if geotag and not geos:  # геотег є, а ні ШІ, ні словник його не впізнали — беремо як є
             geos = [(geotag.strip()[:40], "· " + geotag.strip()[:40])]
@@ -2598,12 +2691,24 @@ class Plugin(Base):
                     if rkey in rc and time.time() - rc[rkey][0] < 900:
                         rel, guess = rc[rkey][1], rc[rkey][2]
                     else:
-                        media0 = next((o for o in outs if Path(o).suffix.lower() in (".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mov", ".mkv", ".webm")), None) if outs else path
-                        rel = await self.detect(chat, desc or "", geotag, who, link, self.instr.get(chat), media=media0)
+                        media0 = next((o for o in outs if Path(o).suffix.lower() in self.IMG_EXT + self.VIDEO_EXT + self.AUD_EXT), None) if outs else path
+                        others = []  # інші фото/обкладинки допису — аналізуємо весь допис, а не лише перший файл
+                        for it2 in job.items:
+                            if it2 is item or it2.engine == "text":
+                                continue
+                            u2 = (it2.info or {}).get("thumbnail") or (str(it2.url) if M.is_image_item(it2) or it2.engine == "direct" and
+                                                                       re.search(r"\.(jpe?g|png|webp)(\?|$)", str(it2.url), re.I) else "")
+                            if u2 and str(u2).startswith("http"):
+                                others.append(str(u2))
+                        s2 = self.song_of(job)
+                        files = ", ".join(sorted({(Path(M.urlsplit(str(i.url)).path).suffix or "?").lstrip(".") for i in job.items}))[:80]
+                        rel = await self.detect(chat, desc or "", geotag, who, link, self.instr.get(chat), media=media0,
+                                                ctx={"others": others[:3], "song": self.song_name(s2) if s2 else "", "files": files, "site": site})
                         guess = self.__dict__.get("_geo_guess", {}).pop(chat, None)
-                        rc[rkey] = (time.time(), rel, guess)
+                        rc[rkey] = (time.time(), rel, guess, self.__dict__.get("_about", {}).pop(chat, ""))
                         for k in [k for k, v in rc.items() if time.time() - v[0] > 900]:
                             rc.pop(k, None)
+                    about = rc[rkey][3] if rkey in rc else ""
                     if rel is None:  # людина попросила без тегів — без сортування й без запису
                         rel_t = rel_g = rel_l = rel_f = rel_btns = []
                         rel_line, rel_len = "", 0
@@ -2616,6 +2721,9 @@ class Plugin(Base):
                         gname = ", ".join(self.hist.name("g", k) for k in guess[0])[:60]
                         gl = f"\n📍 Імовірна локація: {esc(gname)} ({guess[1]})"
                         rel_line, rel_len = gl + rel_line, rel_len + len(gl)
+                    if about and rel is not None and self.rel_on(chat, "about"):  # 🧠 що це за допис — коротко
+                        al = f"\n🧠 {esc(about[:160])}"
+                        rel_line, rel_len = al + rel_line, rel_len + len(about[:160]) + 3
                     gx = self.gctx.get(chat)
                     if gx:  # 📦 позначка групи й посилання на попередній із неї
                         prev = next((e for e in reversed(self.hist.items(chat)) if e.get("group") == gx["id"]), None)
@@ -2656,7 +2764,7 @@ class Plugin(Base):
                             if not recorded and album_hist is None:
                                 album_hist = dict(author=R.norm_author(who), who=who, alink=link, site=site, url=str(job.url),
                                                   src_url=self.cur_url.get(chat) or "", title=(desc or item.title or "")[:80],
-                                                  topics=rel_t, geos=rel_g, langs=rel_l, first=rel_f, geotag=geotag,
+                                                  topics=rel_t, geos=rel_g, langs=rel_l, first=rel_f, geotag=geotag, about=about or "",
                                                   **({"group": gx["id"], "gi": gx["i"]} if gx else {}),
                                                   **({"notag": True} if rel is None else {}), _btns=rel_btns)
                             recorded = True
@@ -2672,7 +2780,7 @@ class Plugin(Base):
                         if not recorded and getattr(msg_, "message_id", None):  # 🔗 запам'ятовуємо для «попереднє …»
                             recorded = True
                             rid_ = self.hist.add(chat, msg=msg_.message_id, author=R.norm_author(who), who=who, alink=link, site=site,
-                                          url=str(job.url), src_url=self.cur_url.get(chat) or "", size=size_, title=(desc or item.title or "")[:80], topics=rel_t, geos=rel_g, langs=rel_l, first=rel_f, geotag=geotag,
+                                          url=str(job.url), src_url=self.cur_url.get(chat) or "", size=size_, title=(desc or item.title or "")[:80], topics=rel_t, geos=rel_g, langs=rel_l, first=rel_f, geotag=geotag, about=about or "",
                                           **({"group": gx["id"], "gi": gx["i"]} if gx else {}), **({"notag": True} if rel is None else {}))
                             await self._cat_button(chat, msg_.message_id, rid_, rel_btns)
                             last_media = (msg_.message_id, rel_btns, rid_)

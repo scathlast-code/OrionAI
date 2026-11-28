@@ -25,3 +25,18 @@ def test_ai_prompt_seen():
     from plugins.media import related as R
     assert "кадр" in R.ai_prompt("Саржин яр", "", [], [], seen=True)
     assert "кадр" not in R.ai_prompt("Саржин яр", "", [], [])
+
+
+def test_about_and_collage():
+    from plugins.media import related as R
+    from plugins.media import Plugin
+    import io
+    from PIL import Image
+    assert R.parse_about('{"topics":[],"about":"Відео з качками в Саржиному яру"}') == "Відео з качками в Саржиному яру"
+    assert R.parse_about("нема") == ""
+    blobs = []
+    for c in ((255, 0, 0), (0, 255, 0), (0, 0, 255)):
+        b = io.BytesIO(); Image.new("RGB", (800, 600), c).save(b, "JPEG"); blobs.append(b.getvalue())
+    assert Plugin._collage(blobs) and Plugin._collage([b"x"]) is None
+    p = R.ai_prompt("Саржин яр", "", [], [], seen=True, nimg=3, notes="Музика в дописі: X", site="Threads")
+    assert "сітку з 3" in p and "Музика" in p
