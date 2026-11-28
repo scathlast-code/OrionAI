@@ -1239,7 +1239,9 @@ async def fetch(item, source, options, work, progress=None):
             + (["--audio-quality", f"{options.abr or 192}K"] if afmt in ("mp3", "m4a", "opus") else [])
     else:
         selector = f"bv{height}+ba{language}/b{height}{language}"
-        if not language:
+        if getattr(options, "need_audio", False):  # 🔁 повтор «зі звуком»: лише формати зі звуком, без «лише відео»
+            selector = f"bv{height}+ba/b{height}/bv*+ba/b"
+        elif not language:
             selector += f"/bv{height}"
         if height:  # у Facebook та ін. формати часто без висоти — тоді фільтр відсіює все; беремо найкраще, що є
             selector += f"/bv*+ba{language}/b{language}" + ("" if language else "/bv*")
@@ -1308,21 +1310,9 @@ async def fetch(item, source, options, work, progress=None):
                        "спробуйте ще раз пізніше або інше посилання на це ж відео.")
     stem = Path(safe_name(ua_title(info.get("title") or item.title)[:70], "media")).stem
     if options.mode == "video" and files[0].suffix.lower() in VIDEO_EXT and not await has_audio(files[0]):
-        if source_has_audio(info):  # 🔇 у джерелі звук є, а прийшло німе — ще раз, найкращий формат одразу зі звуком
-            try:
-                for leftover in work.iterdir():
-                    if leftover.is_file():
-                        leftover.unlink()
-                selector = f"b{height}/bv*+ba/b"
-                await go(extra)
-                again = [p for p in work.iterdir() if p.is_file() and p.suffix.lower() in MEDIA and p.stat().st_size > 0]
-                if len(again) == 1:
-                    files = again
-                    outputs = [p for p in work.iterdir() if p.is_file()]
-            except JobError:
-                log.info("повторне завантаження зі звуком не вдалося", exc_info=True)
-            if not await has_audio(files[0]):
-                info["_no_audio"] = "звук не вдалося отримати з сайту (помилка) — спробуйте ще раз або інший формат"
+        if source_has_audio(info):  # 🔇 у джерелі звук є, а прийшло німе — не повторюємо самі: людина вирішує (кнопка під файлом)
+            info["_no_audio"] = "звук не вдалося отримати з сайту (помилка)"
+            info["_audio_retry"] = True
         else:
             info["_no_audio"] = "в оригіналі звукової доріжки немає"
     path = files[0].rename(work / (stem + files[0].suffix.lower()))
