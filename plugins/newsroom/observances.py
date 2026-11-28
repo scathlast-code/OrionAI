@@ -343,9 +343,19 @@ class ObservancesUI:
                         self.store.set("cplan_sheets", rep[-40:])
                         self.store.set("cplan_cells", {"id": CP.file_id(url), "cells": cells})
                         log.info("контент-план, аркуші: %s", " | ".join(rep))
+                        try:
+                            import health
+                            health.ok("cplan")
+                        except Exception:  # noqa: BLE001
+                            pass
                         break
                     except Exception as exc:  # noqa: BLE001
                         log.warning("контент-план: не вдалось завантажити %s", dl, exc_info=True)
+                        try:
+                            import health
+                            health.fail("cplan", f"не завантажилась таблиця {dl[:80]}")
+                        except Exception:  # noqa: BLE001
+                            pass
                         status.append(f"{dl.split('/')[2]}: {type(exc).__name__}: {str(exc)[:80]}")
         log.info("контент-план: %d днів, %d тем", len(merged), sum(len(v) for v in merged.values()))
         prev = self.store.get("cplan_data") or {}
