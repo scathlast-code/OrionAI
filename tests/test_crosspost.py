@@ -39,3 +39,18 @@ def test_parse_when():
     w = parse_when("01.12 07:15", now)
     assert (w.month, w.day, w.hour, w.minute) == (12, 1, 7, 15)
     assert parse_when("25:00", now) is None and parse_when("абв", now) is None
+
+
+def test_new_networks_and_youtube_title():
+    assert {"tt", "yt", "tb"} <= set(X.ORDER)
+    got = X.parse({"yt": {"text": "Н" * 150 + "\nОпис відео."}}, X.DEFAULTS, ["yt"])
+    assert len(got["yt"]["text"].split("\n")[0]) <= 100
+
+
+def test_editorial_parse_day():
+    import datetime as dt
+    from plugins.editorial import parse_day
+    t = dt.date(2026, 11, 28)
+    assert parse_day("+3", t) == "2026-12-01" and parse_day("завтра", t) == "2026-11-29"
+    assert parse_day("05.01", t) == "2026-01-05" or parse_day("05.01", t) == "2027-01-05"
+    assert parse_day("-", t) is None and parse_day("абв", t) is False

@@ -25,8 +25,11 @@ NETWORKS = {
     "th": ("🧵", "Threads", 500, 450, 1),
     "x": ("𝕏", "X", 280, 270, 3),
     "fb": ("📘", "Facebook", 63206, 600, 5),
+    "tt": ("🎵", "TikTok", 4000, 300, 5),
+    "yt": ("▶️", "YouTube", 5000, 400, 5),
+    "tb": ("🌀", "Tumblr", 4096, 800, 10),
 }
-ORDER = ["tg", "ig", "th", "x", "fb"]
+ORDER = ["tg", "ig", "th", "x", "fb", "tt", "yt", "tb"]
 EMOJI = {"none": "без смайлів", "few": "небагато (1–3)", "many": "виразно (у кожному абзаці)"}
 TONES = {"news": "стримано-новинний", "warm": "теплий, людяний", "brisk": "бадьорий, динамічний"}
 URL_RE = re.compile(r"https?://\S+")
@@ -83,6 +86,12 @@ def prompt(d, cfg, nets):
             line += "; абзаци з відступами, жирний заголовок не потрібен (його додасть бот), можна список фактів"
         if k == "fb":
             line += "; перший рядок — суть, далі 2–4 короткі абзаци"
+        if k == "tt":
+            line += "; підпис до відео: гачок у першому реченні, коротко, розмовно"
+        if k == "yt":
+            line += "; ПЕРШИЙ РЯДОК — назва відео до 100 символів, далі порожній рядок і опис 2–4 речення"
+        if k == "tb":
+            line += "; блоговий тон, можна трохи контексту; хештеги-теги по суті"
         specs.append(line)
     rules = (cfg.get("rules") or "").strip()
     return ("Адаптуй новину для соцмереж видання. Факти, імена, цифри, дати й цитати — ТІЛЬКИ з тексту новини, нічого не додавай "
@@ -112,6 +121,10 @@ def parse(data, cfg, nets):
         tail = ("\n\n" + " ".join(tags)) if tags else ""
         room = limit - net_len(k, tail)
         body = trim(text, room, k)
+        if k == "yt":  # назва відео — перший рядок, до 100 символів
+            first, _, rest = body.partition("\n")
+            if len(first) > 100:
+                body = trim(first, 100) + ("\n" + rest if rest else "")
         item = {"text": body + tail, "tags": tags, "cut": body != text}
         if k == "ig":
             item["slides"] = [trim(str(s), 120) for s in (v.get("slides") or []) if str(s).strip()][:20]
@@ -123,7 +136,12 @@ class CrosspostUI:
     """Мікс до плагіна «Новинарня»: екрани «📲 Під мережі» для чернетки й налаштування."""
 
     def xp_cfg(self):
-        return {**DEFAULTS, **(self.store.get("xp_cfg") or {})}
+        c = {**DEFAULTS, **(self.store.get("xp_cfg") or {})}
+        if c.get("nets_v") != 2:  # додано TikTok, YouTube, Tumblr — вмикаємо їх і тим, хто вже налаштовував
+            c["nets"] = [k for k in ORDER if k in c["nets"] or k in ("tt", "yt", "tb")]
+            c["nets_v"] = 2
+            self.store.set("xp_cfg", c)
+        return c
 
     def xp_save(self, **kw):
         self.store.set("xp_cfg", {**self.xp_cfg(), **kw})
@@ -180,7 +198,7 @@ class CrosspostUI:
         if saved.get("_model"):
             lines.append(f"🤖 {esc(saved['_model'])}")
         tabs = [((("● " if k == net else "") + NETWORKS[k][0]), self.cb("xp", did, k)) for k in have]
-        rows = [tabs]
+        rows = [tabs[i:i + 4] for i in range(0, len(tabs), 4)]
         if len(v["text"]) <= 256:
             rows.append([("📋 Копіювати", "copy:" + v["text"])])
         rows += [[(f"🔁 Заново {icon}", self.cb("xpg", did, net)), ("🔁 Усі заново", self.cb("xpg", did))],
@@ -199,7 +217,7 @@ class CrosspostUI:
                   f"🔗 Instagram: {'«посилання в шапці профілю» замість адрес' if c['ig_link'] else 'адреси як є'}",
                   f"📜 Свої правила: {esc(c['rules'][:150]) if c['rules'] else 'немає'}"]
         nets = [((("✅ " if k in c["nets"] else "▫️ ") + NETWORKS[k][0]), self.cb("xpt", k, did)) for k in ORDER]
-        rows = [nets,
+        rows = [nets[:4], nets[4:],
                 [("🎙 Тон", self.cb("xpc", "tone", did)), ("😀 Смайли", self.cb("xpc", "emoji", did))],
                 [("#️⃣ Хештеги", self.cb("xpc", "tags", did)), ("🖼 Слайди", self.cb("xpc", "slides", did))],
                 [("🔗 Посилання в Instagram", self.cb("xpc", "ig_link", did)), ("📜 Свої правила", self.cb("xpr", did))],
