@@ -3173,6 +3173,7 @@ PLUGINS = orion_plugins.Registry(orion_plugins.Host(
            "utm_screen": lambda chat: on_utm_screen(chat),
            "today_screen": lambda chat: scr_today(chat),  # 🌅 ранкове зведення = те саме, що кнопка «Сьогодні»
            "miniapp_url": miniapp_url(),
+           "public_base": lambda: public_base(),  # публічна адреса бота — для тимчасових посилань на файли (пошук фото за зображенням)
            "awaiting": lambda chat: chat in AWAIT or CM.wants_text(chat),
            "node_active": lambda: NODE.active,
            "users": lambda: [m["user_id"] for m in members_list("approved")],

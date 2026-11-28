@@ -336,13 +336,57 @@ class ToolsUI:
                 + (f" · {esc(x['author'])}" if x.get("author") else "") for x in seen[:5]]
         else:
             L += ["", "У нашій медіатеці такого фото ще не було."]
-        L += ["", "🔎 <b>Де шукати старіші копії</b> (завантажте туди це фото):",
-              "• Google Лінза — https://lens.google.com/upload",
-              "• TinEye — https://tineye.com (показує найдавнішу появу в мережі)",
-              "• Bing Візуальний пошук — https://www.bing.com/visualsearch",
-              "Якщо фото з'являлося раніше за подію, про яку йдеться, — його використали повторно."]
-        await self.host.notify(chat, "\n".join(L)[:4000], [[("🗃 Медіатека", self.cb("tm")), ("« Інструменти", self.cb("tl"))]])
+        # 👁 ШІ дивиться на саме фото: ознаки повторного використання, монтажу, ШІ, чужих водяних знаків
+        try:
+            import base64
+            import io as _io
+            from PIL import Image
+            im = Image.open(_io.BytesIO(data)).convert("RGB")
+            im.thumbnail((1024, 1024))
+            buf = _io.BytesIO()
+            im.save(buf, "JPEG", quality=85)
+            ans, _m = await asyncio.wait_for(self.host.ask_ai(
+                "Оціни фото як фактчекер новинного медіа. Коротко, 2–5 пунктів «•», українською: чи є ознаки, що фото старе чи з іншої події "
+                "(сезон, одяг, написи, дати, техніка), монтажу чи ШІ (неприродні руки, тіні, «пливкі» написи), чужий водяний знак чи логотип, "
+                "фото екрана. Лише те, що справді видно; немає ознак — так і скажи.", label="🕵️ Перевірка фото",
+                image=base64.b64encode(buf.getvalue()).decode()), 60)
+            if (ans or "").strip():
+                L += ["", "👁 <b>Що видно на фото (ШІ)</b>", esc(ans.strip()[:900])]
+        except Exception:  # noqa: BLE001
+            log.info("photo check: ШІ не оцінив", exc_info=True)
+        rows = []
+        link = await self._public_photo(data)
+        if link:  # 🔎 пошук за зображенням одним натиском: фото тимчасово доступне за посиланням (3 год)
+            from urllib.parse import quote
+            u = quote(link, safe="")
+            rows.append([("🔎 Google Лінза", "url:https://lens.google.com/uploadbyurl?url=" + u),
+                         ("🔎 TinEye", "url:https://tineye.com/search?url=" + u)])
+            rows.append([("🔎 Bing", "url:https://www.bing.com/images/search?view=detailv2&iss=sbi&form=SBIVSP&q=imgurl:" + u)])
+            L += ["", "🔎 <b>Де ще з'являлось це фото</b> — кнопки нижче відкривають пошук за цим зображенням. TinEye показує найдавнішу появу; "
+                  "якщо фото було в мережі раніше за подію — його використали повторно."]
+        else:
+            L += ["", "🔎 <b>Де шукати старіші копії</b> (завантажте туди це фото): Google Лінза — https://lens.google.com/upload · "
+                  "TinEye — https://tineye.com · Bing — https://www.bing.com/visualsearch"]
+        rows.append([("🗃 Медіатека", self.cb("tm")), ("« Інструменти", self.cb("tl"))])
+        await self.host.notify(chat, "\n".join(L)[:4000], rows)
         return nid
+
+    async def _public_photo(self, data):
+        """Тимчасове публічне посилання на фото (3 год, як файли Mini App) — для пошуку за зображенням."""
+        try:
+            base = (self.host.extra.get("public_base") or (lambda: ""))()
+            med = self.host.extra.get("plugin", lambda pid: None)("med")
+            if not base or not med or not hasattr(med, "keep"):
+                return ""
+            import tempfile as _tf
+            with _tf.TemporaryDirectory() as tmp:
+                p = Path(tmp) / "photo.jpg"
+                p.write_bytes(data)
+                kept = med.keep(p)
+            return (base.rstrip("/") + kept["url"]) if kept else ""
+        except Exception:  # noqa: BLE001
+            log.info("photo check: посилання не створено", exc_info=True)
+            return ""
 
     async def video_job(self, chat, data, name, caption, src_path=None):
         c = self.store.get("tv_cfg") or {"fit": "blur", "subs": True}
