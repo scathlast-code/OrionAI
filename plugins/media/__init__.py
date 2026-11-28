@@ -102,20 +102,26 @@ def parse_numbers(text, n):
     return out
 
 
+def blocks(frac, fill="🟩"):
+    """Кольоровий бігунок із 10 квадратиків: 🟩🟩🟩🟩⬜⬜⬜⬜⬜⬜"""
+    n = max(0, min(10, int(frac * 10 + 1e-9)))
+    return fill * n + "⬜" * (10 - n)
+
+
 def bar(done, total, speed=0, eta=0):
-    """▓▓▓▓░░░░░░ 42% · 12.3 з 30.1 МБ · 2.1 МБ/с · ще 0:12"""
+    """🟩🟩🟩🟩⬜⬜⬜⬜⬜⬜ 42% · 12.3 з 30.1 МБ · 2.1 МБ/с · ще 0:12"""
     if not total:
         return f"{mb(done)}" + (f" · {mb(speed)}/с" if speed else "")
     pct = max(0, min(100, int(done * 100 / total)))
     eta = int(eta or 0)
-    return (f"{'▓' * (pct // 10)}{'░' * (10 - pct // 10)} {pct}% · {done / 1048576:.1f} з {mb(total)}"
+    return (f"{blocks(pct / 100)} {pct}% · {done / 1048576:.1f} з {mb(total)}"
             + (f" · {mb(speed)}/с" if speed else "") + (f" · ще {eta // 60}:{eta % 60:02d}" if eta else ""))
 
 
-def pbar(frac):
-    """Бігунок без розміру: ▓▓▓▓░░░░░░ 42%"""
+def pbar(frac, fill="🟦"):
+    """Бігунок без розміру: 🟦🟦🟦🟦⬜⬜⬜⬜⬜⬜ 42% (🟩 — файл, 🟦 — усе в дописі, 🟪 — уся група)"""
     pct = max(0, min(100, int(frac * 100)))
-    return f"{'▓' * (pct // 10)}{'░' * (10 - pct // 10)} {pct}%"
+    return f"{blocks(pct / 100, fill)} {pct}%"
 
 
 class Plugin(Base):
@@ -1378,7 +1384,7 @@ class Plugin(Base):
             it = g["items"][i]
             done_n = n - len(g["left"])
             gst = await self._status(chat, gst, f"📦 <b>Група №{g['id']}</b> · {done_n} з {n} готово · зараз №{i + 1}\n"
-                                     f"📦 Усього: {pbar(done_n / n)}", [[("⏹ Зупинити групу", self.cb("stop"))]])
+                                     f"📦 Уся група:\n{pbar(done_n / n, '🟪')}", [[("⏹ Зупинити групу", self.cb("stop"))]])
             g["mid"] = getattr(gst, "message_id", 0)
             self.gmsg[chat] = gst  # одне повідомлення на всю групу: статус кожного допису — в ньому ж
             self.instr[chat] = it.get("instr") or {}
@@ -2221,11 +2227,11 @@ class Plugin(Base):
             item_frac = cur.get("frac", 0.0)
             frac_post = ((cur.get("k", 1) - 1) + item_frac) / max(1, len(nums))
             if len(nums) > 1:
-                lines.append(f"🗂 Усього в дописі ({cur.get('k', 1)}/{len(nums)}): {pbar(frac_post)}")
+                lines.append(f"🗂 Усього в дописі ({cur.get('k', 1)}/{len(nums)}):\n{pbar(frac_post)}")
             g = self.gctx.get(chat)
             if g and g.get("n"):
                 done_g = g["n"] - len(g.get("left", [])) 
-                lines.append(f"📦 Уся група №{g['id']} ({done_g + 1}/{g['n']}): {pbar((done_g + frac_post) / g['n'])}")
+                lines.append(f"📦 Уся група №{g['id']} ({done_g + 1}/{g['n']}):\n{pbar((done_g + frac_post) / g['n'], '🟪')}")
             return ("\n" + "\n".join(lines)) if lines else ""
 
         def clock():
@@ -2278,7 +2284,7 @@ class Plugin(Base):
 
                 async def on_dl(done, total, speed, eta, head=head):
                     cur["frac"] = (done / total * 0.9) if total else cur.get("frac", 0.0)  # завантаження — 90% частки файлу
-                    await stage(f"{head}\n⬇️ Цей файл: {bar(done, total, speed, eta)}", has_bar=bool(total))
+                    await stage(f"{head}\n⬇️ Цей файл:\n{bar(done, total, speed, eta)}", has_bar=bool(total))
                 cur["k"], cur["frac"] = k, 0.0
                 try:
                     cur["t"] = time.time()
@@ -2361,7 +2367,7 @@ class Plugin(Base):
 
                         async def on_up(done, total, up=up):
                             cur["frac"] = 0.9 + (done / total * 0.1 if total else 0)
-                            await stage(f"{up}\n⬆️ Цей файл: {bar(done, total)}", has_bar=bool(total))
+                            await stage(f"{up}\n⬆️ Цей файл:\n{bar(done, total)}", has_bar=bool(total))
                         msg_ = await self.send_media(chat, out, cap, on_progress=on_up,
                                                      markup=None if recorded else self._url_markup([[b] for b in rel_btns]))
                         if not recorded and getattr(msg_, "message_id", None):  # 🔗 запам'ятовуємо для «попереднє …»
