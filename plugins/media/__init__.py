@@ -124,6 +124,10 @@ def pbar(frac, fill="🟦"):
     return f"{blocks(pct / 100, fill)} {pct}%"
 
 
+class SkipItem(Exception):
+    """Людина натиснула «⏭ Пропустити» — цей файл/допис пропускаємо, решта йде далі."""
+
+
 class Plugin(Base):
     id = "med"
     icon = "⬇️"
@@ -149,6 +153,8 @@ class Plugin(Base):
         self.gctx: dict[int, dict] = {}       # 📦 поточне групове завантаження чату
         self.gpend: dict[str, dict] = {}      # 📦 групи, що чекають вибору
         self.user_stop: set = set()
+        self.ctl: dict[int, dict] = {}        # ⏸ керування: pause, act (pause|skip), held — відкладені дописи групи
+        self.fetching: dict[int, asyncio.Future] = {}  # поточне завантаження файлу (щоб зупинити лише його)
         self.gmsg: dict = {}  # чат -> повідомлення-статус групи (одне на всю групу)
         self.just_done: set = set()
         self.force_now: dict[int, bool] = {}
@@ -879,6 +885,54 @@ class Plugin(Base):
             return "⬇️ Починаю", (self.live_screen(chat) if self.in_app() else None)
         if a == "st":
             return None, self.live_screen(chat)
+        if a == "pz":  # ⏸ / ▶️
+            c = self.ctl.setdefault(chat, {})
+            c["pause"] = not c.get("pause")
+            ft = self.fetching.get(chat)
+            if c["pause"] and ft and not ft.done():
+                c["act"] = "pause"
+                ft.cancel()  # поточний файл зупиняємо; після «▶️» він завантажиться наново
+            return ("⏸ Пауза — інше не зачеплено" if c["pause"] else "▶️ Продовжую"), None
+        if a == "skp":  # ⏭ лише поточний файл / допис
+            c = self.ctl.setdefault(chat, {})
+            c["pause"] = False
+            ft = self.fetching.get(chat)
+            if ft and not ft.done():
+                c["act"] = "skip"
+                ft.cancel()
+                return "⏭ Пропускаю цей — решта йде далі", None
+            return "Зараз нічого не завантажується", None
+        if a == "grq":
+            return None, self.group_queue(chat)
+        if a == "grh" and x.isdigit():  # ⏸/▶️ окремий допис групи
+            held = self.ctl.setdefault(chat, {}).setdefault("held", set())
+            i = int(x)
+            if i in held:
+                held.discard(i)
+                toast = f"▶️ №{i + 1} повернуто в чергу"
+            else:
+                held.add(i)
+                toast = f"⏸ №{i + 1} відкладено — решта качається далі"
+                g = self.gctx.get(chat)
+                ft = self.fetching.get(chat)
+                if g and g.get("i") == i and ft and not ft.done():  # саме він зараз качається — зупиняємо лише його
+                    self.ctl[chat]["act"] = "skip"
+                    self.ctl[chat]["requeue"] = i
+                    ft.cancel()
+            return toast, self.group_queue(chat)
+        if a == "grd" and x.isdigit():  # ✖️ окремий допис групи
+            g = self.gctx.get(chat)
+            i = int(x)
+            if g and i in g.get("left", []):
+                if g.get("i") == i:
+                    ft = self.fetching.get(chat)
+                    if ft and not ft.done():
+                        self.ctl.setdefault(chat, {})["act"] = "skip"
+                        ft.cancel()
+                else:
+                    g["left"].remove(i)
+                g.setdefault("cancelled", []).append(i)
+            return f"✖️ №{i + 1} скасовано — решта йде далі", self.group_queue(chat)
         if a == "snd":  # 🔁 людина погодилась повторити завантаження зі звуком
             job = self.jobs.get(chat)
             if not job or job.token != x:
@@ -1388,12 +1442,23 @@ class Plugin(Base):
         n = len(g["items"])
         gst = None
         while g.get("left"):
-            i = g["left"][0]
+            c = self.ctl.setdefault(chat, {})
+            while c.get("pause"):  # ⏸ пауза всієї групи — між дописами
+                await asyncio.sleep(1.5)
+            held = c.setdefault("held", set())
+            ready = [x for x in g["left"] if x not in held]
+            if not ready:  # лишились тільки відкладені — у «📌 Збережені», група завершується
+                for x in list(g["left"]):
+                    self.pend_keep(chat, g["items"][x]["url"], "відкладено в груповому завантаженні")
+                    g.setdefault("held_saved", []).append(x)
+                g["left"] = []
+                break
+            i = ready[0]
             g["i"] = i
             it = g["items"][i]
             done_n = n - len(g["left"])
             gst = await self._status(chat, gst, f"📦 <b>Група №{g['id']}</b> · {done_n} з {n} готово · зараз №{i + 1}\n"
-                                     f"📦 Уся група:\n{pbar(done_n / n, '🟪')}", [[("⏹ Зупинити групу", self.cb("stop"))]])
+                                     f"📦 Уся група:\n{pbar(done_n / n, '🟪')}", self.ctl_rows(chat))
             g["mid"] = getattr(gst, "message_id", 0)
             self.gmsg[chat] = gst  # одне повідомлення на всю групу: статус кожного допису — в ньому ж
             self.instr[chat] = it.get("instr") or {}
@@ -1402,7 +1467,7 @@ class Plugin(Base):
             old = self.hist.by_url(chat, it["url"])
             if old and not it.get("force"):  # ♻️ уже скачували — не дублюємо
                 g.setdefault("dups", []).append({"n": i + 1, "id": old["id"], "when": R.ts_text(old.get("ts"))})
-                g["left"].pop(0)
+                g["left"].remove(i)
                 self._active(chat, done=True)
                 continue
             try:
@@ -1423,17 +1488,25 @@ class Plugin(Base):
                     self.pend_keep(chat, it["url"], "збій: " + why[:80])
                 else:
                     self.bad_add(chat, it["url"], why)
+            if i in g.get("cancelled", []) or i in held:  # ✖️ скасували чи ⏸ відклали саме його — це не помилка
+                why = ""
             if why:
                 g.setdefault("failed", []).append({"n": i + 1, "url": it["url"], "why": re.sub(r"<[^>]+>", "", why)[:300]})
-            g["left"].pop(0)
+            if i in g["left"] and i not in held:
+                g["left"].remove(i)
             self._active(chat, done=True)  # черга збережена — після перезапуску продовжимо
         fails = [f if isinstance(f, dict) else {"n": "?", "url": "", "why": str(f)} for f in g.get("failed", [])]
-        text = f"{'✅' if not fails else '⚠️'} <b>Група №{g['id']}</b> · готово {n - len(fails)} з {n}"
+        ok_n = n - len(fails) - len(g.get("cancelled", [])) - len(g.get("held_saved", []))
+        text = f"{'✅' if not fails else '⚠️'} <b>Група №{g['id']}</b> · готово {ok_n} з {n}"
         if fails:
             text += "\n\n<b>Не вийшло:</b>"
             for f in fails:
                 text += f"\n\n№{f['n']} · 🔗 {esc(f['url'][:200])}\n❓ {esc(f['why'])}"
             text += "\n\nУсі такі посилання — у «🧯 Биті посилання» (там можна спробувати ще раз)."
+        if g.get("cancelled"):
+            text += "\n\n✖️ Скасовано: " + ", ".join(f"№{x + 1}" for x in g["cancelled"])
+        if g.get("held_saved"):
+            text += "\n⏸ Відкладені — у «📌 Збережені»: " + ", ".join(f"№{x + 1}" for x in g["held_saved"])
         dups = g.get("dups", [])
         if dups:
             text += "\n\n♻️ <b>Уже скачувались раніше</b> (повторно не завантажував):"
@@ -1446,6 +1519,7 @@ class Plugin(Base):
         await self._status(chat, gst, text[:4000], rows + [[("« Медіа", self.cb())]])
         self.gctx.pop(chat, None)
         self.gmsg.pop(chat, None)
+        self.ctl.pop(chat, None)
         self.instr.pop(chat, None)
 
     async def group_one(self, chat, url, mode):
@@ -1483,10 +1557,53 @@ class Plugin(Base):
         self.instr[chat] = instr or {}
         self.cur_url[chat] = url
         self.force_now[chat] = force
+        if not self.gctx.get(chat):
+            self.ctl[chat] = {}  # нове одиночне завантаження — без старих пауз
         self.just_done.discard(chat)
         self.live[chat] = (f"🔎 Шукаю: {esc(M.describe_source(url))}…", [])
         self._bg(chat, self.quick(chat, url))
         return None
+
+    def ctl_rows(self, chat, n_files=1):
+        """Кнопки під статусом: пауза / пропустити — лише цей файл чи допис, решта йде далі; зупинити все."""
+        c = self.ctl.get(chat) or {}
+        g = self.gctx.get(chat)
+        rows = []
+        if n_files > 1 or g:
+            rows.append([("▶️ Продовжити" if c.get("pause") else "⏸ Пауза", self.cb("pz")),
+                         ("⏭ Пропустити цей", self.cb("skp"))])
+        if g:
+            rows.append([("🗂 Черга групи: пауза й скасування окремих", self.cb("grq"))])
+            rows.append([("✖️ Скасувати групу", self.cb("stop"))])
+        else:
+            rows.append([("⏹ Зупинити", self.cb("stop"))])
+        return rows
+
+    async def _wait_resume(self, chat, stage, head=""):
+        """⏸ Пауза: показуємо, що стоїмо, і чекаємо «▶️ Продовжити» (або зупинки)."""
+        shown_once = False
+        while (self.ctl.get(chat) or {}).get("pause"):
+            if not shown_once:
+                await stage(f"⏸ <b>На паузі</b> — натисніть «▶️ Продовжити»\n{head}", force=True)
+                shown_once = True
+            await asyncio.sleep(1.5)
+
+    def group_queue(self, chat):
+        g = self.gctx.get(chat)
+        if not g:
+            return "🗂 Групового завантаження зараз немає.", [[("« Медіа", self.cb())]]
+        c = self.ctl.setdefault(chat, {})
+        held = c.setdefault("held", set())
+        lines = [f"🗂 <b>Черга групи №{g['id']}</b>",
+                 "Пауза чи скасування окремого допису не зупиняє решту: інші качаються далі. Відкладені (⏸) після решти підуть у «📌 Збережені».", ""]
+        rows = []
+        for i in g.get("left", []):
+            it = g["items"][i]
+            mark = "⬇️ зараз" if i == g.get("i") else ("⏸ відкладено" if i in held else "⏳ у черзі")
+            lines.append(f"№{i + 1} · {R.icon(M.site_name(it['url']))} {mark}\n<code>{esc(it['url'][:70])}</code>")
+            rows.append([(("▶️ №" if i in held else "⏸ №") + str(i + 1), self.cb("grh", i)), (f"✖️ №{i + 1}", self.cb("grd", i))])
+        rows.append([("« До завантаження", self.cb("st"))])
+        return "\n".join(lines)[:4000], rows
 
     def same_running(self, chat, url):
         k = R.norm_url(url)
@@ -2216,6 +2333,7 @@ class Plugin(Base):
         bot = self.host.bot()
         opts = replace(job.options)
         sent, failed, shown, bundle = [], [], set(), []
+        skipped = []
         self.got[chat] = []
         quick = status is not None
         title = job.items[nums[0] - 1].title if len(nums) == 1 else f"{len(nums)} елементів"
@@ -2261,7 +2379,7 @@ class Plugin(Base):
             if force or now - last[0] >= 3:
                 last[0] = now
                 cur["shown"] = now
-                status = await self._status(chat, status, full, stop)
+                status = await self._status(chat, status, full, self.ctl_rows(chat, len(nums)))
 
         async def ticker():  # кожні 5 с — минулий час і орієнтир, навіть коли сайт ще не віддає байтів
             while True:
@@ -2298,7 +2416,25 @@ class Plugin(Base):
                 try:
                     cur["t"] = time.time()
                     await stage(head + "\n⏳ чекаю відповідь сайту…", force=True)
-                    path, tracks, info = await M.fetch(item, job.url, opts, work, progress=on_dl)
+                    await self._wait_resume(chat, stage, head)  # ⏸ пауза — між файлами
+                    while True:  # завантаження окремою задачею: пауза чи «пропустити» зупиняють лише цей файл
+                        ft = asyncio.ensure_future(M.fetch(item, job.url, opts, work, progress=on_dl))
+                        self.fetching[chat] = ft
+                        try:
+                            path, tracks, info = await ft
+                            break
+                        except asyncio.CancelledError:
+                            if asyncio.current_task().cancelling():  # зупинили все завдання — далі не йдемо
+                                raise
+                            act = self.ctl.setdefault(chat, {}).pop("act", "")
+                            for leftover in work.iterdir():
+                                if leftover.is_file():
+                                    leftover.unlink()
+                            if act == "skip":
+                                raise SkipItem()
+                            await self._wait_resume(chat, stage, head)  # пауза: чекаємо «▶️», тоді цей файл — наново
+                        finally:
+                            self.fetching.pop(chat, None)
                     if path and (opts.mode != "video" or opts.cuts):
                         await stage(f"⚙️ Обробляю: {esc(item.title[:90])}…", force=True)
                     who, link = M.author(info)
@@ -2409,6 +2545,8 @@ class Plugin(Base):
                         failed.append(f"{n} · субтитрів мовою «{opts.subs}» немає")
                     if path is None and not desc:
                         failed.append(f"{n} · лише текст, а його вимкнено")
+                except SkipItem:
+                    skipped.append(n)
                 except JobError as exc:
                     failed.append(f"{n} · {M.explain(exc)}")
                 except asyncio.CancelledError:
@@ -2466,11 +2604,13 @@ class Plugin(Base):
             for u_ in {self.cur_url.get(chat), job.url}:
                 if u_:
                     self.bad_ok(chat, u_)
-        elif failed or not shown:  # 🧯 нічого не вийшло — у биті посилання з причиною
+        elif (failed or not shown) and not skipped:  # 🧯 нічого не вийшло — у биті посилання з причиною
             self.bad_add(chat, self.cur_url.get(chat) or job.url, "; ".join(re.sub(r"<[^>]+>", "", f) for f in failed[:3])
                          or "файлів не знайшлося")
+        if skipped:
+            failed = failed + [f"{n} · ⏭ пропущено за вашим вибором" for n in skipped] if not sent else failed
         if sent and not failed:
-            msg = "✅ Готово" + (f" · файлів: {len(sent)}" if len(sent) > 1 else "")
+            msg = "✅ Готово" + (f" · файлів: {len(sent)}" if len(sent) > 1 else "") + (f" · пропущено: {len(skipped)}" if skipped else "")
         elif sent:
             msg = f"✅ Надіслано файлів: {len(sent)}\n\n⚠️ Не вдалося:\n" + "\n".join(failed[:30])
         elif failed:
