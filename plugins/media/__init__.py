@@ -3119,30 +3119,80 @@ class Plugin(StudioUI, Base):
         artist, track, _ = job.__dict__.get("song") or self.music(job.items[0].info) or ("", "", False)
         query = f"{artist} {track}".strip()
         status = await self._status(chat, None, f"🔎 Шукаю повну пісню: {esc(query[:80])}…", [[("⏹ Зупинити", self.cb("stop"))]])
-        engines = (["ytsearch1"] if os.environ.get("MEDIA_PROXY") else []) + ["scsearch1", "ytsearch1"]
+        from urllib.parse import quote_plus
+        ytm = "https://music.youtube.com/search?q=" + quote_plus(query) + "#songs"  # 🎶 YouTube Music — саме пісні, не кліпи
+        engines = (["ytsearch1"] if os.environ.get("MEDIA_PROXY") else []) + ["scsearch1", ytm, "ytsearch1"]
         last = ""
-        for eng in dict.fromkeys(engines):
+        engines = list(dict.fromkeys(engines))
+
+        async def probe(eng):  # шукаємо в усіх сервісах одночасно — де знайдеться, звідти й беремо
+            with tempfile.TemporaryDirectory(prefix="orion-song-") as work:
+                return await M.video_probe(eng if eng.startswith("http") else f"{eng}:{query}", Path(work))
+        await self._status(chat, status, f"🔎 Шукаю одночасно: SoundCloud, YouTube Music, YouTube, Audius — {esc(query[:60])}…",
+                           [[("⏹ Зупинити", self.cb("stop"))]])
+        found = await asyncio.gather(*(asyncio.wait_for(probe(e), 120) for e in engines), return_exceptions=True)
+        for eng, items in zip(engines, found):  # за пріоритетом: SoundCloud → YouTube Music → YouTube
+            if isinstance(items, Exception) or not items:
+                if isinstance(items, Exception):
+                    last = str(items)[:200]
+                continue
             try:
-                with tempfile.TemporaryDirectory(prefix="orion-song-") as work:
-                    items = await M.video_probe(f"{eng}:{query}", Path(work))
-                if items:
-                    real = str(items[0].url) if str(items[0].url).startswith("http") else str((items[0].info or {}).get("webpage_url") or "")
-                    if not real.startswith("http"):  # пошук повертає лише ідентифікатор — шукаємо далі
-                        raise JobError("пошук не дав посилання на пісню")
-                    song = Job(secrets.token_hex(4), real, items[:1])  # справжня адреса пісні, а не «scsearch1:…» (звідси була помилка)
-                    song.options.mode = "audio"
-                    song.options.post = False
-                    song.__dict__["src"] = "SoundCloud" if eng.startswith("sc") else "YouTube"
-                    if not keep:
-                        self.jobs[chat] = song
-                    await self.download(chat, song, [1], status=status)
+                real = str(items[0].url) if str(items[0].url).startswith("http") else str((items[0].info or {}).get("webpage_url") or "")
+                if not real.startswith("http"):
+                    continue
+                song = Job(secrets.token_hex(4), real, items[:1])  # справжня адреса пісні, а не «scsearch1:…»
+                song.options.mode = "audio"
+                song.options.post = False
+                song.__dict__["src"] = "SoundCloud" if eng.startswith("sc") else "YouTube Music" if "music.youtube" in eng else "YouTube"
+                if not keep:
+                    self.jobs[chat] = song
+                await self.download(chat, song, [1], status=status)
+                if song.__dict__.get("sent_n"):
                     return
+                last = f"{song.__dict__['src']}: знайшов, але скачати не вдалося"
+                status = await self._status(chat, None, f"🔁 {song.__dict__['src']} не віддав пісню — пробую наступне джерело…",
+                                            [[("⏹ Зупинити", self.cb("stop"))]])
             except JobError as exc:
                 last = str(exc)
+        if await self.song_audius(chat, artist, track, status):  # 🎧 Audius — відкрита музична платформа, повні треки без ключа
+            return
         if await self.song_preview(chat, artist, track, status):  # 🎵 хоча б фрагмент цієї пісні
             return
-        await self._status(chat, status, "⚠️ Не знайшов ні повної пісні (SoundCloud/YouTube), ні її фрагмента (Apple Music, Deezer)."
+        await self._status(chat, status, "⚠️ Не знайшов ні повної пісні (SoundCloud, YouTube Music, YouTube, Audius), ні її фрагмента (Apple Music, Deezer)."
                            + (f"\n\n{esc(last[:300])}" if last else ""), [[("« Медіа", self.cb())]])
+
+    async def song_audius(self, chat, artist, track, status=None):
+        """🎧 Повна пісня з Audius (відкрита музична платформа, безкоштовний API без ключа) — якщо сам виконавець її там виклав."""
+        import httpx
+        q = f"{artist} {track}".strip()
+        if not q:
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=25, follow_redirects=True) as c:
+                r = await c.get("https://api.audius.co/v1/tracks/search", params={"query": q, "app_name": "OrionAI"})
+                hit = None
+                for it in (r.json().get("data") or []) if r.status_code == 200 else []:
+                    name = (it.get("title") or "").lower()
+                    who = ((it.get("user") or {}).get("name") or "").lower()
+                    if track.lower().split("(")[0].strip()[:15] in name and (not artist or artist.lower()[:6] in who):
+                        hit = it
+                        break
+                if not hit:
+                    return False
+                data = (await c.get(f"https://api.audius.co/v1/tracks/{hit['id']}/stream", params={"app_name": "OrionAI"})).content
+        except Exception:  # noqa: BLE001
+            log.info("audius не вдався", exc_info=True)
+            return False
+        if len(data) < 100_000:
+            return False
+        a, t = (hit.get("user") or {}).get("name") or artist, hit.get("title") or track
+        with tempfile.TemporaryDirectory(prefix="orion-aud-") as work:
+            out = Path(work) / (safe_name(f"{a} — {t}", "song")[:90] + ".mp3")
+            out.write_bytes(data)
+            await self.send_media(chat, out, esc(f"🎧 {a} — {t}\nПовна пісня з Audius (виклав сам виконавець)."))
+        if status:
+            await self._status(chat, status, "🎧 Знайшов повну пісню на Audius — надіслав.", [[("« Медіа", self.cb())]])
+        return True
 
     async def song_preview(self, chat, artist, track, status=None):
         """🎵 Офіційний фрагмент пісні (30 с) з Apple Music (iTunes Search) або Deezer — без ключів; коли повної немає."""
@@ -3638,6 +3688,7 @@ class Plugin(StudioUI, Base):
             msg = "📝 Тут лише текст допису — надіслав його вище."
         else:
             msg = "⚠️ Файлів не знайшлося. Спробуйте інший формат або якість."
+        job.__dict__["sent_n"] = len(sent)  # для запасних джерел: чи щось реально надіслано
         rows = [[("⚙️ Доналаштувати й завантажити ще" if quick else "📋 До набору", self.cb("opt" if quick else "menu", job.token))], [("« Медіа", self.cb())]]
         if sent and quick:  # 🎬 студія: безпечна версія, субтитри, короткі ролики — для відео з допису
             try:
