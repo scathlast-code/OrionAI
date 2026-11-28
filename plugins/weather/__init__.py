@@ -536,6 +536,9 @@ class WeatherPlugin(Plugin):
             for uid in (only if only is not None else self.users()):
                 if not self.morning_on(uid) or not notify.wanted(uid, "morning"):
                     continue
+                news = self.host.extra.get("plugin", lambda pid: None)("news")
+                if news and hasattr(news, "morning_digest_for") and news.morning_digest_for(uid):
+                    continue  # погода вже є в повному ранковому зведенні «Сьогодні» — без другого повідомлення
                 try:
                     await self.host.notify(uid, await self.morning_text(uid),
                                            [[("📜 Прикмети й звичаї дня", self.cb("lore")), ("🌤 Погода", self.cb())]] + src_rows())

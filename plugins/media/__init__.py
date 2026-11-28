@@ -62,7 +62,9 @@ def is_social(url):
     return True
 
 
-QUICK_MAX = 10  # стільки елементів (альбом, карусель) завантажуємо одразу, без меню
+QUICK_MAX = 10
+ALBUM_EXT = (".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mov", ".m4v")
+ALBUM_MAX = 49 * 1024 * 1024  # ліміт Bot API на файл в альбомі  # стільки елементів (альбом, карусель) завантажуємо одразу, без меню
 URL_ONLY = re.compile(r"^\s*(https?://\S+)\s*$")
 
 
@@ -2225,6 +2227,10 @@ class Plugin(Base):
         tick = self.ticks[chat] = asyncio.get_running_loop().create_task(ticker())
         with tempfile.TemporaryDirectory(prefix="orion-media-") as root:
             root = Path(root)
+            # 🖼 кілька фото/відео з ОДНІЄЇ публікації — надсилаємо однією публікацією (альбомом), а не окремими
+            album_mode = len(nums) > 1 and opts.target != "zip"
+            album, album_hist = [], None
+            last_media = None  # (повідомлення, кнопки автора, запис) — сюди ж додамо й меню, щоб усе було одним дописом
             for k, n in enumerate(nums, 1):
                 item = job.items[n - 1]
                 work = root / f"{n:03d}"
@@ -2278,6 +2284,9 @@ class Plugin(Base):
                         if prev and self.mh_link(prev["id"]):
                             gl += f' · <a href="{esc(self.mh_link(prev["id"]))}">попередній з групи</a>'
                         rel_line = gl + rel_line
+                    if (info or {}).get("_no_audio") and opts.mode == "video":  # 🔇 чесно кажемо, що звуку немає й чому
+                        na = f"\n🔇 Звук не скачався: {(info or {})['_no_audio']}"
+                        rel_line, rel_len = esc(na) + rel_line, rel_len + len(na)
                     tail = (f"\n\n👤 {who_html}" if who else "\n") + (f" · {esc(site)}" if site else "") \
                         + (f' · <a href="{esc(job.url)}">🔗 Допис</a>' if str(job.url).startswith("http") else "") + song_html + rel_line
                     tail_len = len(f"\n\n👤 {who} · {site} · 🔗 Допис") + len(re.sub(r"<[^>]+>|&\w+;", "", song_html)) + rel_len
@@ -2300,6 +2309,16 @@ class Plugin(Base):
                             bundle.append(out)
                             continue
                         size_ = out.stat().st_size
+                        if album_mode and out.suffix.lower() in ALBUM_EXT and size_ <= ALBUM_MAX:
+                            album.append({"out": out, "cap": cap})
+                            if not recorded and album_hist is None:
+                                album_hist = dict(author=R.norm_author(who), who=who, alink=link, site=site, url=str(job.url),
+                                                  src_url=self.cur_url.get(chat) or "", title=(desc or item.title or "")[:80],
+                                                  topics=rel_t, geos=rel_g, langs=rel_l, first=rel_f, geotag=geotag,
+                                                  **({"group": gx["id"], "gi": gx["i"]} if gx else {}),
+                                                  **({"notag": True} if rel is None else {}), _btns=rel_btns)
+                            recorded = True
+                            continue
                         up = f"⬆️ Надсилаю {esc(out.name[:60])} ({mb(size_)})"
                         await stage(up + "…", force=True)
 
@@ -2313,6 +2332,9 @@ class Plugin(Base):
                                           url=str(job.url), src_url=self.cur_url.get(chat) or "", size=size_, title=(desc or item.title or "")[:80], topics=rel_t, geos=rel_g, langs=rel_l, first=rel_f, geotag=geotag,
                                           **({"group": gx["id"], "gi": gx["i"]} if gx else {}), **({"notag": True} if rel is None else {}))
                             await self._cat_button(chat, msg_.message_id, rid_, rel_btns)
+                            last_media = (msg_.message_id, rel_btns, rid_)
+                        elif getattr(msg_, "message_id", None) and last_media is None:
+                            last_media = (msg_.message_id, [], None)
                         sent.append(out.name)
                         kept = self.keep(out)
                         if kept:
@@ -2343,6 +2365,25 @@ class Plugin(Base):
                     code = getattr(getattr(exc, "response", None), "status_code", None)
                     failed.append(f"{n} · " + (f"сайт не віддав файл (HTTP {code}) — спробуйте ще раз або інший формат"
                                                if code else esc(type(exc).__name__)))
+            if album:
+                await stage(f"⬆️ Надсилаю однією публікацією: {len(album)} файл(ів)…", force=True)
+                try:
+                    msgs = await self.send_album(chat, album)
+                    sent += [a["out"].name for a in album]
+                    for a in album:
+                        kept = self.keep(a["out"])
+                        if kept:
+                            self.got[chat].append(kept)
+                    if msgs and album_hist is not None:
+                        btns = album_hist.pop("_btns", [])
+                        size_all = sum(a["out"].stat().st_size for a in album)
+                        rid_ = self.hist.add(chat, msg=msgs[0].message_id, size=size_all, count=len(album), **album_hist)
+                        last_media = ("album", btns, rid_, msgs[0].message_id, len(album), size_all)
+                except Exception:  # noqa: BLE001 — альбом не пройшов: ті самі файли окремо, щоб нічого не загубити
+                    log.exception("album send failed — надсилаю окремо")
+                    for a in album:
+                        await self.send_media(chat, a["out"], a["cap"])
+                        sent.append(a["out"].name)
             tick.cancel()
             if sent:
                 self.note_time(site, time.time() - t0, len(nums))
@@ -2383,6 +2424,14 @@ class Plugin(Base):
         else:
             msg = "⚠️ Файлів не знайшлося. Спробуйте інший формат або якість."
         rows = [[("⚙️ Доналаштувати й завантажити ще" if quick else "📋 До набору", self.cb("opt" if quick else "menu", job.token))], [("« Медіа", self.cb())]]
+        if sent and not failed and last_media and await self._merge_menu(chat, last_media, rows):
+            try:  # усе в одному дописі: файл + кнопки автора + категорії + меню — окремого «✅ Готово» не треба
+                if status:
+                    await bot.delete_message(chat, status.message_id)
+            except Exception:  # noqa: BLE001
+                pass
+            self._active(chat, done=True)
+            return
         if quick and (sent or shown):
             try:  # статус більше не потрібен — лишаємо тільки файли й одну кнопку
                 await bot.delete_message(chat, status.message_id)
@@ -2455,6 +2504,25 @@ class Plugin(Base):
         body = lines[0] + "\n<blockquote expandable>" + "\n".join(lines[2:]) + "</blockquote>" if len(res) > 8 else "\n".join(lines)
         return body[:4000], [[("🔎 Шукати ще", self.cb("fnd"))], [("« Архів", self.cb("arc"))]]
 
+    async def _merge_menu(self, chat, last, rows):
+        """Кнопки меню — у сам допис із файлом (одним повідомленням). Альбом кнопок не має — тоді одне повідомлення-підпис до нього."""
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        bot = self.host.bot()
+        kb = [[InlineKeyboardButton(t, url=u)] for t, u in last[1]]
+        if last[2]:
+            kb.append([InlineKeyboardButton("🏷 Категорії", callback_data=self.cb("ted", last[2]))])
+        kb += [[InlineKeyboardButton(t, callback_data=d) for t, d in row] for row in rows]
+        try:
+            if last[0] == "album":
+                await bot.send_message(chat, f"✅ Публікація: {last[4]} файл(ів) · {mb(last[5])}", reply_markup=InlineKeyboardMarkup(kb),
+                                       reply_to_message_id=last[3], disable_notification=True)
+            else:
+                await bot.edit_message_reply_markup(chat_id=chat, message_id=last[0], reply_markup=InlineKeyboardMarkup(kb))
+            return True
+        except Exception:  # noqa: BLE001
+            log.info("не вдалося додати меню до допису", exc_info=True)
+            return False
+
     def ted_screen(self, chat, rid):
         e = self.hist.get(chat, rid)
         if not e:
@@ -2502,6 +2570,44 @@ class Plugin(Base):
             g_k = [k for k in g_k if not (rx and rx.search(self.hist.name("g", k)))]
         self.hist.update(chat, rid, topics=t_k, geos=g_k)
         return "✅ Категорії оновлено"
+
+    async def send_album(self, chat, album):
+        """Фото й відео однієї публікації — альбомом (до 10 у повідомленні), підпис — під першим."""
+        from telegram import InputMediaPhoto, InputMediaVideo
+        bot = self.host.bot()
+        out_msgs = []
+        for start in range(0, len(album), 10):
+            chunk, media, handles = album[start:start + 10], [], []
+            try:
+                for j, a in enumerate(chunk):
+                    path = a["out"]
+                    fh = path.open("rb")
+                    handles.append(fh)
+                    cap = a["cap"] if (start == 0 and j == 0) else None
+                    if path.suffix.lower() in (".mp4", ".mov", ".m4v"):
+                        meta = {}
+                        try:
+                            data = await M.probe_media(path)
+                            v = next((st for st in data.get("streams", []) if st.get("codec_type") == "video"), {})
+                            meta = {"width": int(v.get("width") or 0) or None, "height": int(v.get("height") or 0) or None,
+                                    "duration": int(float((data.get("format") or {}).get("duration") or 0)) or None}
+                        except Exception:  # noqa: BLE001
+                            pass
+                        thumb = await M.make_thumb(path, path.parent)
+                        media.append(InputMediaVideo(fh, caption=cap, parse_mode="HTML" if cap else None, supports_streaming=True,
+                                                     filename=path.name, thumbnail=thumb.read_bytes() if thumb else None, **meta))
+                    else:
+                        media.append(InputMediaPhoto(fh, caption=cap, parse_mode="HTML" if cap else None))
+                if len(media) == 1:  # один файл у хвості — звичайним повідомленням
+                    m = await self.send_media(chat, chunk[0]["out"], chunk[0]["cap"] if start == 0 else "")
+                    out_msgs.append(m)
+                else:
+                    res = await bot.send_media_group(chat, media, read_timeout=300, write_timeout=300)
+                    out_msgs += list(res) if isinstance(res, (list, tuple)) else []
+            finally:
+                for fh in handles:
+                    fh.close()
+        return out_msgs
 
     def _url_markup(self, rows):
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
