@@ -6041,28 +6041,6 @@ def storage_warning():
             f"<code>{folder}</code>. Докладно: docs/20-railway.md")
 
 
-def scr_errlog(chat_id, src=""):
-    """🧯 Журнал помилок: останні збої з джерелом (людина / сторож / журнал), скільки разів і де."""
-    import errlog as _el
-    rows = _el.recent(25, source=src or None)
-    tabs = [("● " if (src or "") == k else "") + t for k, t in (("", "Усі"), ("людина", "🙋 Мої"), ("сторож", "🩺 Сервіси"), ("журнал", "🐛 Код"))]
-    keys = ["", "людина", "сторож", "журнал"]
-    lines = ["🧯 <b>Журнал помилок</b>", "",
-             "Усе, що зламалось: 🙋 що ви написали боту («баг …», скриншот із підписом), 🩺 збої сервісів, 🐛 помилки коду. "
-             "Коли питаєте ШІ бота про помилки, він бачить цей журнал; файл можна надіслати будь-якому ШІ.", ""]
-    if not rows:
-        lines.append("Записів немає — усе працює.")
-    icon = {"людина": "🙋", "сторож": "🩺", "журнал": "🐛"}
-    for r in rows:
-        first = r["text"].splitlines()[0][:150]
-        lines.append(f"{icon.get(r['source'], '•')} {_el.fmt_time(r['last'])}" + (f" ×{r['n']}" if r.get("n", 1) > 1 else "")
-                     + (f" · {esc(r['where'][:30])}" if r.get("where") else "") + f"\n   {esc(first)}")
-    rows_kb = [[(t, f"m:errlog:{k}" if k else "m:errlog") for t, k in zip(tabs, keys)],
-               [("📄 Файл для ШІ", "m:errlog:f")] + ([("🧹 Очистити", "m:errlog:x")] if is_admin_id(chat_id) else []),
-               [("⬅️", "m:hub:diag"), HOME]]
-    return "\n".join(lines)[:4000], rows_kb
-
-
 def diag_collect(chat_id):
     """Збирає все для діагностики: що працює, що ні, цифри, поради, суперечності, що гармонійно."""
     ok, bad, tips, conflicts, good = [], [], [], [], []
@@ -8602,7 +8580,7 @@ HUBS = {
     ]),
     "diag": ("🖥 Сервер", "Стан бота, режим роботи сервера, модулі, журнал і корисні посилання.", [
         ("🩺 Стан", "m:diag", 6, "open"),
-        ("🧯 Журнал помилок", "m:errlog", 3, "open"),
+        ("🐞 Помилки й ідеї", "m:imp", 3, "open"),
         ("🔌 Модулі (плагіни)", "m:pl", 3, "open"),
         ("⚡ Режим роботи", "m:rm", 2, "all"),
         ("📒 Журнал запитів", "m:jl", 1, "open"),
@@ -8611,7 +8589,7 @@ HUBS = {
     "help": ("❓ Допомога", "Довідка, безпечна пісочниця й список того, що покращити.", [
         ("📖 Довідка: усі теми з прикладами", "help:main", 0, "open"),
         ("🧪 Пісочниця", "m:sbx", 2, "all"),
-        ("💡 Покращити", "m:imp", 2, "all"),
+        ("🐞 Помилки й ідеї", "m:imp", 2, "all"),
     ]),
 }
 HUB_BUILDING = contextvars.ContextVar("hub_building", default=False)
@@ -8880,26 +8858,44 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         elif a == "impf":
             if q:
                 await q.answer()
-            await update.effective_chat.send_document(InputFile(io.BytesIO(improve.export_md()), filename="Pokrashchyty.md"),
-                                                      caption="💡 Покращити — список для читання")
+            import errlog as _el
+            await update.effective_chat.send_document(InputFile(io.BytesIO(improve.export_md() + b"\n\n---\n\n" + _el.export_md()),
+                                                                filename="orion-pomylky-i-idei.md"),
+                                                      caption="📄 Файл для ШІ: ваші позначки 🐞/💡 і журнал помилок (сервіси й код) за 14 днів")
             return await update.effective_chat.send_document(InputFile(io.BytesIO(improve.export_csv()), filename="Pokrashchyty.csv"),
                                                              caption="💡 Покращити — таблиця для Excel")
-        flt = arg if a == "imp" and arg in ("new", "done", "no") else "new"
+        flt = arg if a == "imp" and arg in ("new", "done", "no", "svc", "code") else "new"
         c = improve.counts()
-        lines = ["💡 <b>Покращити</b> — помилки, недоробки й ідеї, позначені 💡", "",
-                 f"🆕 нових: {c.get('new', 0)} · ✅ зроблено: {c.get('done', 0)} · ❌ відхилено: {c.get('no', 0)}", "",
-                 "Позначити: 💡 у куті будь-якого екрана · відповідь на повідомлення бота текстом із 💡 · /improve текст\n"
-                 "🐞 Помилка — «баг …» або «🐞 …»; 💡 побажання — «ідея …» чи «побажання …»; можна й разом: «баг … і побажання …». "
-                 "Можна надіслати голосове чи коротке відео з таким підписом (або одразу після позначки) — бот розшифрує. Пишіть з того місця, де це бачите, "
-                 "або надішліть скриншот із таким підписом; у застосунку — плаваюча кнопка 🐞.", ""]
-        rows = [[(("● " if flt == k else "") + t, f"m:imp:{k}") for k, t in (("new", "🆕 Нові"), ("done", "✅ Зроблені"), ("no", "❌ Відхилені"))]]
-        for m in improve.items(flt, limit=6):
-            lines.append(esc(improve.describe(m)) + "\n")
-            rows.append([(f"✅ #{m['id']}", f"m:impst:done:{m['id']}"), (f"❌ #{m['id']}", f"m:impst:no:{m['id']}"), (f"🗑 #{m['id']}", f"m:impst:del:{m['id']}")]
-                        + ([(f"🖼 #{m['id']}", f"m:impimg:{m['id']}")] if m.get("image") else []))
-        rows.append([("📄 Файл «Покращити»", "m:impf"), ("🧹 Прибрати вирішене", "m:impx")])
-        rows.append([(("💡 на екранах: так" if prefs(chat_id).get("improve_btn", True) else "💡 на екранах: ні"), "m:imptog")])
-        screen = ("\n".join(lines)[:4000], rows)
+        import errlog as _el
+        n_svc, n_code = len(_el.recent(500, source="сторож", since=time.time() - 7 * 86400)), len(_el.recent(500, source="журнал", since=time.time() - 7 * 86400))
+        tabs = [[(("● " if flt == k else "") + t, f"m:imp:{k}") for k, t in (("new", f"🆕 Мої · {c.get('new', 0)}"), ("done", "✅ Зроблені"), ("no", "❌ Відхилені"))],
+                [(("● " if flt == k else "") + t, f"m:imp:{k}") for k, t in (("svc", f"🩺 Збої сервісів · {n_svc}"), ("code", f"🐛 Помилки коду · {n_code}"))]]
+        if flt in ("svc", "code"):  # 🧯 те, що бот зафіксував сам (журнал помилок), — у тому ж розділі, що й ваші позначки
+            rows_ = _el.recent(20, source="сторож" if flt == "svc" else "журнал")
+            lines = ["🐞 <b>Помилки й ідеї</b> · " + ("🩺 збої сервісів" if flt == "svc" else "🐛 помилки коду"), "",
+                     "Це бот фіксує сам. Разом із вашими позначками це бачить ШІ бота, коли ви питаєте про помилки, і «📄 Файл для ШІ».", ""]
+            if not rows_:
+                lines.append("За останній час — нічого. ✅")
+            for r in rows_:
+                lines.append(f"• {_el.fmt_time(r['last'])}" + (f" ×{r['n']}" if r.get("n", 1) > 1 else "")
+                             + (f" · {esc(r['where'][:30])}" if r.get("where") else "") + f"\n   {esc(r['text'].splitlines()[0][:160])}")
+            rows = tabs + [[("📄 Файл для ШІ", "m:impf")] + ([("🧹 Очистити журнал", "m:errlog:x")] if is_admin_id(chat_id) else [])]
+            screen = ("\n".join(lines)[:4000], rows)
+        else:
+            lines = ["🐞 <b>Помилки й ідеї</b> — ваші позначки 🐞/💡, а також збої, які бот фіксує сам (🩺, 🐛)", "",
+                     f"🆕 нових: {c.get('new', 0)} · ✅ зроблено: {c.get('done', 0)} · ❌ відхилено: {c.get('no', 0)}", "",
+                     "Позначити: 💡 у куті будь-якого екрана · відповідь на повідомлення бота текстом із 💡 · /improve текст\n"
+                     "🐞 Помилка — «баг …» або «🐞 …»; 💡 побажання — «ідея …» чи «побажання …»; можна й разом: «баг … і побажання …». "
+                     "Можна надіслати голосове чи коротке відео з таким підписом (або одразу після позначки) — бот розшифрує. Пишіть з того місця, де це бачите, "
+                     "або надішліть скриншот із таким підписом; у застосунку — плаваюча кнопка 🐞.", ""]
+            rows = list(tabs)
+            for m in improve.items(flt, limit=6):
+                lines.append(esc(improve.describe(m)) + "\n")
+                rows.append([(f"✅ #{m['id']}", f"m:impst:done:{m['id']}"), (f"❌ #{m['id']}", f"m:impst:no:{m['id']}"), (f"🗑 #{m['id']}", f"m:impst:del:{m['id']}")]
+                            + ([(f"🖼 #{m['id']}", f"m:impimg:{m['id']}")] if m.get("image") else []))
+            rows.append([("📄 Файл для ШІ", "m:impf"), ("🧹 Прибрати вирішене", "m:impx")])
+            rows.append([(("💡 на екранах: так" if prefs(chat_id).get("improve_btn", True) else "💡 на екранах: ні"), "m:imptog")])
+            screen = ("\n".join(lines)[:4000], rows)
     elif a == "sbx":
         import sandbox
         app = env("PUBLIC_URL", "").rstrip("/")
@@ -10159,7 +10155,7 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
             await update.effective_chat.send_document(InputFile(io.BytesIO(_el.export_md()), filename="orion-errlog.md"),
                                                       caption="🧯 Журнал помилок за 14 днів — можна надіслати будь-якому ШІ, щоб знайшов і виправив")
             return
-        screen = scr_errlog(chat_id, arg or "")
+        return await route(update, ctx, "m:imp:svc", edit=edit, record=record)
     elif a == "diag":
         screen = scr_diag(chat_id, arg or "sum")
     elif a == "fr":
