@@ -5,7 +5,8 @@
 🎙 Інтерв'ю: текст із часовими мітками, головні цитати (дослівно з розшифровки) і чернетка новини в Новинарні.
 🕵️ Фото: дані з файлу (коли й чим знято, де, чи редагувалося), чи вже траплялося в нашій медіатеці, і де шукати старіші копії.
 🗃 Медіатека: кожне фото, використане в картках, — з автором, ліцензією, джерелом і новиною, де воно вже було.
-Telegram дає ботам файли до 20 МБ; відео довше — обріжте або стисніть перед надсиланням."""
+Звичайний шлях Telegram дає ботам файли до 20 МБ; більші (до 2 ГБ) бот забирає напряму через MTProto — той самий
+механізм, яким 📥 Медіа надсилає великі файли (потрібні TELEGRAM_API_ID і TELEGRAM_API_HASH)."""
 from __future__ import annotations
 
 import asyncio
@@ -22,7 +23,8 @@ from plugins import esc
 
 log = logging.getLogger("orion.newsroom.tools")
 BRAND = Path(__file__).with_name("brand")
-MAX_TG = 20 * 1024 * 1024
+MAX_TG = 20 * 1024 * 1024       # звичайний шлях Bot API
+MAX_BIG = 2000 * 1024 * 1024    # через MTProto (як у 📥 Медіа)
 
 
 def ts(sec, srt=False):
@@ -212,7 +214,7 @@ class ToolsUI:
                 "🔴 <b>Онлайн-трансляція</b> — один допис у каналі, що оновлюється.\n"
                 "📆 <b>Рік тому ми писали</b> · 📬 <b>Тижнева розсилка</b> · 🧾 <b>Журнал виправлень</b>\n\n"
                 "SEO для сайту, англійська версія, опитування й оновлення опублікованого — під кожною новиною в «⋯ Ще».\n"
-                "Файли — до 20 МБ (обмеження Telegram для ботів).")
+                "Файли — до 2 ГБ (понад 20 МБ бот забирає напряму, трохи довше).")
         rows = [[("🎬 Відео для Reels", self.cb("tv")), ("🎙 Інтерв'ю", self.cb("ti"))],
                 [("🕵️ Перевірити фото", self.cb("tp")), ("🗃 Медіатека", self.cb("tm"))],
                 [("🔴 Онлайн-трансляція", self.cb("lv")), ("🧾 Журнал виправлень", self.cb("crl"))],
@@ -222,7 +224,7 @@ class ToolsUI:
 
     def video_screen(self):
         c = self.store.get("tv_cfg") or {"fit": "blur", "subs": True}
-        return ("🎬 <b>Відео для Reels, Shorts, TikTok</b>\n\nНадішліть відео (до 20 МБ) — бот зробить вертикальне 1080×1920"
+        return ("🎬 <b>Відео для Reels, Shorts, TikTok</b>\n\nНадішліть відео (до 2 ГБ) — бот зробить вертикальне 1080×1920"
                 + (" з розмитим тлом (нічого не обрізається)" if c["fit"] == "blur" else " з обрізкою по центру")
                 + (" і субтитрами українською (шрифт Lora; окремо — файл .srt)" if c["subs"] else "") + ".\n\n"
                 "Щоб вирізати фрагмент — у підписі до відео напишіть час, напр. <code>0:10-0:45</code>.",
@@ -246,7 +248,7 @@ class ToolsUI:
             return None, self.video_screen()
         if a == "tva":
             self.tool_arm[chat] = ("video", 0)
-            return None, ("🎬 Надішліть відео одним повідомленням (до 20 МБ). Фрагмент — у підписі: <code>0:10-0:45</code>.",
+            return None, ("🎬 Надішліть відео одним повідомленням (до 2 ГБ). Фрагмент — у підписі: <code>0:10-0:45</code>.",
                           [[("✖️ Скасувати", self.cb("tv"))]])
         if a == "ti":
             self.tool_arm[chat] = ("interview", 0)
@@ -289,18 +291,32 @@ class ToolsUI:
         if not att:
             await msg.reply_text("Потрібен файл. Натисніть кнопку ще раз і надішліть його.")
             return True
-        if (getattr(att, "file_size", 0) or 0) > MAX_TG:
-            await msg.reply_text("⚠️ Файл більший за 20 МБ — Telegram не дає ботам такі файли. Стисніть або обріжте його.")
-            return True
-        data = bytes(await (await att.get_file()).download_as_bytearray())
+        size = getattr(att, "file_size", 0) or 0
+        if size > MAX_TG:  # більше 20 МБ — напряму через MTProto (до 2 ГБ), як великі файли в 📥 Медіа
+            big = getattr(self.host.extra.get("plugin", lambda pid: None)("med"), "big", None)
+            if size > MAX_BIG or not big or not big.ready():
+                await msg.reply_text("⚠️ Файл більший за " + ("2 ГБ" if size > MAX_BIG else "20 МБ") + " — "
+                                     + ("це межа Telegram." if size > MAX_BIG else "для великих файлів потрібні TELEGRAM_API_ID і TELEGRAM_API_HASH у Railway."))
+                return True
+            await msg.reply_text(f"📥 Великий файл ({size // (1024 * 1024)} МБ) — забираю напряму, це може зайняти хвилину-дві…")
+            try:  # великий файл лишається на диску (у пам'ять не читаємо) — обробка бере його звідти й прибирає за собою
+                keep = Path(tempfile.mkdtemp(prefix="orion-tool-"))
+                src_path = await big.download(chat, msg.message_id, keep / ("in" + (Path(getattr(att, "file_name", "") or "").suffix or ".bin")))
+            except Exception as exc:  # noqa: BLE001
+                await msg.reply_text(f"⚠️ Не вдалося забрати файл: {str(exc)[:200]}")
+                return True
+            data = src_path.read_bytes() if kind == "photo" else b""
+        else:
+            src_path = None
+            data = bytes(await (await att.get_file()).download_as_bytearray())
         name = getattr(att, "file_name", None) or {"video": "video.mp4", "interview": "audio.mp3", "photo": "photo.jpg"}[kind]
         if kind == "photo":
             await self.photo_check(chat, data, is_file=bool(msg.document))
         elif kind == "video":
-            self._bg(self.video_job(chat, data, name, (msg.caption or "").strip()))
+            self._bg(self.video_job(chat, data, name, (msg.caption or "").strip(), src_path))
             await msg.reply_text("🎬 Обробляю відео — це кілька хвилин. Результат прийде окремим повідомленням.")
         else:
-            self._bg(self.interview_job(chat, data, name))
+            self._bg(self.interview_job(chat, data, name, src_path))
             await msg.reply_text("🎙 Розшифровую — це до кількох хвилин. Результат прийде окремим повідомленням.")
         return True
 
@@ -328,14 +344,17 @@ class ToolsUI:
         await self.host.notify(chat, "\n".join(L)[:4000], [[("🗃 Медіатека", self.cb("tm")), ("« Інструменти", self.cb("tl"))]])
         return nid
 
-    async def video_job(self, chat, data, name, caption):
+    async def video_job(self, chat, data, name, caption, src_path=None):
         c = self.store.get("tv_cfg") or {"fit": "blur", "subs": True}
         span = parse_span(caption)
         bot = self.host.bot()
         try:
             with tempfile.TemporaryDirectory() as tmp:
-                src = Path(tmp) / ("in" + (Path(name).suffix or ".mp4"))
-                src.write_bytes(data)
+                if src_path:
+                    src = Path(src_path)
+                else:
+                    src = Path(tmp) / ("in" + (Path(name).suffix or ".mp4"))
+                    src.write_bytes(data)
                 cut = ["-ss", str(span[0]), "-to", str(span[1])] if span else []
                 srt_text = ""
                 vf = VERT_BLUR if c["fit"] == "blur" else VERT_CROP
@@ -353,9 +372,15 @@ class ToolsUI:
                 await ffmpeg(*cut, "-i", str(src), *fargs, "-c:v", "libx264", "-preset", "veryfast", "-crf", "24", "-pix_fmt", "yuv420p",
                              "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-r", "30", str(out))
                 size = out.stat().st_size
-                if size > 49 * 1024 * 1024:
-                    raise RuntimeError("результат більший за 50 МБ — оберіть коротший фрагмент (у підписі: 0:10-0:45)")
                 from telegram import InputFile
+                if size > 49 * 1024 * 1024:  # більше 50 МБ — теж напряму через MTProto
+                    big = getattr(self.host.extra.get("plugin", lambda pid: None)("med"), "big", None)
+                    if not big or not big.ready():
+                        raise RuntimeError("результат більший за 50 МБ — оберіть коротший фрагмент (у підписі: 0:10-0:45)")
+                    await big.send(chat, out, caption="🎬 Вертикальне відео 1080×1920", video={"width": 1080, "height": 1920})
+                    if srt_text:
+                        await bot.send_document(chat, InputFile(srt_text.encode("utf-8"), filename="subtitles.srt"), caption="💬 Субтитри (.srt)")
+                    return
                 cap = "🎬 Вертикальне відео 1080×1920" + (f" · фрагмент {ts(span[0])}–{ts(span[1])}" if span else "") + \
                       (" · із субтитрами" if srt_text else (" · без субтитрів (мовлення не розпізнано)" if c["subs"] else ""))
                 await bot.send_video(chat, InputFile(out.read_bytes(), filename="reels_1080x1920.mp4"), caption=cap,
@@ -366,22 +391,37 @@ class ToolsUI:
         except Exception as exc:  # noqa: BLE001
             log.info("video job failed", exc_info=True)
             await self.host.notify(chat, f"⚠️ Відео не вдалося обробити: {esc(str(exc))[:300]}", [[("🎬 Ще раз", self.cb("tv"))]])
+        finally:
+            if src_path:
+                shutil.rmtree(Path(src_path).parent, ignore_errors=True)
 
-    async def interview_job(self, chat, data, name):
+    async def interview_job(self, chat, data, name, src_path=None):
         import media
         try:
             with tempfile.TemporaryDirectory() as tmp:
-                src = Path(tmp) / ("in" + (Path(name).suffix or ".mp3"))
-                src.write_bytes(data)
+                if src_path:
+                    src = Path(src_path)
+                else:
+                    src = Path(tmp) / ("in" + (Path(name).suffix or ".mp3"))
+                    src.write_bytes(data)
                 aud = Path(tmp) / "a.mp3"
                 try:  # стискаємо до голосу: менше файл — швидше й надійніше розшифровка
                     await ffmpeg("-i", str(src), "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k", str(aud))
-                    raw = aud.read_bytes()
                 except Exception:  # noqa: BLE001
-                    raw = data
-                segs, prov = await media.transcribe_timed(raw, "a.mp3")
+                    aud = src
+                segs = []
+                if aud.stat().st_size > 18 * 1024 * 1024:  # довгий запис (> ~50 хв) — частинами по 20 хв, час зсуваємо
+                    await ffmpeg("-i", str(aud), "-f", "segment", "-segment_time", "1200", "-c", "copy", str(Path(tmp) / "part%03d.mp3"))
+                    for k, part in enumerate(sorted(Path(tmp).glob("part*.mp3"))):
+                        ps, _prov = await media.transcribe_timed(part.read_bytes(), part.name)
+                        segs += [(a + k * 1200, b + k * 1200 if b else 0.0, t) for a, b, t in ps]
+                else:
+                    segs, _prov = await media.transcribe_timed(aud.read_bytes(), "a.mp3")
         except Exception as exc:  # noqa: BLE001
             return await self.host.notify(chat, f"⚠️ Не вдалося розшифрувати: {esc(str(exc))[:300]}", [[("🎙 Ще раз", self.cb("ti"))]])
+        finally:
+            if src_path:
+                shutil.rmtree(Path(src_path).parent, ignore_errors=True)
         timed = segs and segs[0][1] > 0
         text = "\n".join((f"[{ts(a)}] " if timed else "") + t for a, _b, t in segs)
         self.store.set(f"tr:{chat}", {"text": text, "at": time.time()})
