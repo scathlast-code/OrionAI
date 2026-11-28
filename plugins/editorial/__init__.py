@@ -617,10 +617,18 @@ class Plugin(Base):
         name_of = self.host.extra.get("user_name", lambda c: "")
         lines = [f"👤 <b><code>{esc(n.upper())}</code></b>", "", f"Акаунти Telegram · {len(acc)}:" if acc else "Акаунти Telegram: не прив'язано"]
         for a in acc:
-            lines.append("• " + (f"@{esc(a['username'])}" if a.get("username") else "") + (f" {esc(name_of(a['uid']))}" if a.get("uid") else "")
+            has = self.host.extra.get("has_access", lambda u: False)
+            lines.append("• " + (f"@{esc(a['username'])}" if a.get("username") else "") + (f" {esc(name_of(a['uid']))} · ID {a['uid']}" if a.get("uid") else "")
+                         + (" · ✅ має доступ до бота" if a.get("uid") and has(a["uid"]) else "")
                          + ("" if a.get("uid") else " (ID стане відомий, щойно людина напише в редакційному чаті)"))
         lines += ["", "Прив'язувати може будь-хто; в однієї людини може бути кілька акаунтів."]
-        rows = [[("🙋 Це я", self.cb("pme", k)), ("➕ @нікнейм", self.cb("pnick", k))]]
+        rows = [[("🙋 Це я", self.cb("pme", k)), ("➕ @нікнейм або ID", self.cb("pnick", k))]]
+        has = self.host.extra.get("has_access")
+        if self.host.is_admin(chat) and has:
+            for a in acc:
+                if not (a.get("uid") and has(a["uid"])):
+                    who = ("@" + a["username"]) if a.get("username") else str(a.get("uid"))
+                    rows.append([(f"🔓 Дати доступ до бота й застосунку: {who}", self.cb("pgrant", k, a["id"]))])
         rows += [[(f"🔓 Відв'язати {('@' + a['username']) if a.get('username') else 'акаунт ' + str(i + 1)}", self.cb("punl", k, a["id"]))]
                  for i, a in enumerate(acc)][:8]
         n_open = self.open_tasks_of(n)
@@ -938,6 +946,14 @@ class Plugin(Base):
             return "↩️ Повернуто", (self.people_off_screen(chat, src) if len(names) > 1 else self.people_screen(chat))
         if a == "pc":
             return None, self.person_screen(chat, x)
+        if a == "pgrant":
+            grant = self.host.extra.get("grant_access")
+            with closing(self.db()) as con:
+                r = con.execute("SELECT * FROM accounts WHERE id=?", (int(y or 0),)).fetchone()
+            if not grant or not r or not self.host.is_admin(chat):
+                return "Недоступно", self.person_screen(chat, x)
+            res = await grant(str(r["uid"]) if r["uid"] else "@" + r["username"])
+            return "🔓 " + res[:150], self.person_screen(chat, x)
         if a in ("pme", "pnick", "punl"):
             ppl = self.people()
             if not (x and x.isdigit() and int(x) < len(ppl)):
@@ -950,7 +966,8 @@ class Plugin(Base):
                     con.execute("DELETE FROM accounts WHERE id=? AND name=?", (int(y or 0), n))
                 return "Відв'язано", self.person_screen(chat, x)
             self.ask(chat, "nick", int(x))
-            return None, (f"✏️ Надішліть @нікнейм людини в Telegram для «{esc(n)}».", [[("« Назад", self.cb("pc", x))]])
+            return None, (f"✏️ Акаунт Telegram для «{esc(n)}»: надішліть <b>@нікнейм</b>, посилання t.me/… або <b>числовий ID</b> "
+                          "(якщо нікнейма немає; ID показують боти на кшталт @userinfobot).", [[("« Назад", self.cb("pc", x))]])
         if a == "po":
             self._pd = getattr(self, "_pd", {})
             self._pd.pop(chat, None)
@@ -1063,11 +1080,18 @@ class Plugin(Base):
             return None, self.confirm_screen(chat)
         if key == "nick":
             ppl = self.people()
-            m = re.search(r"@?([A-Za-z][\w]{3,31})", t)
-            if m and data is not None and int(data) < len(ppl):
+            if data is None or int(data) >= len(ppl):
+                return None, self.people_screen(chat)
+            tt = t.strip()
+            mid = re.fullmatch(r"\d{5,15}", tt)
+            m = re.search(r"(?:t\.me/|@)?([A-Za-z][\w]{3,31})$", tt)
+            if mid:
+                ok = self.add_account(ppl[int(data)], uid=int(tt))
+            elif m:
                 ok = self.add_account(ppl[int(data)], username=m.group(1))
-                return ("🔗 Прив'язано" if ok else "Уже прив'язано"), self.person_screen(chat, data)
-            return "Це не схоже на нікнейм Telegram", self.person_screen(chat, data)
+            else:
+                return "Потрібен @нікнейм або числовий ID", self.person_screen(chat, data)
+            return ("🔗 Прив'язано" if ok else "Уже прив'язано"), self.person_screen(chat, data)
         if key == "pp":
             with closing(self.db()) as con, con:
                 for n in [x.strip() for x in t.split(",") if x.strip()][:20]:
