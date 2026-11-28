@@ -839,6 +839,7 @@ async def threads_probe(url, work):
             mus = _embed_music(etext)
             if mus and not info.get("track"):  # 🎵 накладена музика, як її показує сам Threads
                 info["track"], info["artist"] = mus[0], mus[1]
+                info["music_on_post"] = True  # Threads: музика прикріплена до допису, у файлі відео її може не бути
                 log.info("threads %s: музика «%s · %s»", code, mus[0][:60], mus[1][:40])
             place = _embed_place(etext)
             if place and not info.get("location"):  # 📍 геотег під дописом (Threads показує «Харків • Kharkiv • Харьков»)
