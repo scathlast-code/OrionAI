@@ -22,3 +22,4 @@
 - https://www.threads.com/share/_wQrWrsZ6 — Threads, @vika_vanat, допис DgSMEoJiK9u (3 фото; 9-фото допис — DgSJ3ragjDN)
 - https://www.threads.com/share/BABsEFAgwD — Threads, @ira_grubnik_, допис DgP0r48iNEp (відео + фото впереміш)
 - https://www.threads.com/share/BAYMkHcjjy — Threads, @sinay_yavora, відео з музикою «Twinkling Lights (Reimagined) · Auni»
+- (джерело для правил Meta) https://techcrunch.com/2025/07/14/following-youtube-meta-announces-crackdown-on-unoriginal-facebook-content — Meta знижує поширення копій і відключає монетизацію за повторне чуже

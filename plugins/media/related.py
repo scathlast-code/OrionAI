@@ -221,7 +221,10 @@ AI_SYSTEM = ("Ти розумієш, що саме людина скачує з 
              "(накладена або фонова; може бути захищена авторським правом); "
              '"ai" — є явні ознаки, що зображення, відео, текст, музика чи голос створені штучним інтелектом '
              "(неприродні руки й обличчя, «пливкі» написи, типова ШІ-картинка, позначка AI/ШІ, шаблонний ШІ-текст); тоді ще "
-             '"ai_kinds": ["image","video","text","music","voice"] — що саме. Лише за явними ознаками, не за підозрою. Немає — []. '
+             '"ai_kinds": ["image","video","text","music","voice"] — що саме. Лише за явними ознаками, не за підозрою; '
+             '"rights" — видно, що це чужий захищений вміст: водяний знак чи логотип іншого медіа, телеканалу, фотобанку '
+             "(Getty, Shutterstock…), кадри з фільму, серіалу, спортивної трансляції, кліпу, відомі персонажі; тоді ще "
+             '"rights_why": коротко що саме («логотип ТСН», «водяний знак Shutterstock», «кадр із фільму»). Немає — []. '
              "name — українською, називний відмінок, коротко (1–3 слова), тема з малої літери, місце з великої. "
              "phrase — продовження слів «попереднє …» з правильним прийменником і відмінком (з Волині, зі снігопадом, про вибори, із Закарпаття). "
              "Теми: 1–3 головні, що видно в дописі (погода, явище, подія, тварини, люди, справа, настрій тощо). "
@@ -241,7 +244,21 @@ SWEAR_RE = re.compile(r"(?i)(?<![а-яіїєґa-z])(?:х[уy][йяюеєїі]\w*
                       r"підар\w*|пидор\w*|педик\w*|залуп\w*|г[ао]ндон\w*|сук[аио](?![а-яіїєґ])|сучк\w*|"
                       r"fuck\w*|shit\w*|bitch\w*|motherf\w*|cunt\w*)")
 RISK_LABEL = {"ru": "російська мова", "swear": "нецензурна лексика", "music": "музика — можливі авторські права",
-              "ai": "ймовірно створено ШІ"}
+              "ai": "ймовірно створено ШІ", "rights": "чужі авторські права"}
+RIGHTS_TAIL = "потрібен дозвіл; без нього Meta знижує охоплення, а скарга правовласника — видалення й обмеження сторінки"
+RIGHTS_MARK_RE = re.compile(rb"Getty ?Images|Shutterstock|Adobe ?Stock|iStock|Alamy|Depositphotos|Dreamstime|123RF|Reuters|"
+                            rb"Associated Press|AFP ?/|EPA-EFE|<dc:rights>|photoshop:Credit|Copyright \(c\)|\xa9 ?\d{4}", re.I)
+
+
+def rights_marks_in_file(path):
+    """Ознаки чужих прав у метаданих файлу: фотобанки, агенції, поле авторських прав -> назва або ''."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(1_500_000)
+        m = RIGHTS_MARK_RE.search(head)
+        return m.group(0).decode("latin-1", "replace").strip("<>/ ")[:40] if m else ""
+    except OSError:
+        return ""
 AI_KINDS = {"image": "зображення", "video": "відео", "text": "текст", "music": "музика", "voice": "голос"}
 AI_MARK_RE = re.compile(rb"c2pa|trainedAlgorithmicMedia|compositeWithTrainedAlgorithmicMedia|Made with AI|AI[- ]generated|"
                         rb"DALL[\xb7\-. ]?E|Midjourney|Stable Diffusion|Firefly|Sora|Runway|Suno|Udio|ElevenLabs", re.I)
@@ -293,6 +310,13 @@ def parse_risks(answer):
     except ValueError:
         return set()
     out = {str(x).strip().lower() for x in v if str(x).strip().lower() in RISK_LABEL} if isinstance(v, list) else set()
+    if "rights" in out:
+        try:
+            why = str(json.loads(m.group(0)).get("rights_why") or "").strip()[:80]
+        except ValueError:
+            why = ""
+        if why:
+            out.add("why:" + why)
     if "ai" in out:
         try:
             kinds = json.loads(m.group(0)).get("ai_kinds") or []
@@ -303,12 +327,21 @@ def parse_risks(answer):
 
 
 def risks_line(risks, song=""):
-    """⚠️ рядок для підпису: що небезпечного знайшов бот."""
+    """⚠️ рядок для підпису: що небезпечного знайшов бот (+ 📉 якість окремим рядком)."""
+    qual = [k[2:] for k in sorted(risks or ()) if k.startswith("q:")]
+    qline = ("📉 Якість: " + "; ".join(qual)) if qual else ""
+    risks = {k for k in (risks or ()) if not k.startswith("q:")}
     if not risks:
-        return ""
+        return qline
+    return _risks_only(risks, song) + ("\n" + qline if qline else "")
+
+
+def _risks_only(risks, song=""):
     kinds = [AI_KINDS[k[3:]] for k in sorted(risks) if k.startswith("ai:") and k[3:] in AI_KINDS]
+    why = next((k[4:] for k in sorted(risks) if k.startswith("why:")), "")
     parts = [RISK_LABEL[k] + (f" ({song})" if k == "music" and song else "") + (f" ({', '.join(kinds)})" if k == "ai" and kinds else "")
-             for k in ("ru", "swear", "music", "ai") if k in risks]
+             + (f" ({why}) — {RIGHTS_TAIL}" if k == "rights" else "")
+             for k in ("ru", "swear", "music", "ai", "rights") if k in risks]
     return "⚠️ Увага: " + " · ".join(parts)
 
 

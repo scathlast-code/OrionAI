@@ -212,8 +212,9 @@ class Plugin(Base):
            ("see", "👁 ШІ дивиться на фото й кадри відео всього допису"),
            ("hear", "👂 ШІ слухає, що говорять у відео (початок, для змісту)"),
            ("about", "🧠 Рядок «що це» в підписі (зміст, місце, мета допису)"),
-           ("risk", "⚠️ Попереджати: російська мова, матюки, музика (авторські права), створене ШІ"),
+           ("risk", "⚠️ Попереджати: російська мова, матюки, музика, створене ШІ, чужі авторські права"),
            ("risk_up", "⚠️ Перевіряти так само й файли, які я надсилаю в бот"),
+           ("qual", "📉 Перевіряти якість фото й відео (роздільність, стиснення, різкість, світло)"),
            ("shz", "🎧 Сайт не вказав музику — шукати її в самому звуці (Shazam, і змішану з голосом)"),
            ("geo_author", "🧭 Немає місця в дописі — брати з інших дописів автора чи його сторінки"))
 
@@ -385,6 +386,13 @@ class Plugin(Base):
             risks.add("music")
         if R.ai_marks_in_file(path):
             risks.add("ai")
+        rm = R.rights_marks_in_file(path)
+        if rm:
+            risks |= {"rights", "why:" + rm}
+        if self.rel_on(chat, "qual"):
+            q = await self.quality(path)
+            if q:
+                risks.add("q:" + ", ".join(q))
         if Path(path).suffix.lower() in self.VIDEO_EXT + self.AUD_EXT and self.rel_on(chat, "shz") and await self._has_audio(path):
             got = await self._shazam(path)  # 🎧 відома пісня у звуці файлу
             if got:
@@ -504,6 +512,70 @@ class Plugin(Base):
             log.info("shazam не вдався", exc_info=True)
         return hits if all_hits else None
 
+    @staticmethod
+    def _sharp_ratio(im):
+        """Різкість: наскільки слабшають контури після легкого розмиття (різке — у рази, розмите — майже ні)."""
+        from PIL import ImageFilter, ImageStat
+        g = im.convert("L")
+        g.thumbnail((640, 640))
+        a = ImageStat.Stat(g.filter(ImageFilter.FIND_EDGES)).var[0]
+        b = ImageStat.Stat(g.filter(ImageFilter.GaussianBlur(1.2)).filter(ImageFilter.FIND_EDGES)).var[0]
+        return a / max(b, 1e-6), ImageStat.Stat(g).mean[0]
+
+    async def quality(self, path):
+        """📉 Якість фото чи відео для публікації: роздільність, стиснення, кадри за секунду, різкість, світло -> [проблеми]."""
+        import io
+        import json as _json
+        suf = Path(path).suffix.lower()
+        if suf not in self.IMG_EXT + self.VIDEO_EXT:
+            return []
+        issues = []
+        try:
+            proc = await asyncio.create_subprocess_exec("ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path),
+                                                        stdout=asyncio.subprocess.PIPE)
+            out, _ = await asyncio.wait_for(proc.communicate(), 20)
+            data = _json.loads(out or b"{}")
+        except Exception:  # noqa: BLE001
+            data = {}
+        v = next((x for x in data.get("streams", []) if x.get("codec_type") == "video"), {})
+        w, h = int(v.get("width") or 0), int(v.get("height") or 0)
+        if w and h and min(w, h) < 720:
+            issues.append(f"низька роздільність {w}×{h} (для мереж — від 1080)")
+        if suf in self.VIDEO_EXT and v:
+            try:
+                br = float(v.get("bit_rate") or (data.get("format") or {}).get("bit_rate") or 0)
+            except ValueError:
+                br = 0
+            if br and min(w, h) >= 720 and br < 1_200_000:
+                issues.append(f"сильно стиснуте ({br / 1e6:.1f} Мбіт/с)")
+            try:
+                num, den = (v.get("avg_frame_rate") or "0/1").split("/")
+                fps = float(num) / float(den or 1)
+            except (ValueError, ZeroDivisionError):
+                fps = 0
+            if 0 < fps < 20:
+                issues.append(f"мало кадрів ({fps:.0f}/с)")
+        try:
+            from PIL import Image
+            if suf in self.VIDEO_EXT:
+                blobs = await self._frames(path, 3)
+                ims = [Image.open(io.BytesIO(b)) for b in blobs]
+            else:
+                ims = [Image.open(path)]
+            if ims:
+                vals = await asyncio.to_thread(lambda: [self._sharp_ratio(i) for i in ims])
+                sharp = sorted(x[0] for x in vals)[len(vals) // 2]
+                light = sum(x[1] for x in vals) / len(vals)
+                if sharp < 1.3:
+                    issues.append("розмите")
+                if light < 35:
+                    issues.append("дуже темне")
+                elif light > 235:
+                    issues.append("пересвічене")
+        except Exception:  # noqa: BLE001
+            log.info("quality: кадри не перевірено", exc_info=True)
+        return issues
+
     async def post_music_in_file(self, media, song):
         """Threads: музика прикріплена до допису. Чи є вона в самому скачаному файлі?
         -> True (є) | False (немає: фото, відео без звуку або звучить інше) | None (не вдалося перевірити)."""
@@ -575,6 +647,9 @@ class Plugin(Base):
         med_ = (ctx or {}).get("media") or media
         if (med_ and R.ai_marks_in_file(med_)) or R.ai_marks_in_info((ctx or {}).get("info") or {}):
             risks.add("ai")  # позначка ШІ у файлі (C2PA) чи в даних сайту — надійніше за здогад
+        rm = R.rights_marks_in_file(med_) if med_ else ""
+        if rm:  # ©️ фотобанк, агенція чи поле авторських прав у метаданих
+            risks |= {"rights", "why:" + rm}
         self.__dict__.setdefault("_said", {})[chat] = said.split(": ", 1)[-1] if said else ""
         self.__dict__.setdefault("_risk", {})[chat] = risks if self.rel_on(chat, "risk") else set()
         topics, geos = R.merge(a_t, d_t), R.merge(a_g, d_g)
@@ -3075,6 +3150,14 @@ class Plugin(Base):
                     risks, rsong = (rc[rkey][4], rc[rkey][5]) if rkey in rc else (set(), "")
                     ocr_t, said_t = (rc[rkey][6], rc[rkey][7]) if rkey in rc else ("", "")
                     post_said = rc[rkey][9] if rkey in rc else []  # 🎙 розшифровки інших відео/аудіо цього ж допису
+                    if rkey in rc and self.rel_on(chat, "risk") and self.rel_on(chat, "qual"):
+                        many = len(nums) > 1 or len(outs) > 1
+                        for o in outs:  # 📉 якість кожного фото й відео допису
+                            q = await self.quality(o)
+                            if q:
+                                tag = f"№{n} — " if many else ""
+                                risks = set(risks) | {"q:" + tag + ", ".join(q)}
+                                rc[rkey] = rc[rkey][:4] + (risks,) + rc[rkey][5:]
                     if rkey in rc and self.rel_on(chat, "ai") and self.rel_on(chat, "hear"):
                         for o in outs:  # кожне відео й аудіо допису — не лише перше: текст для пошуку й перевірки небезпек
                             if str(o) != rc[rkey][8] and Path(o).suffix.lower() in self.VIDEO_EXT + self.AUD_EXT:
