@@ -32,3 +32,31 @@ def test_shazam_windows():
     assert w(60)[0] == 0.0 and w(60)[-1] == 40.0 and len(w(60)) == 3
     long = w(600)
     assert len(long) == 6 and long[-1] == 580.0
+
+
+def test_rights(tmp_path):
+    from plugins.media import related as R
+    r = R.parse_risks('{"risks":["rights"],"rights_why":"логотип ТСН"}')
+    line = R.risks_line(r)
+    assert "чужі авторські права (логотип ТСН)" in line and "Meta" in line
+    f = tmp_path / "a.jpg"
+    f.write_bytes(b"\xff\xd8 xmp photoshop:Credit Getty Images \xff\xd9")
+    assert R.rights_marks_in_file(f)
+    g = tmp_path / "b.jpg"
+    g.write_bytes(b"\xff\xd8 nothing \xff\xd9")
+    assert R.rights_marks_in_file(g) == ""
+
+
+def test_quality(tmp_path):
+    import subprocess
+    from PIL import Image, ImageFilter
+    from plugins.media import related as R
+    p = Plugin.__new__(Plugin)
+    sharp = tmp_path / "s.jpg"
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=1920x1080", "-frames:v", "1", str(sharp)], check=True)
+    assert asyncio.run(p.quality(sharp)) == []
+    small = tmp_path / "b.jpg"
+    Image.open(sharp).resize((480, 270)).filter(ImageFilter.GaussianBlur(4)).save(small)
+    q = asyncio.run(p.quality(small))
+    assert any("роздільність" in x for x in q) and "розмите" in q
+    assert "📉 Якість: №2 — розмите" in R.risks_line({"q:№2 — розмите"})
