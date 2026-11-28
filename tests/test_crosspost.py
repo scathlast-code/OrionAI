@@ -26,3 +26,16 @@ def test_parse_limits_tags_and_slides():
 def test_prompt_mentions_only_selected():
     p = X.prompt({"headline": "Заголовок", "body": "Текст", "sources": []}, X.DEFAULTS, ["x", "th"])
     assert '"x"' in p and '"th"' in p and '"ig"' not in p
+
+
+def test_parse_when():
+    import datetime as dt
+    from plugins.newsroom.pubqueue import parse_when
+    now = dt.datetime(2026, 11, 28, 10, 0, tzinfo=dt.timezone(dt.timedelta(hours=2)))
+    assert parse_when("18:30", now).hour == 18 and parse_when("18:30", now).day == 28
+    assert parse_when("09:00", now).day == 29  # уже минуло — завтра
+    assert parse_when("+45", now) == now + dt.timedelta(minutes=45)
+    assert parse_when("+2г", now) == now + dt.timedelta(hours=2)
+    w = parse_when("01.12 07:15", now)
+    assert (w.month, w.day, w.hour, w.minute) == (12, 1, 7, 15)
+    assert parse_when("25:00", now) is None and parse_when("абв", now) is None
