@@ -1318,7 +1318,7 @@ class Plugin(StudioUI, Base):
         if a == "stulogo":  # 🏷 лого GreenPost на всіх результатах студії
             self.set_pref(chat, "studio_logo", not self.pref(chat, "studio_logo", False))
             return ("🏷 Лого на результатах: " + ("так" if self.pref(chat, "studio_logo", False) else "ні")), None
-        if a == "stu" and y in ("safe", "subs", "clips", "logo"):  # 🎬 студія для скачаного відео
+        if a == "stu" and y in ("safe", "subs", "clips", "logo", "photo"):  # 🎬 студія для скачаного відео
             job = self.job_by(chat, x)
             if not job:
                 return self.revive(chat, x)

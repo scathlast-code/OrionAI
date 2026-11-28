@@ -104,14 +104,15 @@ class StudioUI:
 
     def studio_rows(self, job, risks=()):
         vis, aud, imgs = self.parts(job)
-        if len(vis) - len(imgs) <= 0:
-            return []
         tok = job.token
+        photo = [[("🕵️ Перевірити фото", self.cb("stu", tok, "photo"))]] if imgs else []
+        if len(vis) - len(imgs) <= 0:
+            return photo
         row = [("🔤 Субтитри", self.cb("stu", tok, "subs")), ("✂️ Короткі ролики", self.cb("stu", tok, "clips"))]
         brand = [("🏷 Лого GreenPost", self.cb("stu", tok, "logo"))]
         if set(risks) & {"music", "music_post", "rights"} or any(str(r).startswith("why:") for r in risks):
-            return [[("🛡 Безпечна версія", self.cb("stu", tok, "safe"))] + brand, row]
-        return [row, [("🛡 Без музики й водяних знаків", self.cb("stu", tok, "safe"))] + brand]
+            return [[("🛡 Безпечна версія", self.cb("stu", tok, "safe"))] + brand, row] + photo
+        return [row, [("🛡 Без музики й водяних знаків", self.cb("stu", tok, "safe"))] + brand] + photo
 
     def brand_on(self, chat):
         return bool(self.pref(chat, "studio_logo", False))
@@ -134,6 +135,24 @@ class StudioUI:
                   str(aud), timeout=600)
         segs, _prov = await core.transcribe_timed(aud.read_bytes(), "a.mp3")
         return [s for s in (segs or []) if s[1] > s[0]]
+
+    async def studio_photo(self, chat, job):
+        from dataclasses import replace
+        from . import media as M
+        news = self.host.extra.get("plugin", lambda pid: None)("news")
+        if not news or not hasattr(news, "photo_check"):
+            return await self._status(chat, None, "🕵️ Перевірка фото — у Новинарні, а її зараз вимкнено.", [[("« Медіа", self.cb())]])
+        vis, _aud, imgs = self.parts(job)
+        status = await self._status(chat, None, "🕵️ Перевіряю фото з допису…", [[("⏹ Зупинити", self.cb("stop"))]])
+        try:
+            with tempfile.TemporaryDirectory(prefix="orion-pc-") as work:
+                path, _t, _i = await M.fetch(job.items[imgs[0] - 1], job.url, replace(job.options, cuts=()), Path(work))
+                data = Path(path).read_bytes()
+            await news.photo_check(chat, data, is_file=True)
+            await self._status(chat, status, "🕵️ Перевірку фото надіслано нижче.", [[("« Медіа", self.cb())]])
+        except Exception as exc:  # noqa: BLE001
+            log.info("studio photo", exc_info=True)
+            await self._status(chat, status, f"🕵️ Не вдалося перевірити фото ({self._esc(type(exc).__name__)})", [[("« Медіа", self.cb())]])
 
     async def _brand(self, src, out):
         from .common import run
@@ -172,6 +191,8 @@ class StudioUI:
         from plugins.newsroom.tools import VERT_BLUR, sub_filter, to_srt
         esc = self._esc
         stop = [[("⏹ Зупинити", self.cb("stop"))]]
+        if what == "photo":  # 🕵️ фактчек фото з допису — той самий, що в «🧰 Інструменти редакції»
+            return await self.studio_photo(chat, job)
         title = {"safe": "🛡 Безпечна версія", "subs": "🔤 Субтитри", "clips": "✂️ Короткі ролики", "logo": "🏷 Лого GreenPost"}[what]
         status = await self._status(chat, None, f"{title}: завантажую відео…", stop)
 
