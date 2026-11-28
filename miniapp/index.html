@@ -368,13 +368,14 @@ function drawSections(main,res){
   const key='orion_fold:'+(res.text||'').split('\n')[0];let st={};try{st=JSON.parse(localStorage.getItem(key)||'{}')}catch(_){}
   for(const sec of res.sections){
     const box=document.createElement('div');box.className='fold'+(st[sec.head]?' shut':'');
-    const h=document.createElement('button');h.className='foldh';h.innerHTML='<span></span><i>▾</i>';h.firstChild.textContent=sec.head;
-    h.onclick=()=>{box.classList.toggle('shut');st[sec.head]=box.classList.contains('shut');try{localStorage.setItem(key,JSON.stringify(st))}catch(_){}haptic()};
+    const h=document.createElement('button');h.className='foldh';h.innerHTML='<span></span><i>'+(sec.open?'›':'▾')+'</i>';h.firstChild.textContent=sec.head;
+    if(sec.open){box.classList.remove('shut');h.onclick=()=>press(sec.head,sec.open)}  // розділ-перехід: натиснули — відкрили
+    else h.onclick=()=>{box.classList.toggle('shut');st[sec.head]=box.classList.contains('shut');try{localStorage.setItem(key,JSON.stringify(st))}catch(_){}haptic()};
     const inner=document.createElement('div');inner.className='foldb';
-    if(sec.body){const c=document.createElement('div');c.className='card';c.innerHTML=sanitize(sec.body);inner.appendChild(c)}
+    if(sec.body){const c=document.createElement('div');c.className='card';c.innerHTML=sanitize(sec.body);if(sec.open){c.style.cursor='pointer';c.onclick=e=>{if(e.target.closest('a'))return;press(sec.head,sec.open)}}inner.appendChild(c)}
     drawRows(inner,sec.rows,sec.hints);
     box.append(h,inner);main.appendChild(box)}
-  const used=new Set(res.sections.flatMap(x=>(x.rows||[]).flat().map(b=>b[1])));
+  const used=new Set(res.sections.flatMap(x=>(x.rows||[]).flat().map(b=>b[1]).concat(x.open?[x.open]:[])));
   const rest=(res.rows||[]).map(r=>r.filter(([t,d])=>!used.has(d)&&d!=='m:noop')).filter(r=>r.length);
   if(rest.length) drawRows(main,rest,[]);
 }
