@@ -35,6 +35,7 @@ from . import group as G
 from .common import JobError, TELEGRAM_IN, TELEGRAM_OUT, run, safe_name
 from .metadata import REPORT_ONLY, clean, report, suffix
 from .bigsend import BIG_LIMIT, Big, Progress
+from .studio import StudioUI
 
 log = logging.getLogger("orion.plugins.media")
 PAGE = 12
@@ -128,7 +129,7 @@ class SkipItem(Exception):
     """Людина натиснула «⏭ Пропустити» — цей файл/допис пропускаємо, решта йде далі."""
 
 
-class Plugin(Base):
+class Plugin(StudioUI, Base):
     id = "med"
     icon = "⬇️"
     title = "Завантажити"
@@ -1289,6 +1290,14 @@ class Plugin(Base):
             else:
                 self._bg(chat, self.sep_go(chat, job, a[-1] if a != "osv" else "v"))
             return "⬇️ Починаю", (self.live_screen(chat) if self.in_app() else None)
+        if a == "stu" and y in ("safe", "subs", "clips"):  # 🎬 студія для скачаного відео
+            job = self.job_by(chat, x)
+            if not job:
+                return self.revive(chat, x)
+            if self.busy(chat):
+                return "⏳ Ще завантажую попереднє", None
+            self._bg(chat, self.studio_go(chat, job, y))
+            return "🎬 Починаю", (self.live_screen(chat) if self.in_app() else None)
         if a in ("pil", "pi", "pim", "pif", "pia", "pir"):  # 🔢 окремо для кожного файлу
             job = self.job_by(chat, x)
             if not job:
@@ -2407,6 +2416,8 @@ class Plugin(Base):
         await self._status(chat, status, text, rows)
 
     # ---------------------------------------------------------------- меню форматів
+    _esc = staticmethod(esc)
+
     def tg_limit(self):
         return BIG_LIMIT if self.big.ready() else TELEGRAM_OUT
 
@@ -3084,6 +3095,7 @@ class Plugin(Base):
             audio_retry = False  # 🔁 була помилка звуку — запропонуємо повторити (а не повторюємо самі)
             last_media = None  # (повідомлення, кнопки автора, запис) — сюди ж додамо й меню, щоб усе було одним дописом
             base_opts = opts
+            post_risks = set()
             for k, n in enumerate(nums, 1):
                 item = job.items[n - 1]
                 opts = self.item_opts(job, n, base_opts)  # ⚙️ окремі налаштування саме цього файлу (без звуку, формат)
@@ -3222,6 +3234,7 @@ class Plugin(Base):
                     if song and song[2] and not song_html:
                         heard_mark = " (розпізнано у звуці)" if (job.__dict__.get("song_info") or {}).get("detected") else ""
                         song_html = f"\n🎵 {esc(self.song_name(song))}{heard_mark}"
+                    post_risks |= set(risks)
                     if risks:  # ⚠️ небезпека для публікації — першим рядком серед тегів
                         rl = "\n" + esc(R.risks_line(risks, rsong[:60]))
                         rel_line, rel_len = rl + rel_line, rel_len + len(rl)
@@ -3420,6 +3433,11 @@ class Plugin(Base):
         else:
             msg = "⚠️ Файлів не знайшлося. Спробуйте інший формат або якість."
         rows = [[("⚙️ Доналаштувати й завантажити ще" if quick else "📋 До набору", self.cb("opt" if quick else "menu", job.token))], [("« Медіа", self.cb())]]
+        if sent and quick:  # 🎬 студія: безпечна версія, субтитри, короткі ролики — для відео з допису
+            try:
+                rows[:0] = self.studio_rows(job, locals().get("post_risks") or ())
+            except Exception:  # noqa: BLE001
+                log.info("studio rows", exc_info=True)
         if audio_retry:
             rows.insert(0, [("🔁 Завантажити ще раз зі звуком?", self.cb("snd", job.token))])
         if sent and not failed and last_media and await self._merge_menu(chat, last_media, rows):
