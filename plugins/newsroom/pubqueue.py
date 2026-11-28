@@ -285,6 +285,8 @@ class QueueUI:
             try:
                 if self.on():
                     await self.pq_tick()
+                    if hasattr(self, "extras_tick"):
+                        await self.extras_tick()
                     if self.store.get("al_held") and hasattr(self, "al_morning"):  # ⚡ притримане вночі — після тихих годин
                         from .alerts import in_quiet
                         if not in_quiet(self.al_cfg()["quiet"], self._now()):

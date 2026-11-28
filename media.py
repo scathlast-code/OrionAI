@@ -382,6 +382,75 @@ async def transcribe(data, filename="voice.ogg", language=None):
     raise MediaError("all", "unavailable", "; ".join(f"{p}: {e.kind}" for p, e in errors) or "немає сервісу розшифровки: потрібен GROQ_API_KEY, Cloudflare або GEMINI_API_KEY")
 
 
+TIMED_RE = re.compile(r"^\s*\[?(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(?:[-–]\s*(\d{1,2}):(\d{2})(?::(\d{2}))?)?\]?\s*[-–:]?\s*(.+)$")
+
+
+def _sec(a, b, c):
+    if a is None:
+        return None
+    return int(a) * 3600 + int(b) * 60 + int(c) if c is not None else int(a) * 60 + int(b)
+
+
+def parse_timed(text):
+    """«[01:23-01:30] текст» / «01:23 текст» → [(початок, кінець, текст)] у секундах; кінець — початок наступного."""
+    segs = []
+    for ln in (text or "").splitlines():
+        m = TIMED_RE.match(ln)
+        if not m:
+            if segs and ln.strip():
+                s0, e0, t0 = segs[-1]
+                segs[-1] = (s0, e0, (t0 + " " + ln.strip()).strip())
+            continue
+        start = _sec(m[1], m[2], m[3])
+        end = _sec(m[4], m[5], m[6])
+        segs.append((start, end, m[7].strip()))
+    out = []
+    for i, (s0, e0, t0) in enumerate(segs):
+        nxt = segs[i + 1][0] if i + 1 < len(segs) else None
+        end = e0 if e0 and e0 > s0 else (nxt if nxt and nxt > s0 else s0 + 4)
+        out.append((float(s0), float(end), t0))
+    return out
+
+
+async def transcribe_timed(data, filename="audio.mp3", language=None):
+    """Розшифровка з часовими мітками: [(початок_с, кінець_с, текст)], провайдер. Groq — точні сегменти Whisper;
+    Gemini — мітки, які модель ставить сама (приблизні, до секунди-двох)."""
+    if STT_PROVIDERS["groq_stt"]["ready"]():
+        form = {"model": STT_MODEL_GROQ, "response_format": "verbose_json"}
+        if language:
+            form["language"] = language
+        async with httpx.AsyncClient(timeout=300) as c:
+            r = await c.post("https://api.groq.com/openai/v1/audio/transcriptions", headers={"Authorization": f"Bearer {GROQ_KEY}"},
+                             data=form, files={"file": (filename, data)})
+        if r.status_code < 400:
+            segs = [(float(x["start"]), float(x["end"]), (x.get("text") or "").strip()) for x in r.json().get("segments") or []]
+            if segs:
+                return [s for s in segs if s[2]], "groq_stt"
+    if STT_PROVIDERS["gemini_stt"]["ready"]():
+        import base64 as _b64
+        ext = (filename.rsplit(".", 1)[-1] if "." in filename else "mp3").lower()
+        if len(data) > 19 * 1024 * 1024:
+            raise MediaError("gemini_stt", "too_big", "файл завеликий для розшифровки (до 19 МБ)")
+        body = {"contents": [{"parts": [
+            {"text": "Дослівно розшифруй мовлення тією мовою, якою говорять (не перекладай). Кожну фразу — з нового рядка у форматі "
+                     "[ММ:СС-ММ:СС] текст (час від початку запису). Якщо говорять кілька людей — на початку фрази «Мовець 1:», «Мовець 2:». "
+                     "Лише розшифровка, без пояснень."},
+            {"inline_data": {"mime_type": MIME_BY_EXT.get(ext, "audio/mpeg"), "data": _b64.b64encode(data).decode()}}]}]}
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_STT_MODEL}:generateContent?key={GEMINI_KEY}"
+        async with httpx.AsyncClient(timeout=300) as c:
+            r = await c.post(url, json=body)
+        if r.status_code == 200:
+            try:
+                txt = "".join(p.get("text", "") for p in r.json()["candidates"][0]["content"]["parts"])
+            except (KeyError, IndexError, ValueError):
+                txt = ""
+            segs = parse_timed(txt)
+            if segs:
+                return segs, "gemini_stt"
+    text, prov, _err = await transcribe(data, filename, language)
+    return [(0.0, 0.0, text)], prov
+
+
 async def tts(text, voice="polina", rate=0):
     """Озвучення українським голосом (edge-tts) у форматі голосового повідомлення Telegram (OGG/Opus)."""
     if not tts_ready():
