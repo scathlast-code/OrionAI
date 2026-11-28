@@ -634,6 +634,28 @@ def _threads_post(text, code):
     return None
 
 
+ICON_RE = re.compile(r"(?i)static\.cdninstagram|rsrc\.php|/static/|\.svg(?:\?|$)|emoji|sprite|/images/|s\d{2,3}x\d{2,3}[/_]")
+POST_IMG_RE = re.compile(r"https:(?:\\?/){2}scontent[^\"'\s<>]+?\.(?:jpe?g|webp|heic)[^\"'\s<>]*")
+
+
+def _raw_post_images(text):
+    """Усі фото допису з сирого тексту сторінки (запасний шлях для каруселей, коли JSON допису неповний):
+    лише справжні фото (t51.*-15 / t39.30808-6…), без аватарок і значків; та сама картинка різних розмірів — одна, найбільша."""
+    best = {}
+    for raw in POST_IMG_RE.findall(text or ""):
+        url = raw.replace("\\/", "/").replace("\\u0026", "&").replace("&amp;", "&")
+        if ICON_RE.search(url) or re.search(r"(?i)profile|s150x150|t51\.2885-19", url):  # -19 — аватарки
+            continue
+        if not re.search(r"t51\.\d+-15|t51\.29350-15|t39\.\d+-6", url):
+            continue
+        key = urlsplit(url).path.rsplit("/", 1)[-1].split(".")[0]
+        m = re.search(r"[ps](\d{3,4})x(\d{3,4})", url)
+        size = int(m[1]) * int(m[2]) if m else 10 ** 7  # без позначки розміру — зазвичай оригінал
+        if key not in best or size > best[key][0]:
+            best[key] = (size, url)
+    return [(u, ".jpg") for _, u in best.values()]
+
+
 def _embed_media(text, base):
     """Сторінка /embed: звичайний HTML з <video> і великими фото (без аватарок)."""
     doc = read_html(text.encode("utf-8"))
@@ -643,6 +665,8 @@ def _embed_media(text, base):
     if not links:
         for node in doc.xpath("//img[@src]"):
             src = node.get("src") or ""
+            if ICON_RE.search(src):  # значки сайту (static.cdninstagram.com/rsrc.php…) — не фото допису
+                continue
             if re.search(r"cdninstagram|fbcdn", src) and not re.search(r"s150x150|_s\d{2,3}x\d{2,3}|profile", src) \
                     and "Avatar" not in (node.get("class") or "") and "profile" not in (node.get("alt") or "").lower():
                 links.append((urljoin(base, src), ".jpg"))
@@ -677,18 +701,26 @@ async def threads_probe(url, work):
             found = _best_media(part) if isinstance(part, dict) else None
             if found:
                 items.append(Item("direct", found[0], dict(info)))
+        if (post.get("carousel_media_count") or 0) > len(items):  # карусель у JSON неповна — добираємо з тексту сторінки
+            raw = _raw_post_images(text)
+            if len(raw) > len(items):
+                items = [Item("direct", u, dict(info)) for u, _ in raw]
         if items:
             return items
     embed_note = "немає адреси допису"
     if code and user:
         try:
             efinal, etext = await _grab(f"https://www.threads.com/@{user}/post/{code}/embed", 3_000_000)
-            links = _embed_media(etext, efinal)
+            links = []
+            epost = _threads_post(etext, code)  # спершу JSON допису (там уся карусель), потім HTML
+            if epost:
+                links = [f for f in (_best_media(p) for p in (epost.get("carousel_media") or [epost])
+                                      if isinstance(p, dict)) if f]
             if not links:
-                epost = _threads_post(etext, code)
-                if epost:
-                    links = [f for f in (_best_media(p) for p in (epost.get("carousel_media") or [epost])
-                                          if isinstance(p, dict)) if f]
+                links = _embed_media(etext, efinal)
+            raw = _raw_post_images(etext)
+            if len(raw) > len([x for x in links if x[1] != ".mp4"]) and not any(x[1] == ".mp4" for x in links):
+                links = raw  # карусель фото: беремо всі справжні фото, без значків
             if links:
                 return [Item("direct", address, dict(info)) for address, _ in links]
             embed_note = f"embed {len(etext) // 1024} КБ без медіа"
