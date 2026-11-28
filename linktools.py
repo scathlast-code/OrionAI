@@ -36,6 +36,26 @@ def is_bad(host: str) -> bool:
                                        for b in BAD_HOSTS)
 
 
+REDIRECTORS = {"l.instagram.com": "u", "l.facebook.com": "u", "lm.facebook.com": "u", "l.threads.net": "u", "l.threads.com": "u",
+               "l.messenger.com": "u", "out.reddit.com": "url", "away.vk.com": "to"}
+
+
+def unwrap(url: str) -> str:
+    """Посилання-обгортки соцмереж (l.instagram.com/?u=…&e=…, l.facebook.com/l.php?u=…) → справжня адреса без стеження.
+    Instagram так «загортає» кожне посилання зі сторіс і підписів, щоб рахувати переходи."""
+    for _ in range(3):
+        try:
+            p = urlsplit(url)
+        except ValueError:
+            return url
+        key = REDIRECTORS.get(host_of(url))
+        inner = dict(parse_qsl(p.query)).get(key) if key else None
+        if not inner or not inner.startswith(("http://", "https://")):
+            break
+        url = inner
+    return clean_url(url)
+
+
 def clean_url(url: str) -> str:
     """Прибирає параметри стеження (utm_*, fbclid, igsh…), решту адреси залишає як є."""
     try:
