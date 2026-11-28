@@ -21,3 +21,4 @@
 - 28.11 https://www.threads.com/share/_4fudQe5t — карусель Threads, бот знайшов усі 9 фото (через вбудовану версію допису)
 - https://www.threads.com/share/_wQrWrsZ6 — Threads, @vika_vanat, допис DgSMEoJiK9u (3 фото; 9-фото допис — DgSJ3ragjDN)
 - https://www.threads.com/share/BABsEFAgwD — Threads, @ira_grubnik_, допис DgP0r48iNEp (відео + фото впереміш)
+- https://www.threads.com/share/BAYMkHcjjy — Threads, @sinay_yavora, відео з музикою «Twinkling Lights (Reimagined) · Auni»
