@@ -20,3 +20,4 @@
 - 28.11.2026 — Threads, карусель ~10 фото (lee4you, «Пані Тетяна…»), бот брав значок: https://www.threads.com/share/BB_nL0Y2yV
 - 28.11 https://www.threads.com/share/_4fudQe5t — карусель Threads, бот знайшов усі 9 фото (через вбудовану версію допису)
 - https://www.threads.com/share/_wQrWrsZ6 — Threads, @vika_vanat, допис DgSMEoJiK9u (3 фото; 9-фото допис — DgSJ3ragjDN)
+- https://www.threads.com/share/BABsEFAgwD — Threads, @ira_grubnik_, допис DgP0r48iNEp (відео + фото впереміш)
