@@ -1399,7 +1399,7 @@ class ObservancesUI:
         (через плагін погоди). ШІ нічого не вигадує."""
         md = d.strftime("%m-%d")
         self._oinit()
-        if self.store.get("lore_cache_v") != 4:  # згенероване ШІ й «сирі» уривки раніше — прибрати й зібрати наново
+        if self.store.get("lore_cache_v") != 5:  # згенероване ШІ й «сирі» уривки раніше — прибрати й зібрати наново
             self.store.set("lore_cache", {})
             self.store.set("garden_cache", {})
             with closing(self.store.db()) as con, con:
@@ -1407,7 +1407,7 @@ class ObservancesUI:
                 for rid, txt in con.execute("SELECT id, text FROM daybook WHERE cat='lore' AND owner=0").fetchall():
                     if DB.NOT_LORE_RE.match(txt or ""):  # дні й свята, що потрапили в прикмети
                         con.execute("DELETE FROM daybook WHERE id=?", (rid,))
-            self.store.set("lore_cache_v", 4)
+            self.store.set("lore_cache_v", 5)
         if self.db_items(md, "lore"):
             return
         wx = self.host.extra.get("plugin", lambda pid: None)("wx")

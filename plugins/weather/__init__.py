@@ -609,8 +609,8 @@ class WeatherPlugin(Plugin):
         day = day or now.date()
         key = day.strftime("%m-%d")
         c = self.cfg()
-        if c.get("lore_v") != 4:  # старі прикмети (згенеровані ШІ) — більше не показуємо
-            c["lore"], c["lore_v"] = {}, 4
+        if c.get("lore_v") != 5:  # старі (згенеровані ШІ чи обрізані до наслідку) — збираємо наново
+            c["lore"], c["lore_v"] = {}, 5
             self.save(c)
         cached = (c.get("lore") or {}).get(key)
         if isinstance(cached, list) and cached:
@@ -649,7 +649,9 @@ class WeatherPlugin(Plugin):
     def omens(snippet):
         """Уривок сторінки → окремі ПОВНІ речення-прикмети (без Markdown, маркерів, обірваних кінців і заголовків)."""
         t = re.sub(r"#+\s*|\*\*|__|`", " ", snippet or "")
-        t = re.sub(r"(?:^|\s)(?:[-–•·*]|\d+[.)])\s+", "\n", t)
+        # маркери списку — лише на початку рядка чи після кінця речення; тире ВСЕРЕДИНІ («вранці іній – буде врожай»)
+        # — частина самої прикмети (умова – наслідок), його не розриваємо
+        t = re.sub(r"(?:^|\n|(?<=[.!?;:])\s+)(?:[-–•·*]|\d+[.)])\s+", "\n", t)
         out = []
         for part in t.split("\n"):
             part = part.strip()
@@ -659,9 +661,13 @@ class WeatherPlugin(Plugin):
                 x = x[:-1] + "." if x.endswith(";") else x
                 if not 25 <= len(x) <= 260 or re.match(r"(?i)^(?:народні )?прикмети\b", x):
                     continue
-                if not re.search(r"(?i)\b(?:якщо|коли|як на|буде|будуть|прийде|стоятим\w*|чекай|віщує|означає|до (?:теплої|холодної|врожаю))\b", x):
+                if not re.search(r"(?i)\b(?:якщо|коли|як на|буде|будуть|прийде|стоятим\w*|чекай|віщує|означає|до (?:теплої|холодної|врожаю))\b"
+                                 r"|\s[-–—]\s*до\s|\S\s[-–—]\s\S", x):  # «умова – наслідок» / «… – до похолодання»
                     continue
                 if re.search(r"[ыэъё]", x, re.I) or not re.search(r"[а-яіїєґ]", x, re.I):  # лише українською
+                    continue
+                # прикмета = умова + наслідок; лише наслідок («Наступного року буде багатий урожай») — це вже не прикмета
+                if re.match(r"(?i)^(?:наступн\w* рок\w*|буде|будуть|скоро|чекай|незабаром)\b", x) and not re.search(r"\s[–—-]\s|якщо|коли", x, re.I):
                     continue
                 out.append(x[0].upper() + x[1:])
         return out
