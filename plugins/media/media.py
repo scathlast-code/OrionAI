@@ -666,6 +666,42 @@ def _raw_post_images(text):
     return [(u, ".jpg") for _, u in best.values()]
 
 
+def _img_key(url):
+    """Назва файлу без розміру — та сама картинка в різних розмірах має однаковий ключ."""
+    return urlsplit(url.replace("\\/", "/")).path.rsplit("/", 1)[-1].split(".")[0]
+
+
+def _video_posters(text):
+    """Ключі обкладинок відео у сторінці вбудовування: атрибут poster і картинки в тому ж блоці, що й <video>."""
+    keys = set()
+    try:
+        doc = read_html(text.encode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return keys
+    for video in doc.xpath("//video"):
+        if video.get("poster"):
+            keys.add(_img_key(video.get("poster")))
+        box = video.getparent()
+        for _ in range(2):  # обкладинка зазвичай поруч із відео — у тому ж або батьківському блоці
+            if box is None:
+                break
+            imgs = box.xpath(".//img[@src]")
+            if imgs and len(imgs) <= 2:
+                keys.update(_img_key(i.get("src")) for i in imgs)
+                break
+            box = box.getparent()
+    return keys
+
+
+def _in_page_order(links, text):
+    """Порядок як у дописі: за першою появою файлу в тексті сторінки."""
+    def pos(link):
+        key = _img_key(link[0])
+        i = text.find(key) if key else -1
+        return i if i >= 0 else len(text)
+    return sorted(links, key=pos)
+
+
 def _embed_media(text, base):
     """Сторінка /embed: звичайний HTML з <video> і великими фото (без аватарок)."""
     doc = read_html(text.encode("utf-8"))
@@ -736,7 +772,15 @@ async def threads_probe(url, work):
             raw = _raw_post_images(etext)
             log.info("threads %s embed: %d КБ, JSON: %s, посилань: %d, фото в тексті: %d; CDN: %s", code, len(etext) // 1024,
                      bool(epost), len(links), len(raw), _img_census(etext))
-            if len(raw) > len([x for x in links if x[1] != ".mp4"]) and not any(x[1] == ".mp4" for x in links):
+            vids = [x for x in links if x[1] == ".mp4"]
+            if not epost and vids:  # фото й відео впереміш: відео + усі фото, крім обкладинок самих відео
+                posters = _video_posters(etext)
+                photos = [x for x in raw if _img_key(x[0]) not in posters]
+                if photos:
+                    links = _in_page_order(vids + photos, etext)
+                    log.info("threads %s: упереміш — відео %d, фото %d (обкладинок відкинуто %d)", code, len(vids), len(photos),
+                             len(raw) - len(photos))
+            elif len(raw) > len([x for x in links if x[1] != ".mp4"]) and not vids:
                 links = raw  # карусель фото: беремо всі справжні фото, без значків
             if links:
                 return [Item("direct", address, dict(info)) for address, _ in links]
