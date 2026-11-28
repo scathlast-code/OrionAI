@@ -2723,11 +2723,14 @@ class Plugin(Base):
                 line = "\n" + " · ".join(f'<a href="{esc(u)}">{esc(t)}</a>' for t, u in links if u)
                 cap = last[6] or ""
                 vis = len(re.sub(r"<[^>]+>|&\w+;", "", cap)) + len(re.sub(r"<[^>]+>", "", line))
-                if vis > 1024 or not self.mh_act(""):
-                    await bot.send_message(chat, f"✅ Публікація: {last[4]} файл(ів) · {mb(last[5])}", reply_markup=InlineKeyboardMarkup(kb),
-                                           reply_to_message_id=last[3], disable_notification=True)
-                else:
-                    await bot.edit_message_caption(chat_id=chat, message_id=last[3], caption=cap + line, parse_mode="HTML")
+                if vis <= 1024 and self.mh_act(""):  # і посилання в підписі альбому…
+                    try:
+                        await bot.edit_message_caption(chat_id=chat, message_id=last[3], caption=cap + line, parse_mode="HTML")
+                    except Exception:  # noqa: BLE001
+                        log.info("підпис альбому не змінено", exc_info=True)
+                # …і справжні кнопки одразу під альбомом (власник: «і те, і інше»)
+                await bot.send_message(chat, f"⬆️ Публікація: {last[4]} файл(ів) · {mb(last[5])}", reply_markup=InlineKeyboardMarkup(kb),
+                                       disable_notification=True)
             else:
                 await bot.edit_message_reply_markup(chat_id=chat, message_id=last[0], reply_markup=InlineKeyboardMarkup(kb))
             return True
