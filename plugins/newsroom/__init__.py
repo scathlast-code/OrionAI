@@ -39,6 +39,7 @@ from .crosspost import CrosspostUI
 from .pubqueue import QueueUI
 from .cards import CardsUI
 from .styleguide import StyleUI
+from .ourswrote import OursWroteUI
 from .echo import KINDS as ECHO_KINDS, Echo
 from .collectors import MTProto, WebCollector
 
@@ -118,7 +119,7 @@ def src_links(sources, sep=" · "):
     return sep.join(f'<a href="{esc(s)}">{esc(_dom(s))}</a>' if str(s).startswith("http") else esc(s) for s in sources)
 
 
-class Plugin(StyleUI, CardsUI, QueueUI, CrosspostUI, ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Base):
+class Plugin(OursWroteUI, StyleUI, CardsUI, QueueUI, CrosspostUI, ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Base):
     id = "news"
     icon = "✍️"
     title = "Публікації"
@@ -128,7 +129,7 @@ class Plugin(StyleUI, CardsUI, QueueUI, CrosspostUI, ReportUI, ObservancesUI, Di
                "переписує за правилами редакції на моделях Оріона, тримає точну довжину, готує зведення за добу й "
                "публікує в канал лише після вашого схвалення.\n\n"
                "Автоматичний рерайт — не фактчек: перед публікацією звіряйте цифри й імена (кнопка «🔎 Звірити» допомагає, але не замінює редактора).")
-    VIEWS = {"sty", "styd", "cd", "cds", "pql", "pq", "pqh", "xp", "xps", "ls", "d", "src", "dg", "so", "set", "q", "help", "ver", "len", "rules",
+    VIEWS = {"ow", "ows", "sty", "styd", "cd", "cds", "pql", "pq", "pqh", "xp", "xps", "ls", "d", "src", "dg", "so", "set", "q", "help", "ver", "len", "rules",
              "L", "Lo", "Ls", "Lsort", "Lbulk", "Le", "Lacc", "Lhelp", "Elst", "Lmerge",
              "H1", "H2", "H3", "H4", "H5", "D", "Dm", "Fl", "Fo", "Ff", "Fi", "Fmv", "Fbl", "Tg", "Tgi", "Tp", "Bk", "Bkl",
              "Sp", "Ou", "Ours", "Sl", "St", "Wt", "more", "acs", "ace", "sch", "fld", "flds", "echo", "eci", "cls", "ctp", "cte", "cmk", "csl", "obh", "obt", "obc", "obd", "ob", "obi", "obl", "obs", "obup", "obws", "obdy", "obcp", "obcm"}
@@ -845,7 +846,8 @@ class Plugin(StyleUI, CardsUI, QueueUI, CrosspostUI, ReportUI, ObservancesUI, Di
         rows = [
             [(f"📥 Нові чернетки · {s['new']}", self.cb("ls", "new"))],
             [("🔎 Знайти й написати", self.cb("D"))],
-            [(f"🗓 Черга публікацій · {sum(1 for r in self.pq() if r['st'] in ('wait', 'pause'))}", self.cb("pql"))],
+            [(f"🗓 Черга публікацій · {sum(1 for r in self.pq() if r['st'] in ('wait', 'pause'))}", self.cb("pql")),
+             ("🔎 Пошук у наших", self.cb("ows"))],
             [("📡 Джерела", self.cb("H1")), ("⚙️ Налаштування новинарні", self.cb("H2"))],
             [("🗂 Архів", self.cb("H5")), ("ℹ️ Довідка", self.cb("help"))],
         ]
@@ -1029,6 +1031,9 @@ class Plugin(StyleUI, CardsUI, QueueUI, CrosspostUI, ReportUI, ObservancesUI, Di
         xp = self.xp_get(i)
         rows.append([("📲 Під мережі" + (f" · {sum(1 for k in xp if not k.startswith('_'))}" if xp else ""), self.cb("xp", i))]
                     + [("🖼 Картка", self.cb("cd", i))] + ([("🗓 Запланувати", self.cb("pq", i))] if d["status"] == "approved" else []))
+        ow = self.ow_find(i)
+        if ow:
+            rows.append([(f"🗂 Ми вже про це писали · {len(ow)}", self.cb("ow", i))])
         rows.append([("🌐 Переклад", self.cb("tr", i)), ("⋯ Ще", self.cb("more", i)), ("« Чернетки", self.cb("ls", "new"))])
         return text, rows
 
@@ -1193,6 +1198,8 @@ class Plugin(StyleUI, CardsUI, QueueUI, CrosspostUI, ReportUI, ObservancesUI, Di
             return await self.actions_route(chat, a, x, y)
         if a in ("rp", "rpsel", "rpt", "rpin", "rpshow", "rpau", "rpun", "rpa", "rgo"):
             return await self.report_route(chat, a, x, y)
+        if a in ("ow", "owa", "ows", "owq"):
+            return await self.ow_route(chat, a, x, y)
         if a in ("sty", "styfix", "styd", "stydi", "stydx"):
             return await self.sty_route(chat, a, x, y)
         if a in ("cd", "cdv", "cda", "cdtone", "cdx", "cdp", "cdr", "cdu", "cdl", "cdlx", "cdn", "cdf", "cds", "cdc", "cdz", "cdb"):
@@ -1424,6 +1431,8 @@ class Plugin(StyleUI, CardsUI, QueueUI, CrosspostUI, ReportUI, ObservancesUI, Di
             return await self.xp_text(chat, key, data, text)
         if key == "cdb":
             return await self.cd_text(chat, key, data, text)
+        if key == "owq":
+            return await self.ow_text(chat, key, data, text)
         if key == "styd":
             return await self.sty_text(chat, key, data, text)
         if key in ("pqi", "pqh"):
