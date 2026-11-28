@@ -333,8 +333,11 @@ class Plugin(StudioUI, Base):
                     return ""
                 text, _p, _e = await asyncio.wait_for(core.transcribe(out.read_bytes(), "a.mp3"), 45)
                 return (text or "").strip()[:800]
-        except Exception:  # noqa: BLE001 — немає звуку чи сервісу: аналіз без мови
-            log.info("related: розшифровка для аналізу не вийшла", exc_info=True)
+        except asyncio.TimeoutError:
+            log.info("related: розшифровка для аналізу — сервіс не відповів вчасно")
+            return ""
+        except Exception as exc:  # noqa: BLE001 — немає звуку чи сервісу: аналіз без мови
+            log.info("related: розшифровка для аналізу не вийшла: %s", str(exc)[:160])
             return ""
 
     async def understand(self, chat, ctx):
@@ -492,9 +495,9 @@ class Plugin(StudioUI, Base):
         except ImportError:
             return None
         hits = []
+        sh = None
         try:
-            sh = self.__dict__.get("_shz") or Shazam()  # один клієнт на весь час роботи — без «Unclosed client session» у журналі
-            self.__dict__["_shz"] = sh
+            sh = Shazam()
             dur = await self._duration(path)
             with tempfile.TemporaryDirectory(prefix="orion-shz-") as work:
                 for i, start in enumerate(self.shazam_windows(dur)):
@@ -511,12 +514,20 @@ class Plugin(StudioUI, Base):
                     if tr.get("title"):
                         hit = (tr.get("subtitle") or "", tr["title"])
                         if not all_hits:
-                            return hit
+                            hits = [hit]
+                            break
                         if hit not in hits:
                             hits.append(hit)
         except Exception:  # noqa: BLE001
             log.info("shazam не вдався", exc_info=True)
-        return hits if all_hits else None
+        finally:
+            try:  # закриваємо з'єднання клієнта — без «Unclosed client session» у журналі
+                await sh.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if all_hits:
+            return hits
+        return hits[0] if hits else None
 
     @staticmethod
     def _sharp_ratio(im):
