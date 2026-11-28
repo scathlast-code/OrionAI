@@ -885,6 +885,19 @@ class Plugin(Base):
             return "⬇️ Починаю", (self.live_screen(chat) if self.in_app() else None)
         if a == "st":
             return None, self.live_screen(chat)
+        if a == "cr" and x.isdigit() and y.isdigit():  # 🎠 ◀️ ▶️
+            car = self._car_load().get(f"{chat}:{x}")
+            if not car:
+                return "Це повідомлення вже не гортається", None
+            i = int(y) % len(car["files"])
+            try:
+                await self._car_show(chat, int(x), car["files"], i, car["cap"], car.get("kb"))
+            except Exception as exc:  # noqa: BLE001
+                if "not modified" in str(exc).lower():
+                    return f"{i + 1}/{len(car['files'])}", None
+                log.info("гортання не вдалося", exc_info=True)
+                return "Не вдалося перегорнути — спробуйте ще раз", None
+            return f"{i + 1}/{len(car['files'])}", None
         if a == "pz":  # ⏸ / ▶️
             c = self.ctl.setdefault(chat, {})
             c["pause"] = not c.get("pause")
@@ -2561,20 +2574,31 @@ class Plugin(Base):
                 await stage(f"⬆️ Надсилаю однією публікацією: {len(album)} файл(ів)…", force=True)
                 msgs = None
                 size_all = sum(a["out"].stat().st_size for a in album)  # розмір — ДО keep(): він переносить файли
-                try:
-                    msgs = await self.send_album(chat, album)
-                except Exception:  # noqa: BLE001 — альбом не пройшов: ті самі файли окремо, щоб нічого не загубити
-                    log.exception("album send failed — надсилаю окремо")
-                    for a in album:
-                        await self.send_media(chat, a["out"], a["cap"])
+                car = None
+                try:  # 🎠 одне повідомлення з кнопками, файли гортаються ◀️ 1/N ▶️ (власник обрав замість альбому)
+                    car = await self.send_carousel(chat, album, stage)
+                    msgs = [car] if car else None
+                except Exception:  # noqa: BLE001
+                    log.exception("carousel failed — надсилаю альбомом")
+                    try:
+                        msgs = await self.send_album(chat, album)
+                    except Exception:  # noqa: BLE001 — альбом не пройшов: ті самі файли окремо, щоб нічого не загубити
+                        log.exception("album send failed — надсилаю окремо")
+                        for a in album:
+                            await self.send_media(chat, a["out"], a["cap"])
                 sent += [a["out"].name for a in album]
                 try:
                     if msgs and album_hist is not None:
                         btns = album_hist.pop("_btns", [])
                         rid_ = self.hist.add(chat, msg=msgs[0].message_id, size=size_all, count=len(album), **album_hist)
-                        last_media = ("album", btns, rid_, msgs[0].message_id, len(album), size_all, album[0]["cap"])
+                        if car:
+                            last_media = (car.message_id, btns, rid_)  # звичайний допис — меню додасться кнопками
+                        else:
+                            last_media = ("album", btns, rid_, msgs[0].message_id, len(album), size_all, album[0]["cap"])
                 except Exception:  # noqa: BLE001 — альбом уже надіслано; збій запису історії не має ламати завантаження
                     log.exception("album: запис в історію не вдався")
+                if car and last_media is None:
+                    last_media = (car.message_id, [], None)
                 for a in album:  # у Mini App — лише після надсилання й підрахунків (keep переносить файл)
                     kept = self.keep(a["out"])
                     if kept:
@@ -2707,6 +2731,23 @@ class Plugin(Base):
         """Кнопки меню — у сам допис із файлом (одним повідомленням). Альбом кнопок не має — тоді одне повідомлення-підпис до нього."""
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         bot = self.host.bot()
+        car = self._car_load().get(f"{chat}:{last[0]}") if last[0] != "album" else None
+        if car:  # 🎠 гортання: ◀️ i/N ▶️ + кнопки автора, категорії, меню — усе в одному повідомленні
+            extra = [[(t, u)] for t, u in last[1]]
+            if last[2]:
+                extra.append([("🏷 Категорії", self.cb("ted", last[2]))])
+            extra += [[(t, d) for t, d in row] for row in rows]
+            car["kb"] = extra
+            data = self._car_load()
+            data[f"{chat}:{last[0]}"] = car
+            self._car_save(data)
+            try:
+                await bot.edit_message_reply_markup(chat_id=chat, message_id=last[0],
+                                                    reply_markup=self._car_kb(chat, last[0], 0, len(car["files"]), extra))
+                return True
+            except Exception:  # noqa: BLE001
+                log.info("кнопки гортання не додано", exc_info=True)
+                return False
         kb = [[InlineKeyboardButton(t, url=u)] for t, u in last[1]]
         if last[2]:
             kb.append([InlineKeyboardButton("🏷 Категорії", callback_data=self.cb("ted", last[2]))])
@@ -2785,6 +2826,79 @@ class Plugin(Base):
             g_k = [k for k in g_k if not (rx and rx.search(self.hist.name("g", k)))]
         self.hist.update(chat, rid, topics=t_k, geos=g_k)
         return "✅ Категорії оновлено"
+
+    # ---------------------------------------------------------------- 🎠 гортання файлів в одному повідомленні
+    def _car_path(self):
+        return self.dir / "carousels.json"
+
+    def _car_load(self):
+        try:
+            return json.loads(self._car_path().read_text("utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def _car_save(self, data):
+        if len(data) > 2000:  # найстаріші — геть
+            for k in list(data)[:-2000]:
+                data.pop(k, None)
+        self._car_path().write_text(json.dumps(data, ensure_ascii=False), "utf-8")
+
+    async def send_carousel(self, chat, album, stage=None):
+        """Перший файл — повідомленням із підписом; решту завантажуємо в те саме повідомлення (заміна файлу), щоб Telegram
+        дав їм постійні ід; потім повертаємо перший. Далі ◀️ ▶️ просто міняють файл — без повторного завантаження."""
+        if any(a["out"].stat().st_size > ALBUM_MAX for a in album) or len(album) > 50:
+            return None  # завеликі для заміни через Bot API — альбомом
+        from telegram import InputMediaPhoto, InputMediaVideo
+        bot = self.host.bot()
+        cap = album[0]["cap"]
+        first = await self.send_media(chat, album[0]["out"], cap)
+        if not getattr(first, "message_id", None):
+            return None
+        files = [self._file_ref(first)]
+        for j, a in enumerate(album[1:], 2):
+            if stage:
+                await stage(f"⬆️ Надсилаю {j}/{len(album)} в одне повідомлення…", force=True)
+            path = a["out"]
+            with path.open("rb") as fh:
+                media = (InputMediaVideo(fh, caption=cap, parse_mode="HTML", supports_streaming=True, filename=path.name)
+                         if path.suffix.lower() in (".mp4", ".mov", ".m4v") else InputMediaPhoto(fh, caption=cap, parse_mode="HTML"))
+                m = await bot.edit_message_media(chat_id=chat, message_id=first.message_id, media=media, read_timeout=300, write_timeout=300)
+            files.append(self._file_ref(m))
+        if len(files) > 1:
+            await self._car_show(chat, first.message_id, files, 0, cap, None)
+        data = self._car_load()
+        data[f"{chat}:{first.message_id}"] = {"files": files, "cap": cap, "kb": []}
+        self._car_save(data)
+        return first
+
+    @staticmethod
+    def _file_ref(m):
+        if getattr(m, "video", None):
+            return {"t": "video", "id": m.video.file_id}
+        if getattr(m, "photo", None):
+            return {"t": "photo", "id": m.photo[-1].file_id}
+        if getattr(m, "animation", None):
+            return {"t": "video", "id": m.animation.file_id}
+        return {"t": "doc", "id": getattr(getattr(m, "document", None), "file_id", "")}
+
+    def _car_kb(self, chat, mid, i, n, extra):
+        """◀️ i/N ▶️ + решта кнопок допису."""
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        nav = [InlineKeyboardButton("◀️", callback_data=self.cb("cr", mid, (i - 1) % n)),
+               InlineKeyboardButton(f"{i + 1}/{n}", callback_data=self.cb("cr", mid, i)),
+               InlineKeyboardButton("▶️", callback_data=self.cb("cr", mid, (i + 1) % n))]
+        rows = [nav]
+        for row in extra or []:
+            rows.append([InlineKeyboardButton(t, url=v) if v.startswith("http") else InlineKeyboardButton(t, callback_data=v) for t, v in row])
+        return InlineKeyboardMarkup(rows)
+
+    async def _car_show(self, chat, mid, files, i, cap, extra):
+        from telegram import InputMediaDocument, InputMediaPhoto, InputMediaVideo
+        f = files[i]
+        cls = {"video": InputMediaVideo, "photo": InputMediaPhoto}.get(f["t"], InputMediaDocument)
+        kw = {"supports_streaming": True} if f["t"] == "video" else {}
+        await self.host.bot().edit_message_media(chat_id=chat, message_id=mid, media=cls(f["id"], caption=cap, parse_mode="HTML", **kw),
+                                                 reply_markup=self._car_kb(chat, mid, i, len(files), extra))
 
     async def send_album(self, chat, album):
         """Фото й відео однієї публікації — альбомом (до 10 у повідомленні), підпис — під першим."""
