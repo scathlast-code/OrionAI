@@ -54,3 +54,10 @@ def test_editorial_parse_day():
     assert parse_day("+3", t) == "2026-12-01" and parse_day("завтра", t) == "2026-11-29"
     assert parse_day("05.01", t) == "2026-01-05" or parse_day("05.01", t) == "2027-01-05"
     assert parse_day("-", t) is None and parse_day("абв", t) is False
+
+
+def test_unwrap_instagram_redirect():
+    import linktools as L
+    u = "https://l.instagram.com/?u=https%3A%2F%2Fgreenpost.s.gy%2Fdl9byv%3Ffbclid%3DPAZXh0&e=AUAMOYog"
+    assert L.unwrap(u) == "https://greenpost.s.gy/dl9byv"
+    assert L.unwrap("https://l.facebook.com/l.php?u=https%3A%2F%2Fsite.ua%2Fa%3Futm_source%3Dfb&h=x") == "https://site.ua/a"

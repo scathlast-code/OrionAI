@@ -6,10 +6,12 @@ Mini App шле POST /app/api з initData (підпис Telegram). Бот зап
 from __future__ import annotations
 
 import contextvars
+import logging
 import re
 from pathlib import Path
 
 PAGE = Path(__file__).resolve().parent / "miniapp" / "index.html"
+log = logging.getLogger("orion.miniapp")
 CAPTURE = contextvars.ContextVar("miniapp_capture", default=None)  # dict, поки обробляється запит застосунку
 
 
@@ -31,12 +33,21 @@ def _capture_media(sink, kind, payload, kw):
     """Копія надісланого в чат — для застосунку: байти/файл → тимчасове посилання; https-адреса — як є."""
     if sink is None:
         return payload
+    if hasattr(payload, "input_file_content"):  # telegram.InputFile
+        kw = {**kw, "filename": kw.get("filename") or getattr(payload, "filename", "")}
+        payload = payload.input_file_content
     name = kw.get("filename") or getattr(payload, "name", "") or ("файл" + KIND_EXT.get(kind, ""))
     name = str(name).rsplit("/", 1)[-1] or "файл"
     try:
         if hasattr(payload, "read"):
             payload = payload.read()
         if isinstance(payload, (bytes, bytearray)) and MEDIA_KEEPER:
+            import hashlib
+            h = hashlib.md5(bytes(payload)).hexdigest()
+            seen = sink.__dict__.setdefault("_seen", set())
+            if h in seen:  # той самий файл двічі (через чат і через бота) — у застосунку один раз
+                return payload
+            seen.add(h)
             if not Path(name).suffix and KIND_EXT.get(kind):
                 name += KIND_EXT[kind]
             item = MEDIA_KEEPER(bytes(payload), name)
@@ -229,6 +240,7 @@ class _Doc:
     def __init__(self, name, data, mime=""):
         self.file_name, self.file_size, self.mime_type, self._data = name, len(data), mime, data
         self.file_unique_id = str(hash(data))[:12]
+        self.file_id = "app:" + self.file_unique_id
 
     async def get_file(self):
         return _File(self._data)
@@ -239,10 +251,10 @@ class _Photo(_Doc):
 
 
 def clean_rows(rows):
-    """Прибирає чат-навігацію (◀️ 🏠 ▶️) і 💡 — у застосунку свої."""
+    """Прибирає чат-навігацію (◀️ 🏠 ▶️) і 💡 — у застосунку свої. «copy:» лишається: застосунок копіює сам."""
     out = []
     for r in rows or []:
-        rr = [(t, d) for t, d in r if d and not d.startswith(("m:nav", "imp:", "ui:", "copy:", "app:")) and d not in ("m:home",)]
+        rr = [(t, d) for t, d in r if d and not d.startswith(("m:nav", "imp:", "ui:", "app:")) and d not in ("m:home",)]
         if rr:
             out.append(rr)
     return out
@@ -433,14 +445,20 @@ async def run(bot_module, uid, op, data=None, text=None, user=None, file=None):
             ctx = _Ctx(capbot)
             if op == "file":
                 name, raw, mime = file
-                if mime.startswith("image/") and not name.lower().endswith((".webp", ".svg")):
+                is_img = mime.startswith("image/") and not name.lower().endswith((".webp", ".svg"))
+                if is_img:
                     upd.message.photo = [_Photo(name, raw, mime)]
-                    upd.message.caption, upd.message.text = text or None, None
-                    await B.on_message(upd, ctx)
                 else:
                     upd.message.document = _Doc(name, raw, mime)
-                    upd.message.caption, upd.message.text = text or None, None
-                    await B.on_file_document(upd, ctx)
+                upd.message.caption, upd.message.text = text or None, None
+                # спершу — плагіни, що чекають саме на файл (🖼 фото для картки, лого, cookies…), як і в чаті
+                taken = False
+                try:
+                    taken = bool(await B.PLUGINS.on_file(upd, ctx))
+                except Exception:  # noqa: BLE001
+                    log.exception("miniapp: plugin file")
+                if not taken:
+                    await (B.on_message if is_img else B.on_file_document)(upd, ctx)
             else:
                 await B.on_message(upd, ctx)
         elif op == "text":
@@ -451,7 +469,7 @@ async def run(bot_module, uid, op, data=None, text=None, user=None, file=None):
                 sink.notes.append("Тут текст не очікувався. Відкрийте розділ і натисніть потрібну дію.")
         else:
             data = deeplink(B, data)
-            upd = _Update(uid, sink, tbot, data=data, user=user)
+            upd = _Update(uid, sink, capbot or tbot, data=data, user=user)  # файли з екрана — і в застосунок
             await (B.open_data if (data or "").startswith("help:") else B.route)(upd, _Ctx(capbot or tbot), data or "m:home", edit=True, record=False)
     finally:
         CAPTURE.reset(token)

@@ -149,7 +149,7 @@ class CrosspostUI:
     def xp_get(self, did):
         return self.store.get(f"xp:{did}") or {}
 
-    async def xp_make(self, chat, did, only=None):
+    async def xp_make(self, chat, did, only=None, quiet=False):
         d = self.store.draft(did)
         if not d:
             return
@@ -168,7 +168,8 @@ class CrosspostUI:
         saved["_at"], saved["_model"], saved["_v"] = time.time(), model, d.get("version")
         self.store.set(f"xp:{did}", saved)
         first = only or next((k for k in ORDER if k in got), "tg")
-        await self.host.notify(chat, *self.xp_screen(did, first))
+        if not quiet:
+            await self.host.notify(chat, *self.xp_screen(did, first))
 
     def xp_screen(self, did, net=None):
         d = self.store.draft(did)
@@ -229,6 +230,14 @@ class CrosspostUI:
             return None, self.xp_screen(int(x), y)
         if a == "xpg":
             did = int(x)
+            try:
+                import miniapp
+                in_app = miniapp.CAPTURE.get() is not None
+            except Exception:  # noqa: BLE001
+                in_app = False
+            if in_app:  # у застосунку чекаємо й одразу показуємо результат на тому ж екрані
+                await self.xp_make(chat, did, y if y in NETWORKS else None, quiet=True)
+                return "✨ Готово", self.xp_screen(did, y if y in NETWORKS else None)
             self._bg(self.xp_make(chat, did, y if y in NETWORKS else None))
             what = NETWORKS[y][1] if y in NETWORKS else "усіх вибраних мереж"
             return "✨ Готую…", (f"✨ <b>Готую версію для {esc(what)}</b> — прийде окремим повідомленням за хвилину.",

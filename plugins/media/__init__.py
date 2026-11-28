@@ -1154,7 +1154,7 @@ class Plugin(Base):
             if not msg.document or (msg.document.file_size or 0) > 1_000_000:
                 await msg.reply_text("Потрібен текстовий файл cookies.txt (документом, до 1 МБ).")
                 return True
-            data = bytes(await (await ctx.bot.get_file(msg.document.file_id)).download_as_bytearray())
+            data = bytes(await (await msg.document.get_file()).download_as_bytearray())  # і в чаті, і в Mini App
             text = data.decode("utf-8", "ignore")
             if "\t" not in text or not re.search(r"(?m)^[^#\n]*\t(TRUE|FALSE)\t", text):
                 await msg.reply_text("Це не схоже на cookies.txt у форматі Netscape. Експортуйте розширенням «Get cookies.txt LOCALLY».")

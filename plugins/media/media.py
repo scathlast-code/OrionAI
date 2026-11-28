@@ -889,7 +889,7 @@ async def story_probe(url, work):
             items.append(Item("direct", link, {"title": f"Сторіс @{user}", "author": user, "when": story_time(row),
                                                "author_url": f"https://www.instagram.com/{user}/", "_exact": exact,
                                                "_fallback": row.get("videoUrl") or row.get("imageUrl"),
-                                               "description": " ".join(row.get("links") or []),
+                                               "description": story_links(row.get("links")),
                                                "location": row.get("locationName") or row.get("location") or "",
                                                "_ts": story_epoch(row)}))
     if not items:
@@ -897,6 +897,18 @@ async def story_probe(url, work):
     if all(it.info.get("_ts") for it in items):  # 🕓 у тому ж порядку, у якому їх публікували (від ранішої до пізнішої)
         items.sort(key=lambda it: it.info["_ts"])
     return items
+
+
+def story_links(links):
+    """Посилання зі сторіс (наліпка «Посилання»): Instagram віддає їх загорнутими в l.instagram.com/?u=…&e=… з кодами
+    стеження — показуємо справжню адресу коротко."""
+    from linktools import unwrap
+    out = []
+    for raw in links or []:
+        u = unwrap(str(raw))
+        if u and u not in out:
+            out.append(u)
+    return ("🔗 Посилання в сторіс: " + " · ".join(out[:3])) if out else ""
 
 
 def story_epoch(row):

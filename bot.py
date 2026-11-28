@@ -12730,6 +12730,11 @@ async def main():
         BACKGROUND.add(asyncio.create_task(premium_loop()))
         ACTLOG.add(0, "система", "запуск бота", "нова база" if not DB_EXISTED else "")
         await PLUGINS.start()
+        try:
+            import loopwatch  # 🩺 зависання циклу → у журнал зі стеком
+            loopwatch.start()
+        except Exception:  # noqa: BLE001
+            log.warning("loopwatch не запустився", exc_info=True)
         log.info("Telegram-бот запущено; плагіни: %s", ", ".join(p.title for p in PLUGINS.active()) or "немає")
         sw = storage_warning()
         if sw:

@@ -421,6 +421,7 @@ function render(res, bare){
   if(res.awaiting) askInput(res.text);
   tabs(); window.scrollTo(0,0); fitAll();
 }
+document.addEventListener('click',e=>{if(typeof marking!=='undefined'&&marking)return;const p=e.target.closest&&e.target.closest('pre');if(p){e.preventDefault();copyText(p.textContent,p)}});
 function copyText(t,el){const ok=()=>{haptic('light');toast('📋 Скопійовано');if(el){el.classList.add('copied');setTimeout(()=>el.classList.remove('copied'),900)}};
   if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(ok,()=>legacy());else legacy();
   function legacy(){const ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();
@@ -517,6 +518,7 @@ function press(label, d){
   if(marking){mark('кнопка «'+label+'»',d,'');return}
   haptic();
   if(d.startsWith('url:')){try{TG.openLink(d.slice(4))}catch(_){window.open(d.slice(4))}return}
+  if(d.startsWith('copy:')){copyText(d.slice(5));return}
   if(d==='app:retry'){if(lastCall){const [o,dd,ex]=lastCall;lastCall=null;if(o==='screen'||o==='menu'){o==='menu'?openMenu(false):open_(dd,false)}else call(o,dd,ex).then(res=>res&&render(res))}else openMenu(false);return}
   if(d.startsWith('app:')){toast('Ви вже в застосунку');return}
   if(d==='m:cancel'){cancelInput();return}

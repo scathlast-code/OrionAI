@@ -346,6 +346,21 @@ def og_image(html):
     return None
 
 
+def _app_sink():
+    """Запит із Mini App (застосунку)? Тоді картки показуємо й там, а не лише в чаті."""
+    try:
+        import miniapp
+        return miniapp.CAPTURE.get()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _to_app(sink, name, data, caption=""):
+    if sink is not None:
+        import miniapp
+        miniapp._capture_media(sink, "photo", data, {"filename": name, "caption": caption})
+
+
 class CardsUI:
     """Мікс до «Новинарні»: картки за шаблоном GreenPost."""
 
@@ -435,10 +450,14 @@ class CardsUI:
         if not d or not bot:
             return
         from telegram import InputFile, InputMediaPhoto
-        imgs = self._cd_images(d, bg, photo)
+        import asyncio
+        imgs = await asyncio.to_thread(self._cd_images, d, bg, photo)  # малювання — в окремому потоці, щоб бот не завмирав
         self.store.set(f"cdbg:{did}", bg or self.store.get(f"cdbg:{did}") or self.cd_cfg()["bg"])
         self.store.set(f"cdph:{did}", bool(photo))
         cred = (self.store.get(f"cdcred:{did}") or "") if photo else ""
+        sink = _app_sink()
+        for i, (k, b) in enumerate(imgs):
+            _to_app(sink, self._cd_name(did, k), b, f"{SIZES[k][0]} — {SIZES[k][2]}")
         cap = (f"🖼 Картки до #{did}: " + ", ".join(f"{SIZES[k][0]} ({SIZES[k][2]})" for k, _ in imgs) + (f"\n📸 {cred}" if cred else ""))[:1000]
         media = [InputMediaPhoto(InputFile(io.BytesIO(b), filename=self._cd_name(did, k)), caption=cap if i == 0 else None)
                  for i, (k, b) in enumerate(imgs)]
@@ -536,7 +555,8 @@ class CardsUI:
         links = []
         for k in [k for k in SIZES if k in c["sizes"]]:
             try:
-                pdf = card_pdf(photo, d["headline"], c, k, self._cd_label(d), self.cd_logo())
+                import asyncio
+                pdf = await asyncio.to_thread(card_pdf, photo, d["headline"], c, k, self._cd_label(d), self.cd_logo())
                 url = await canva_import(pdf, f"GreenPost #{did} {SIZES[k][0]}")
                 links.append((k, url))
             except Exception as exc:  # noqa: BLE001
@@ -560,7 +580,10 @@ class CardsUI:
         from telegram import InputFile
         p = self.cd_photo_path(did)
         photo = p.read_bytes() if self.store.get(f"cdph:{did}") and p.exists() else None
-        for k, b in self._cd_images(d, self.store.get(f"cdbg:{did}"), photo):
+        import asyncio
+        sink = _app_sink()
+        for k, b in await asyncio.to_thread(self._cd_images, d, self.store.get(f"cdbg:{did}"), photo):
+            _to_app(sink, self._cd_name(did, k), b, f"{SIZES[k][0]} — файл без стиснення")
             await bot.send_document(chat, InputFile(io.BytesIO(b), filename=self._cd_name(did, k)))
 
     async def cd_route(self, chat, a, x, y, z=None):
@@ -569,7 +592,11 @@ class CardsUI:
         if a == "cdn":  # фото: своє/закріплене → нова картинка під тему → з джерела → лише текст
             did = int(x)
             ok = y in BG or (y or "")[:1] == "o" and (y or "")[1:] in THEMES
-            self._bg(self.cd_make(chat, did, y if ok else self.store.get(f"cdbg:{did}")))
+            job = self.cd_make(chat, did, y if ok else self.store.get(f"cdbg:{did}"))
+            if _app_sink() is not None:
+                await job
+                return "🖼 Готово", self.cd_screen(did)
+            self._bg(job)
             return "🖼 Підбираю картинку й малюю…", None
         if a == "cdv":
             self._bg(self.cd_canva(chat, int(x)))
@@ -606,9 +633,15 @@ class CardsUI:
                     self.store.set(f"cdcred:{did}", "Фото: з джерела новини")
             if not photo:
                 return "Фото не знайдено", self.cd_screen(did)
+            if _app_sink() is not None:
+                await self.cd_send(chat, did, None, photo)
+                return "🖼 Готово", self.cd_screen(did)
             self._bg(self.cd_send(chat, did, None, photo))
             return "🖼 Малюю…", None
         if a == "cdf":
+            if _app_sink() is not None:
+                await self.cd_files(chat, int(x))
+                return "📎 Готово", self.cd_screen(int(x))
             self._bg(self.cd_files(chat, int(x)))
             return "📎 Надсилаю файлами", None
         if a == "cdl":
@@ -665,7 +698,7 @@ class CardsUI:
         if not f:
             await msg.reply_text("Потрібне зображення. Натисніть «🖼 Своє лого» ще раз і надішліть PNG.")
             return True
-        data = bytes(await (await ctx.bot.get_file(f.file_id)).download_as_bytearray())
+        data = bytes(await (await f.get_file()).download_as_bytearray())  # так працює і в чаті, і в Mini App
         if kind == "photo":
             self.cd_photo_path(did).write_bytes(data)
             self.store.set(f"cdnoph:{did}", None)

@@ -331,7 +331,10 @@ class ObservancesUI:
                         except Exception:  # noqa: BLE001
                             log.info("контент-план: копію не збережено", exc_info=True)
                         rep, cells = [], {}
-                        for day, items in CP.parse(r.content, rep, cells).items():
+                        # розбір великої таблиці (десятки аркушів) — в окремому потоці: інакше бот на кілька секунд
+                        # «завмирає» і кнопки (зокрема «Назад») не відповідають
+                        parsed = await asyncio.to_thread(CP.parse, r.content, rep, cells)
+                        for day, items in parsed.items():
                             for it in items:
                                 it["src"] = url
                             merged.setdefault(day, []).extend(items)
@@ -346,7 +349,7 @@ class ObservancesUI:
         log.info("контент-план: %d днів, %d тем", len(merged), sum(len(v) for v in merged.values()))
         prev = self.store.get("cplan_data") or {}
         if merged:
-            ch = self.cplan_diff(prev, merged) if prev else []
+            ch = await asyncio.to_thread(self.cplan_diff, prev, merged) if prev else []
             if ch:
                 hist = (self.store.get("cplan_hist") or [])[-30:]
                 hist.append({"t": time.time(), "changes": ch[:40]})
@@ -354,7 +357,7 @@ class ObservancesUI:
                 self._cplan_changes = ch
             self.store.set("cplan_data", merged)
             try:
-                n = self.cplan_sync(merged)
+                n = await asyncio.to_thread(self.cplan_sync, merged)
                 if n:
                     log.warning("контент-план: додано в календар днів: %d", n)
             except Exception:  # noqa: BLE001
