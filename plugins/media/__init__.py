@@ -941,12 +941,18 @@ class Plugin(Base):
         lines = ["🛠 <b>Інструменти</b>"]
         for tool in TOOLS:
             lines.append(f"{'✅' if shutil.which(tool) else '❌'} {tool}" + (" (старі DOC/XLS/PPT)" if tool == "libreoffice" else ""))
+        cache = self.__dict__.setdefault("_ver", {})  # версії — раз на 10 хв (запуск програм гальмував екран)
         for tool in ("yt-dlp", "gallery-dl"):
             if shutil.which(tool):
-                try:
-                    lines.append(f"{tool}: версія {(await run(tool, '--version', timeout=20)).strip()[:20]}")
-                except JobError:
-                    pass
+                v, t0 = cache.get(tool, ("", 0))
+                if time.time() - t0 > 600:
+                    try:
+                        v = (await run(tool, '--version', timeout=20)).strip()[:20]
+                    except JobError:
+                        v = ""
+                    cache[tool] = (v, time.time())
+                if v:
+                    lines.append(f"{tool}: версія {v}")
         rows = [[("🩺 Перевірити сайти", self.cb("chk"))]]
         rows += [[("🔄 Оновити yt-dlp і gallery-dl", self.cb("upd"))]] if self.host.is_admin(chat) else []
         rows.append([("« Медіа", self.cb())])
@@ -1122,6 +1128,7 @@ class Plugin(Base):
             self._bg(chat, self.check_sites(chat))
             return "🩺 Перевіряю…", (self.live_screen(chat) if self.in_app() else None)
         if a == "upd" and self.host.is_admin(chat):
+            self.__dict__.get("_ver", {}).clear()  # після оновлення — свіжі версії
             self._bg(chat, self.update_tools(chat))
             return "🔄 Оновлюю…", None
         if a == "stop":
