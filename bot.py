@@ -10333,7 +10333,35 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
 async def on_menu_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return await update.callback_query.answer("Доступ закритий", show_alert=True)
-    await route(update, ctx, update.callback_query.data)
+    q = update.callback_query
+    answered = [False]
+    orig = q.answer
+
+    async def once(*a, **k):  # відповідь на натискання — лише одна (друга дала б помилку Telegram)
+        if answered[0]:
+            return True
+        answered[0] = True
+        try:
+            return await orig(*a, **k)
+        except Exception:  # noqa: BLE001 — застаріле натискання: не заважаємо самій дії
+            return False
+    try:
+        with q._unfrozen():
+            q.answer = once
+    except Exception:  # noqa: BLE001
+        pass
+
+    async def nudge():  # ⏳ дія довша за секунду — одразу видно, що натискання прийнято
+        await asyncio.sleep(1.0)
+        if not answered[0]:
+            await once("⏳ Обробляю…")
+    t = asyncio.get_running_loop().create_task(nudge())
+    try:
+        await route(update, ctx, q.data)
+    finally:
+        t.cancel()
+        if not answered[0]:
+            await once()
 
 
 async def handle_awaited(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text):

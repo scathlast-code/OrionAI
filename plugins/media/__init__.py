@@ -3065,6 +3065,18 @@ class Plugin(Base):
                 cur["k"], cur["frac"] = len(nums), 0.95
                 await stage(f"⬆️ Надсилаю однією публікацією: {len(album)} файл(ів)…", force=True)
                 msgs = None
+                gone = [a for a in album if not a["out"].is_file()]
+                if gone:  # файл зник між обробкою й надсиланням — не валимо весь допис, а пишемо в журнал, що саме і що лишилось поруч
+                    for a in gone:
+                        near = sorted(f.name for f in a["out"].parent.iterdir()) if a["out"].parent.is_dir() else ["(теки немає)"]
+                        log.warning("album: файлу немає %s; у теці: %s", a["out"], near[:10])
+                    cap0 = album[0]["cap"]
+                    album = [a for a in album if a["out"].is_file()]
+                    if album and not album[0]["cap"]:
+                        album[0]["cap"] = cap0  # підпис допису — на перший файл, що лишився
+                    failed += [f"{a['out'].parent.name.lstrip('0') or '?'} · файл загубився під час обробки — надішліть посилання ще раз"
+                               for a in gone]
+            if album:
                 size_all = sum(a["out"].stat().st_size for a in album)  # розмір — ДО keep(): він переносить файли
                 car = None
                 try:  # 🖼 мозаїка: усі файли допису одним дописом (альбом до 10); дії — посиланнями в підписі
@@ -3075,7 +3087,8 @@ class Plugin(Base):
                     except Exception:  # noqa: BLE001 — альбом не пройшов: ті самі файли окремо, щоб нічого не загубити
                         log.exception("album send failed — надсилаю окремо")
                         for a in album:
-                            await self.send_media(chat, a["out"], a["cap"])
+                            if a["out"].is_file():
+                                await self.send_media(chat, a["out"], a["cap"])
                 sent += [a["out"].name for a in album]
                 try:
                     if msgs and album_hist is not None:
