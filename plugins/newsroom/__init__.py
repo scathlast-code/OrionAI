@@ -133,7 +133,7 @@ class Plugin(ExtrasUI, ToolsUI, WeekStatsUI, AlertsUI, OursWroteUI, StyleUI, Car
                "переписує за правилами редакції на моделях Оріона, тримає точну довжину, готує зведення за добу й "
                "публікує в канал лише після вашого схвалення.\n\n"
                "Автоматичний рерайт — не фактчек: перед публікацією звіряйте цифри й імена (кнопка «🔎 Звірити» допомагає, але не замінює редактора).")
-    VIEWS = {"tl", "tv", "tm", "seo", "en", "pll", "cr", "crl", "lv", "yago", "nl", "ws", "wst", "al", "ow", "ows", "sty", "styd", "cd", "cds", "pql", "pq", "pqh", "xp", "xps", "ls", "d", "src", "dg", "so", "set", "q", "help", "ver", "len", "rules",
+    VIEWS = {"tl", "tv", "tm", "seo", "en", "pll", "cr", "crl", "lv", "yago", "nl", "ws", "wst", "eg", "al", "ow", "ows", "sty", "styd", "cd", "cds", "pql", "pq", "pqh", "xp", "xps", "ls", "d", "src", "dg", "so", "set", "q", "help", "ver", "len", "rules",
              "L", "Lo", "Ls", "Lsort", "Lbulk", "Le", "Lacc", "Lhelp", "Elst", "Lmerge",
              "H1", "H2", "H3", "H4", "H5", "H6", "H7", "D", "Dm", "Fl", "Fo", "Ff", "Fi", "Fmv", "Fbl", "Tg", "Tgi", "Tp", "Bk", "Bkl",
              "Sp", "Ou", "Ours", "Sl", "St", "Wt", "more", "acs", "ace", "sch", "fld", "flds", "echo", "eci", "cls", "ctp", "cte", "cmk", "csl", "obh", "obt", "obc", "obd", "ob", "obi", "obl", "obs", "obup", "obws", "obdy", "obcp", "obcm"}
@@ -1242,6 +1242,8 @@ class Plugin(ExtrasUI, ToolsUI, WeekStatsUI, AlertsUI, OursWroteUI, StyleUI, Car
         if a in ("seo", "seog", "en", "eng", "pll", "plg", "pls", "cr", "cri", "crl", "lv", "lvs", "lva", "lve", "yago", "yagoa",
                  "nl", "nla", "nlc", "nlh"):
             return await self.extras_route(chat, a, x, y)
+        if a in ("eg", "egw", "egx"):  # ♻️ варто повторити
+            return await self.eg_route(chat, a, x)
         if a in ("ws", "wst", "wsa", "wsq"):
             return await self.ws_route(chat, a, x, y)
         if a in ("al", "alc", "ali", "alh", "alm"):

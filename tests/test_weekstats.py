@@ -18,3 +18,10 @@ def test_week_summary():
     s = W.week_summary([P(i, 9, 1000 * (i + 1)) for i in range(10)], [P(50, 9, 100)])
     assert s["n"] == 10 and s["views"] == 55000 and s["top"][0][0]["id"] == 9 and len(s["flop"]) == 3
     assert W.delta(120, 100) == " (+20% до мин. тижня)"
+
+
+def test_eg_parse():
+    from plugins.newsroom.weekstats import eg_parse
+    r = eg_parse('{"picks":[{"id":3,"why":"сезон","update":"цифри"},{"id":99}]}', {3, 4})
+    assert r == [(3, "сезон", "цифри")]
+    assert eg_parse("x", {1}) == []
