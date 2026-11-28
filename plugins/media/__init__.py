@@ -2379,23 +2379,26 @@ class Plugin(Base):
                                                if code else esc(type(exc).__name__)))
             if album:
                 await stage(f"⬆️ Надсилаю однією публікацією: {len(album)} файл(ів)…", force=True)
+                msgs = None
+                size_all = sum(a["out"].stat().st_size for a in album)  # розмір — ДО keep(): він переносить файли
                 try:
                     msgs = await self.send_album(chat, album)
-                    sent += [a["out"].name for a in album]
-                    for a in album:
-                        kept = self.keep(a["out"])
-                        if kept:
-                            self.got[chat].append(kept)
-                    if msgs and album_hist is not None:
-                        btns = album_hist.pop("_btns", [])
-                        size_all = sum(a["out"].stat().st_size for a in album)
-                        rid_ = self.hist.add(chat, msg=msgs[0].message_id, size=size_all, count=len(album), **album_hist)
-                        last_media = ("album", btns, rid_, msgs[0].message_id, len(album), size_all)
                 except Exception:  # noqa: BLE001 — альбом не пройшов: ті самі файли окремо, щоб нічого не загубити
                     log.exception("album send failed — надсилаю окремо")
                     for a in album:
                         await self.send_media(chat, a["out"], a["cap"])
-                        sent.append(a["out"].name)
+                sent += [a["out"].name for a in album]
+                try:
+                    if msgs and album_hist is not None:
+                        btns = album_hist.pop("_btns", [])
+                        rid_ = self.hist.add(chat, msg=msgs[0].message_id, size=size_all, count=len(album), **album_hist)
+                        last_media = ("album", btns, rid_, msgs[0].message_id, len(album), size_all)
+                except Exception:  # noqa: BLE001 — альбом уже надіслано; збій запису історії не має ламати завантаження
+                    log.exception("album: запис в історію не вдався")
+                for a in album:  # у Mini App — лише після надсилання й підрахунків (keep переносить файл)
+                    kept = self.keep(a["out"])
+                    if kept:
+                        self.got[chat].append(kept)
             tick.cancel()
             if sent:
                 self.note_time(site, time.time() - t0, len(nums))
