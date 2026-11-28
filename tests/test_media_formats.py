@@ -73,3 +73,12 @@ def test_threads_raw_carousel_and_icons():
     got = M._raw_post_images(t)
     assert len(got) == 2 and all("p1080x1350" in u for u, _ in got)  # дві різні фото, найбільші, без аватарки
     assert M._embed_media('<img src="https://static.cdninstagram.com/rsrc.php/v4/link.png">', "https://x") == []
+
+
+def test_threads_raw_fbcdn_hosts():
+    from plugins.media import media as M
+    t = ('<img src="https://instagram.fiev22-1.fna.fbcdn.net/v/t51.29350-15/333_n.jpg?stp=dst-jpg_p1080x1350&amp;_nc_ht=x"> '
+         '<img srcset="https://instagram.fiev22-1.fna.fbcdn.net/v/t51.29350-15/444_n.webp?stp=p640x640 640w">')
+    got = M._raw_post_images(t)
+    assert len(got) == 2 and "&_nc_ht" in got[0][0]
+    assert "t51.29350-15×2" in M._img_census(t)
