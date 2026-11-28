@@ -713,44 +713,14 @@ def _music_split(t):
 
 
 def _embed_music(text, code=""):
-    """Музика під дописом Threads («▶ Twinkling Lights (Reimagined) · Auni») -> (назва, виконавець) або None.
-    Шукаємо в JSON, далі — рядок «Назва · Виконавець» поруч зі значком (svg) чи позначкою звуку; «·» може бути окремим елементом."""
+    """Музика допису Threads лише з даних сторінки (music_info). Видимого рядка «▶ Назва · Виконавець» у розмітці вбудовування немає —
+    його бот читає з картки-прев'ю (og:image) через ШІ із зором; вгадувати за «·» не можна: там дата й лічильники («8:17 AM · Nov 27»)."""
     m = MUSIC_JSON_RE.search(text or "")
     if m:
         try:
             return json.loads(f'"{m[1]}"'), json.loads(f'"{m[2]}"')
         except ValueError:
             return m[1], m[2]
-    try:
-        doc = read_html((text or "").encode("utf-8"))
-    except Exception:  # noqa: BLE001
-        return None
-    seen = []
-    for node in doc.xpath("//*[contains(text(), '·')]"):
-        if node.xpath("ancestor-or-self::*[self::script or self::style or self::title]"):
-            continue
-        box = node
-        for _ in range(4):  # сам елемент або 1–3 рівні вгору, поки текст не стане «Назва · Виконавець»
-            got = _music_split(box.text_content())
-            if got:
-                near = " ".join(filter(None, [box.get("class"), box.get("aria-label"), box.get("role")])).lower()
-                around = box.getparent() if box.getparent() is not None else box
-                if box.xpath(".//svg") or around.xpath("./*[.//svg]") or re.search(r"music|audio|sound|song|музик|аудіо|play", near) \
-                        or any(re.search(r"music|audio|song|play|музик|аудіо", (e.get("aria-label") or "") + (e.get("href") or ""), re.I)
-                               for e in around.iter()):
-                    return got
-                seen.append(box.text_content()[:80])
-                break
-            box = box.getparent()
-            if box is None:
-                break
-    if seen:
-        log.info("threads %s: рядки з «·» без значка звуку: %s", code, [re.sub(r"\s+", " ", x) for x in seen[:5]])
-    # для налаштування: як виглядає розмітка біля «·» (без адрес), щоб наступного разу знайти музику точно
-    body = re.sub(r"<script.*?</script>|<style.*?</style>", " ", text or "", flags=re.S)
-    for mm in list(re.finditer(r"·|&#183;|&middot;", body))[:3]:
-        snip = re.sub(r"https?://\S+?(?=[\"' ])", "…", body[max(0, mm.start() - 350): mm.end() + 250])
-        log.info("threads %s: біля «·»: %s", code, re.sub(r"\s+", " ", snip))
     return None
 
 
