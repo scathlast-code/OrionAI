@@ -2401,6 +2401,48 @@ async def welcome_approved(bot, user, how="за вашим дозволом"):
             log.info("сповіщення про нового учасника не надіслано %s", admin)
 
 
+async def access_request(bot, user, via=""):
+    """🙋 Заявка на доступ: власнику (і в режимі «усім усе» — учасникам) приходить «✅ Дати доступ». Про незнайомого — лише ID."""
+    with closing(db()) as con, con:
+        con.execute("INSERT INTO members(user_id, name, username, status, created) VALUES (?,?,?,?,?) "
+                    "ON CONFLICT(user_id) DO UPDATE SET status='pending'", (user.id, "", "", "pending", time.time()))
+    who = f'<a href="tg://user?id={user.id}">{esc(user.full_name)}</a>' + (f" (@{esc(user.username)})" if user.username else "")
+    for admin in admin_ids():
+        try:
+            await bot.send_message(
+                admin, f"👥 <b>{who} просить доступ до бота й застосунку</b>" + (f" · {esc(via)}" if via else "") + f"\nID: <code>{user.id}</code>\n\n"
+                "Натисніть «✅ Дати доступ» — бот одразу запрацює для цієї людини й привітається з нею. Нічого більше від неї не потрібно.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb([[("✅ Дати доступ", f"m:accok:{user.id}"), ("❌ Відхилити", f"m:accno:{user.id}")],
+                                 *([[("↗ Відкрити акаунт", f"url:https://t.me/{user.username}")]] if user.username else [])]))
+        except Exception:  # noqa: BLE001
+            log.warning("не вдалося повідомити %s про заявку %s", admin, user.id)
+
+
+async def _grant_access(raw):
+    """Дати доступ до бота й застосунку за @ім'ям або ID (з інших розділів, напр. 👥 Люди редакції). -> текст результату."""
+    raw = str(raw).strip()
+    if raw.isdigit() and member_status(int(raw)) == "approved":
+        return "уже має доступ"
+    key = preinvite_add(raw)
+    if tg_app and await push_invite(tg_app.bot, key):
+        return "доступ відкрито — людина вже отримала привітання"
+    return "дозвіл додано — доступ відкриється, щойно людина натисне «Старт» у боті або відкриє застосунок"
+
+
+def request_link_code(new=False):
+    """🔗 Постійне посилання-заявка (без терміну дії): будь-хто може попросити доступ; «♻️ Нове» — старе перестає діяти."""
+    code = kv_get("req_link")
+    if new or not code:
+        code = secrets.token_urlsafe(6).replace("-", "x").replace("_", "y")
+        kv_set("req_link", code)
+    return code
+
+
+def request_link():
+    return f"https://t.me/{BOT_USERNAME}?start=req_{request_link_code()}" if BOT_USERNAME else f"/start req_{request_link_code()}"
+
+
 async def deny(update: Update):
     key = preinvite_match(update.effective_user)
     if key and member_status(update.effective_user.id) != "blocked":
@@ -2411,21 +2453,7 @@ async def deny(update: Update):
     st = member_status(update.effective_user.id)
     if st in (None, "removed") and owner_id() and update.effective_user.id != owner_id():
         # Хто натиснув «Старт» — одразу заявка власнику з кнопкою «Дати доступ». Після схвалення бот просто починає працювати.
-        user = update.effective_user
-        with closing(db()) as con, con:  # про незнайомого зберігаємо лише ID і статус заявки — без імені
-            con.execute("INSERT INTO members(user_id, name, username, status, created) VALUES (?,?,?,?,?) "
-                        "ON CONFLICT(user_id) DO UPDATE SET status='pending'", (user.id, "", "", "pending", time.time()))
-        who = f'<a href="tg://user?id={user.id}">{esc(user.full_name)}</a>' + (f" (@{esc(user.username)})" if user.username else "")
-        for admin in admin_ids():  # власник і (у режимі «усім усе») кожен учасник може схвалити
-            try:
-                await update.get_bot().send_message(
-                    admin, f"👥 <b>{who} просить доступ до бота й застосунку</b>\nID: <code>{user.id}</code>\n\n"
-                    "Натисніть «✅ Дати доступ» — бот одразу запрацює для цієї людини й привітається з нею. Нічого більше від неї не потрібно.",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=kb([[("✅ Дати доступ", f"m:accok:{user.id}"), ("❌ Відхилити", f"m:accno:{user.id}")],
-                                     *([[("↗ Відкрити акаунт", f"url:https://t.me/{user.username}")]] if user.username else [])]))
-            except Exception:  # noqa: BLE001
-                log.warning("не вдалося повідомити %s про заявку %s", admin, user.id)
+        await access_request(update.get_bot(), update.effective_user)
         st = "pending"
         text = ("👋 Вітаю! Це приватний бот. Я надіслав власнику заявку на ваш доступ — щойно він схвалить, "
                 "бот одразу запрацює і я вам напишу. Нічого більше робити не потрібно.")
@@ -3084,7 +3112,7 @@ PLUGINS = orion_plugins.Registry(orion_plugins.Host(
     cancel_input=lambda chat: AWAIT.pop(chat, None),
     bot=lambda: _plugin_bot(),
     tz=TZ,
-    extra={"kb": lambda rows: kb(rows), "user_name": lambda c: sp_who(c), "secret": MCP_SECRET, "sticker_select": _plugin_sticker_select,
+    extra={"kb": lambda rows: kb(rows), "user_name": lambda c: sp_who(c), "grant_access": lambda raw: _grant_access(raw), "has_access": lambda uid: is_allowed_id(uid), "secret": MCP_SECRET, "sticker_select": _plugin_sticker_select,
            "chat_answer": lambda chat, text: _plugin_chat_answer(chat, text),
            "real_bot": lambda: tg_app.bot if tg_app else None, "hubclient": hub,
            "touched_since": lambda chat, t: LAST_CB.get(chat, 0) > t,
@@ -4376,7 +4404,10 @@ def scr_access():
     pre = preinvites_list()
     for x in pre:
         lines.append(f"\n⏳ Дозволено заздалегідь: <b>{esc(x['key'])}</b> — доступ відкриється, щойно людина натисне «Старт»")
-    rows = [[("🔗 Одноразове запрошення", "m:inv:1"), ("♾ На 7 днів", "m:inv:0")], [("➕ Додати за @ім'ям чи ID", "m:addmem")]]
+    lines.append(f"\n🙋 <b>Постійне посилання-заявка</b> (без терміну дії): кожен, хто відкриє, попросить доступ, а ви схвалите чи відхилите:\n"
+                 f"<code>{esc(request_link())}</code>")
+    rows = [[("🔗 Одноразове запрошення", "m:inv:1"), ("♾ На 7 днів", "m:inv:0")], [("➕ Додати за @ім'ям чи ID", "m:addmem")],
+            [("📋 Посилання-заявка", "copy:" + request_link()), ("♻️ Нове посилання-заявка", "m:reqnew")]]
     rows += [[(f"🚫 Скасувати додавання {x['key']}", f"m:prex:{x['key']}")] for x in pre]
     for m in pending:
         who = (m["name"] or f"ID {m['user_id']}") + (f" @{m['username']}" if m["username"] else "")
@@ -9511,7 +9542,7 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         tid = create_planned_task(chat_id, old["history_text"], old.get("dialog_id"), old.get("folder_id"))
         screen = scr_when(tid)
     # спільний доступ (лише власник)
-    elif (a in ("acc", "inv", "invx", "accok", "accno", "accrm", "accfull", "bpn", "lb", "lbnow", "lbauto", "lbj", "mem", "mdl", "mdv", "mdc", "addmem", "prex", "backup", "mview") or a.startswith("bk")) and not is_admin_id(chat_id):
+    elif (a in ("acc", "inv", "invx", "accok", "accno", "accrm", "accfull", "bpn", "lb", "lbnow", "lbauto", "lbj", "mem", "mdl", "mdv", "mdc", "addmem", "reqnew", "prex", "backup", "mview") or a.startswith("bk")) and not is_admin_id(chat_id):
         toast = "Лише для власника бота"
         screen = scr_home(chat_id)
     elif a == "acc":
@@ -10225,6 +10256,10 @@ async def route(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data, edit=True,
         screen = scr_backups(chat_id)
     elif a == "mem":
         screen = scr_member(int(arg))
+    elif a == "reqnew":
+        request_link_code(new=True)
+        toast = "♻️ Нове посилання-заявка — старе більше не діє"
+        screen = scr_access()
     elif a == "addmem":
         ask_input(chat_id, "addmem")
         screen = (
@@ -10698,6 +10733,14 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return await update.message.reply_text("Це запрошення недійсне або вже використане. Попросіть у власника нове.")
         member_upsert(user, "approved", code)  # посилання-запрошення — це вже дозвіл власника; «Старт» — згода людини
         return await welcome_approved(ctx.bot, user, "за посиланням-запрошенням")
+    if not allowed(update) and ctx.args and ctx.args[0].startswith("req_"):  # 🔗 постійне посилання-заявка
+        if ctx.args[0][4:] != request_link_code():
+            return await update.message.reply_text("Це посилання на заявку більше не діє — попросіть у редакції нове.")
+        if member_status(user.id) in (None, "removed") and owner_id() and user.id != owner_id() and not preinvite_match(user):
+            await access_request(ctx.bot, user, "за постійним посиланням")
+            return await update.message.reply_text("👋 Вітаю! Заявку на доступ надіслано — щойно її схвалять, бот одразу запрацює й напише вам. "
+                                                   "Застосунок теж відкриється автоматично.")
+        return await deny(update)
     if ctx.args and ctx.args[0].startswith("inb_") and is_admin_id(user.id):  # 📮 дотик до імені людини → переписка з нею
         inb = PLUGINS.get("inb")
         uid = ctx.args[0][4:]
@@ -12555,6 +12598,34 @@ async def main():
         except ValueError:
             return _Resp(status_code=400)
         uid = improve.check_webapp(str(body.get("initData") or ""), TELEGRAM_TOKEN)
+        if uid and not is_allowed_id(uid):
+            # 🙋 застосунок відкрила людина без доступу: дозволено заздалегідь (за @ім'ям чи ID) — пускаємо одразу,
+            # інакше — кнопка «Попросити доступ» (та сама заявка, що й «Старт» у боті)
+            from types import SimpleNamespace
+            from urllib.parse import parse_qsl as _pq
+            try:
+                uj = json.loads(dict(_pq(str(body.get("initData") or ""))).get("user") or "{}")
+            except ValueError:
+                uj = {}
+            u = SimpleNamespace(id=uid, username=uj.get("username") or None,
+                                full_name=" ".join(x for x in (uj.get("first_name"), uj.get("last_name")) if x) or str(uid))
+            st = member_status(uid)
+            key = preinvite_match(u) if st != "blocked" else None
+            if key:
+                preinvite_remove(key)
+                member_upsert(u, "approved")
+                member_set(uid, "approved")
+                for admin in admin_ids():
+                    try:
+                        await tg_app.bot.send_message(admin, f"✅ {esc(u.full_name)} відкрив(-ла) застосунок — доступ за вашим дозволом відкрито.",
+                                                      parse_mode=ParseMode.HTML)
+                    except Exception:  # noqa: BLE001
+                        pass
+            else:
+                if str(body.get("op")) == "askaccess" and st in (None, "removed") and owner_id():
+                    await access_request(tg_app.bot, u, "із застосунку")
+                    st = "pending"
+                return _Resp(json.dumps({"error": "forbidden", "status": st or "none"}), status_code=403, media_type="application/json")
         if not uid or not is_allowed_id(uid):
             return _Resp(json.dumps({"error": "forbidden"}), status_code=403, media_type="application/json")
         if not public_base():  # застосунок відкрився — отже ця адреса робоча: запам'ятати її для кнопок і /start

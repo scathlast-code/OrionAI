@@ -176,7 +176,11 @@ async function call(op, data, extra, quiet){
     if(err){busy=false;return null}
     return await finish(r)}
   async function finish(r){try{
-    if(r.status===403){render({text:'<b>Немає доступу</b>\nЦей застосунок відкривається лише для учасників бота.\nЯкщо вас запросили — поверніться в чат із ботом і натисніть «✅ Згоден(-на)», потім відкрийте застосунок знову.',rows:[]},true);return null}
+    if(r.status===403){let st='none';try{st=(await r.json()).status||'none'}catch(_){}
+      if(st==='pending')render({text:'<b>⏳ Заявку надіслано</b>\nЩойно її схвалять, застосунок і бот запрацюють для вас — просто відкрийте застосунок знову.',rows:[]},true);
+      else if(st==='blocked')render({text:'<b>Доступ закрито</b>',rows:[]},true);
+      else render({text:'<b>Немає доступу</b>\nЦей застосунок — для учасників бота. Натисніть «🙋 Попросити доступ»: редакція отримає заявку, а після схвалення застосунок і бот запрацюють для вас.',rows:[[['🙋 Попросити доступ','app:askaccess']]]},true);
+      return null}
     if(!r.ok){if(!quiet)toast('Помилка сервера (HTTP '+r.status+') — спробуйте ще раз; якщо повторюється, натисніть 🐞');return null}
     return await r.json()}catch(e){if(!quiet)toast(e instanceof SyntaxError?'Сервер відповів незрозуміло — спробуйте ще раз':'Сервер бота не відповідає — спробуйте ще раз за хвилину');return null}finally{busy=false}}}
 let LDT=null;
@@ -520,6 +524,7 @@ function press(label, d){
   haptic();
   if(d.startsWith('url:')){try{TG.openLink(d.slice(4))}catch(_){window.open(d.slice(4))}return}
   if(d.startsWith('copy:')){copyText(d.slice(5));return}
+  if(d==='app:askaccess'){call('askaccess','').then(()=>{});return}
   if(d==='app:retry'){if(lastCall){const [o,dd,ex]=lastCall;lastCall=null;if(o==='screen'||o==='menu'){o==='menu'?openMenu(false):open_(dd,false)}else call(o,dd,ex).then(res=>res&&render(res))}else openMenu(false);return}
   if(d.startsWith('app:')){toast('Ви вже в застосунку');return}
   if(d==='m:cancel'){cancelInput();return}
