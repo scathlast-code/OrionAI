@@ -434,6 +434,46 @@ class Plugin(Base):
                                                    parse_mode="HTML", reply_to_message_id=mid, disable_notification=True)
         asyncio.get_running_loop().create_task(job())
 
+    @staticmethod
+    async def _has_audio(path):
+        try:
+            proc = await asyncio.create_subprocess_exec("ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
+                                                        "-of", "csv=p=0", str(path), stdout=asyncio.subprocess.PIPE)
+            out, _ = await asyncio.wait_for(proc.communicate(), 20)
+            return bool(out.strip())
+        except Exception:  # noqa: BLE001
+            return True  # не змогли перевірити — вважаємо, що звук є
+
+    async def _shazam(self, path):
+        """Тиха перевірка Shazam (25 с звуку) -> (виконавець, назва) або None; без встановлення на льоту."""
+        try:
+            from shazamio import Shazam
+        except ImportError:
+            return None
+        try:
+            with tempfile.TemporaryDirectory(prefix="orion-shz-") as work:
+                clip = Path(work) / "clip.mp3"
+                await run("ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-t", "25", "-i", str(path), "-ac", "1", clip, timeout=120)
+                sh = Shazam()
+                out = await asyncio.wait_for(sh.recognize(str(clip)) if hasattr(sh, "recognize") else sh.recognize_song(str(clip)), 40)
+            tr = (out or {}).get("track") or {}
+            return (tr.get("subtitle") or "", tr["title"]) if tr.get("title") else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    async def post_music_in_file(self, media, song):
+        """Threads: музика прикріплена до допису. Чи є вона в самому скачаному файлі?
+        -> True (є) | False (немає: фото, відео без звуку або звучить інше) | None (не вдалося перевірити)."""
+        if not media or Path(media).suffix.lower() not in self.VIDEO_EXT + self.AUD_EXT:
+            return False  # фото — музики в них немає
+        if not await self._has_audio(media):
+            return False
+        got = await self._shazam(media)
+        if got is None:
+            return None
+        title = (song or "").lower()
+        return any(w and w.lower() in title for w in (got[1], got[1].split("(")[0].strip()))
+
     async def detect(self, chat, text, geotag, who, alink, instr=None, media=None, ctx=None):
         """Тема, локація, мова: ШІ (без обмежень) + словник + збережені теги людини + її вказівки до посилання;
         мова без тексту — як переважно пише автор. -> (ключі тем, ключі локацій, ключі мов) або None — «без тегів»."""
@@ -475,7 +515,13 @@ class Plugin(Base):
             risks.add("swear")
         if "ru" in (lang, R.guess_lang(body), R.guess_lang(said)):
             risks.add("ru")
-        if (ctx or {}).get("song_overlay") or re.search(r"(?i)\[(?:music|музика|музыка)\]|♪", said):
+        on_post = (ctx or {}).get("music_on_post")  # лише Threads: музика на дописі, а не обов'язково у відео
+        if (ctx or {}).get("song_overlay") and on_post:
+            inside = await self.post_music_in_file((ctx or {}).get("media") or media, (ctx or {}).get("song", ""))
+            if inside is not False:  # є у файлі або не вдалося перевірити — попереджаємо; немає — файл без цієї музики
+                risks.add("music")
+            log.info("related: музика допису у файлі: %s", inside)
+        elif (ctx or {}).get("song_overlay") or re.search(r"(?i)\[(?:music|музика|музыка)\]|♪", said):
             risks.add("music")
         seen_t = self.__dict__.get("_seen", {}).get(chat, "")
         if seen_t:  # ⚠️ і в написах на кадрах
@@ -2952,7 +2998,8 @@ class Plugin(Base):
                         files = ", ".join(sorted({(Path(M.urlsplit(str(i.url)).path).suffix or "?").lstrip(".") for i in job.items}))[:80]
                         rel = await self.detect(chat, desc or "", geotag, who, link, self.instr.get(chat), media=media0,
                                                 ctx={"others": others[:3], "song": (self.song_name(s2) + ("" if s2[2] else " (оригінальний звук автора)")) if s2 else "",
-                                                     "song_overlay": bool(s2 and s2[2]), "files": files, "site": site})
+                                                     "song_overlay": bool(s2 and s2[2]),
+                                                     "music_on_post": bool((info or {}).get("music_on_post") or (item.info or {}).get("music_on_post")), "files": files, "site": site})
                         guess = self.__dict__.get("_geo_guess", {}).pop(chat, None)
                         rc[rkey] = (time.time(), rel, guess, self.__dict__.get("_about", {}).pop(chat, ""),
                                     self.__dict__.get("_risk", {}).pop(chat, set()), self.song_name(s2) if s2 and s2[2] else "",
