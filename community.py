@@ -38,6 +38,8 @@ RULES = [
     ("voice", "🎤 Голосові й кружечки", "надсилати голосові"),
     ("mentions", "📣 Згадки @", "згадувати інших через @"),
     ("words", "🤬 Заборонені слова", "вживати слова зі списку"),
+    ("spam", "🤖 Спам і реклама", "надсилати рекламу, заробітки, «пиши в особисті»"),
+    ("toxic", "🧨 Образи й погрози (ШІ)", "ображати, погрожувати, цькувати"),
     ("caps", "🔠 КАПС", "писати великими літерами"),
     ("flood", "🌊 Флуд", "писати дуже часто"),
     ("newbies", "🐣 Тиша для новачків", "писати одразу після вступу"),
@@ -46,7 +48,17 @@ RULES = [
 RULE_T = {k: t for k, t, _ in RULES}
 RULE_ASK = {k: a for k, _, a in RULES}
 RULE_ASK["unmute"] = "знову писати в чаті (зняти обмеження)"
-TEXT_RULES = {"silence", "links", "mentions", "words", "caps", "flood"}  # те, що можна перевірити в WhatsApp-групах і коментарях Instagram
+TEXT_RULES = {"silence", "links", "mentions", "words", "caps", "flood", "spam", "toxic"}
+# 🤖 явні ознаки спаму: дві й більше — спам без ШІ; одна — питаємо ШІ
+SPAM_RE = [re.compile(p, re.I) for p in (
+    r"зароб\w*|дохід\w* від|заробіток|підробіт\w*|пасивн\w* дох", r"\$\s?\d+|\d+\s?\$|\d+\s?(грн|usdt|доларів)\s*(в|на|за)\s*(день|тиждень|годину)",
+    r"крипт\w*|usdt|біткоін|bitcoin|інвест\w*|трейд\w*", r"пиш(іть|и)\s+(в|у)\s+(лс|особист|приват|дірект)|в лс\b|в особисті\b",
+    r"казино|ставк\w*|букмекер|слот\w*", r"переход\w* за посиланням|тисни на|жми на|реєструй\w*", r"безкоштовн\w+ (телефон|айфон|гроші)|розіграш\w*")]
+AI_MOD_PROMPT = ("Ти — модератор коментарів новинного видання. Оціни коментар. spam — реклама, заробітки, шахрайство, запрошення в особисті, "
+                 "сторонні канали. toxic — образи людей, погрози, цькування, мова ворожнечі (критика влади, редакції чи гостра думка — НЕ toxic). "
+                 "Відповідай ЛИШЕ JSON {\"spam\": false, \"toxic\": false, \"why\": \"до 8 слів\"}.\n\nКоментар: ")
+REPLY_PROMPT = ("Ти — SMM-редактор новинного видання. Читач поставив питання в коментарях. Напиши коротку ввічливу відповідь від редакції "
+                "(1–3 речення, українською). Не вигадуй фактів: якщо відповіді не знаєш — подякуй і скажи, що уточните. Лише текст відповіді.\n\n")  # те, що можна перевірити в WhatsApp-групах і коментарях Instagram
 ACTIONS = [("delete", "🗑 Видалити"), ("warn", "⚠️ Видалити й попередити"), ("mute", "🔇 Заглушити"), ("ban", "⛔ Вигнати")]
 ACTION_T = dict(ACTIONS)
 IG_ACTIONS = [("hide", "🙈 Сховати коментар"), ("delete", "🗑 Видалити коментар")]
@@ -64,7 +76,7 @@ DEFAULT_CFG = {
     "words": [], "flood_n": 5, "flood_sec": 10, "newbie_min": 60, "night": "23:00-07:00",
     "action": "warn", "ig_action": "hide", "warn_limit": 3, "mute_min": 60,
     "joins": "off", "greet": "", "requests": 1,
-    "watch": [], "watch_all": 0, "notify": 1, "enabled": 1,
+    "watch": [], "watch_all": 0, "notify": 1, "enabled": 1, "suggest": 0,
 }
 
 
@@ -265,6 +277,56 @@ class Community:
                 return k
         return None
 
+    async def ai_violation(self, c, uid, text, uname=None):
+        """🤖 Спам (ознаки + ШІ) і 🧨 образи (ШІ). -> ключ правила або None. ШІ — не частіше 30 разів на хвилину на чат."""
+        want_spam, want_toxic = self.forbidden(c, uid, uname, "spam"), self.forbidden(c, uid, uname, "toxic")
+        if not (want_spam or want_toxic) or len(text.strip()) < 8:
+            return None
+        hits = sum(1 for r in SPAM_RE if r.search(text))
+        if want_spam and hits >= 2 and not self.permit_ok(c["id"], uid, "spam"):
+            return "spam"
+        if not self.ai or not (want_toxic or hits):
+            return None
+        dq = self.flood[("ai", c["id"])]
+        now = time.time()
+        dq.append(now)
+        if sum(1 for t in dq if now - t <= 60) > 30:
+            return None
+        try:
+            raw = await self.ai(AI_MOD_PROMPT + text[:1200])
+            mm = re.search(r"\{.*\}", raw or "", re.S)
+            v = json.loads(mm.group(0)) if mm else {}
+        except Exception:  # noqa: BLE001 — модель недоступна: не караємо навмання
+            return None
+        if want_spam and v.get("spam") is True and not self.permit_ok(c["id"], uid, "spam"):
+            self.log(c["id"], f"🤖 спам: {short(str(v.get('why') or ''), 60)}")
+            return "spam"
+        if want_toxic and v.get("toxic") is True and not self.permit_ok(c["id"], uid, "toxic"):
+            self.log(c["id"], f"🧨 образа: {short(str(v.get('why') or ''), 60)}")
+            return "toxic"
+        return None
+
+    @staticmethod
+    def looks_question(text):
+        t = (text or "").strip()
+        return len(t) >= 15 and ("?" in t or re.match(r"(?i)(чому|коли|де|як|скільки|хто|що|чи)\b", t) is not None)
+
+    async def suggest_reply(self, c, m, uname, text):
+        """💬 Питання читача → власнику підказка відповіді від ШІ з кнопкою «Відповісти цим» (бот відповідає в чаті)."""
+        if not self.ai:
+            return
+        try:
+            draft = (await self.ai(REPLY_PROMPT + "Питання: " + text[:1000]) or "").strip()[:900]
+        except Exception:  # noqa: BLE001
+            return
+        if not draft:
+            return
+        tok = secrets.token_hex(4)
+        self.gset("sugg:" + tok, {"cid": c["id"], "chat_id": m.chat_id, "msg": m.message_id, "text": draft, "at": time.time()})
+        await self.notify(f"💬 <b>{esc(c['title'])}</b> · питання від {esc(uname)}:\n«{esc(short(text, 400))}»\n\n"
+                          f"Пропоную відповісти:\n<i>{esc(draft)}</i>",
+                          [[("📤 Відповісти цим", f"cm:sr:{tok}"), ("✖️ Не треба", f"cm:sx:{tok}")]])
+
     def watch_hit(self, c, text):
         cfg = c["cfg"]
         if cfg["watch_all"]:
@@ -458,8 +520,12 @@ class Community:
             return
         self.seen_member(cid, u.id, u.full_name, u.username)
         rule = self.violation(c, u.id, text, self.tg_kinds(m), u.username)
+        if not rule and text:
+            rule = await self.ai_violation(c, u.id, text, u.username)
         if rule:
             await self.punish_tg(c, m, u, rule)
+        elif c["cfg"].get("suggest") and self.looks_question(text):
+            await self.suggest_reply(c, m, uname, text)
 
     async def punish_tg(self, c, m, u, rule):
         cid, chat_id, cfg = c["id"], m.chat_id, c["cfg"]
@@ -620,6 +686,24 @@ class Community:
             txt = await self.decide_join(int(p[2]), a == "ja")
             try:
                 await q.edit_message_text(q.message.text_html + f"\n\n<b>{esc(txt)}</b>", parse_mode="HTML")
+            except Exception:  # noqa: BLE001
+                pass
+        elif a in ("sr", "sx"):
+            sg = self.gget("sugg:" + p[2])
+            if not sg:
+                return await q.answer("Підказка застаріла", show_alert=True)
+            self.gset("sugg:" + p[2], None)
+            note = "✖️ Без відповіді"
+            if a == "sr":
+                try:
+                    await self.bot.send_message(int(sg["chat_id"]), sg["text"], reply_to_message_id=int(sg["msg"]))
+                    self.stat(sg["cid"], "replied")
+                    note = "📤 Відповідь надіслано"
+                except Exception as exc:  # noqa: BLE001
+                    note = f"⚠️ Не вдалося: {exc}"
+            await q.answer(note)
+            try:
+                await q.edit_message_text(q.message.text_html + f"\n\n<b>{esc(note)}</b>", parse_mode="HTML")
             except Exception:  # noqa: BLE001
                 pass
         elif a == "um":
@@ -1382,6 +1466,9 @@ class Community:
             lines.append(f"⚖️ Покарання: {ACTION_T[cfg['action']]}" + (f", після {cfg['warn_limit']} — тиша на добу" if cfg["action"] == "warn" else ""))
         elif c["kind"] == "ig":
             lines.append("⚖️ Порушення: " + dict(IG_ACTIONS)[cfg["ig_action"]])
+        if c["platform"] == "tg" and c["kind"] != "channel":
+            lines.append("💬 Підказки відповідей на питання читачів: " + ("увімкнено" if cfg.get("suggest") else "вимкнено")
+                         + (f" · відповіли {s.get('replied', 0)}" if s.get("replied") else ""))
         lines.append(f"📊 Побачено {s.get('seen', 0)} · видалено {s.get('deleted', 0) + s.get('hidden', 0)} · попереджень {s.get('warned', 0)} · "
                      f"тиша {s.get('muted', 0)} · вигнано {s.get('banned', 0)} · дописів {s.get('posted', 0)} · дозволів {s.get('permits', 0)}")
         rows = []
@@ -1391,6 +1478,8 @@ class Community:
             if c["kind"] != "ig":
                 rows.append([(f"🙋 Запити{f' ({reqs})' if reqs else ''}", f"m:cm:rq:{cid}"), ("🚪 Вступ", f"m:cm:j:{cid}")])
         rows.append([(f"📣 Публікації{f' ({posts})' if posts else ''}", f"m:cm:p:{cid}"), ("👁 Моніторинг", f"m:cm:w:{cid}")])
+        if c["platform"] == "tg" and c["kind"] != "channel":
+            rows.append([(("✅" if cfg.get("suggest") else "▫️") + " 💬 Підказувати відповіді на питання", f"m:cm:sg:{cid}")])
         rows.append([("📜 Журнал", f"m:cm:lg:{cid}"), ("⏸ Вимкнути" if cfg["enabled"] else "▶️ Увімкнути", f"m:cm:en:{cid}")])
         tail = [("🔄 Перевірити права", f"m:cm:rf:{cid}")] if c["platform"] == "tg" else []
         tail.append(("🚪 Вийти" if c["platform"] == "tg" else "🗑 Прибрати", f"m:cm:lv:{cid}"))
@@ -1684,6 +1773,10 @@ class Community:
             cfg["requests"] = 0 if cfg["requests"] else 1
             self.save_cfg(cid, cfg)
             return None, self.scr_action(cid)
+        if a == "sg":
+            cfg["suggest"] = 0 if cfg.get("suggest") else 1
+            self.save_cfg(cid, cfg)
+            return None, self.scr_chat(cid)
         if a == "jm":
             cfg["joins"] = extra
             self.save_cfg(cid, cfg)
