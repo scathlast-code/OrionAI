@@ -2017,9 +2017,11 @@ class ObservancesUI:
             return None, (f"📜 <b>Народний календар · {d.day} {MONTHS_GEN[d.month - 1]}</b>\n\n{body}"[:4000],
                           [[("📝 Редагувати", self.cb("obl", f"lore.{d.strftime('%Y%m%d')}")), ("« Теми дня", self.cb("obh"))]])
         if a == "obu":
-            n = await self.prefetch()
-            self._bg(self.prefetch(refresh_days=0 if self.obs_coverage() >= 366 else 180))
-            return "🔄 Завантажую весь рік у фоні", self.obs_home(chat)
+            async def both():  # спершу найближче, далі — весь рік; усе у фоні, екран відповідає одразу
+                await self.prefetch()
+                await self.prefetch(refresh_days=0 if self.obs_coverage() >= 366 else 180)
+            self._bg(both())
+            return "🔄 Оновлюю у фоні — за хвилину-дві дані з'являться", self.obs_home(chat)
         if a == "obm":
             self.ask(chat, "obm")
             return None, ("⏰ О котрій надсилати теми дня? Напишіть час, напр. <code>07:30</code>, або «-», щоб вимкнути.", [[("✖️ Скасувати", "m:cancel")]])
