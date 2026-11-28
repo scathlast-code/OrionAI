@@ -689,6 +689,9 @@ async def threads_probe(url, work):
             "description": meta.get("og:description") or "",
             "author": user, "author_url": f"https://www.threads.com/@{user}" if user else ""}
     post = _threads_post(text, code)
+    log.info("threads %s: сторінка %d КБ, допис у JSON: %s, карусель: %s з %s, фото в тексті: %d", code, len(text) // 1024,
+             bool(post), len((post or {}).get("carousel_media") or []), (post or {}).get("carousel_media_count"),
+             len(_raw_post_images(text)))
     if post:
         caption = post.get("caption") or {}
         if isinstance(caption, dict) and caption.get("text"):
@@ -719,6 +722,8 @@ async def threads_probe(url, work):
             if not links:
                 links = _embed_media(etext, efinal)
             raw = _raw_post_images(etext)
+            log.info("threads %s embed: %d КБ, JSON: %s, посилань: %d, фото в тексті: %d", code, len(etext) // 1024, bool(epost),
+                     len(links), len(raw))
             if len(raw) > len([x for x in links if x[1] != ".mp4"]) and not any(x[1] == ".mp4" for x in links):
                 links = raw  # карусель фото: беремо всі справжні фото, без значків
             if links:
