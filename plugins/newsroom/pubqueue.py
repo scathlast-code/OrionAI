@@ -267,6 +267,15 @@ class QueueUI:
                 if not v:
                     await self.xp_make(r["by"], r["did"], r["net"])
                     v = self.xp_get(r["did"]).get(r["net"])
+                if v and hasattr(self, "mz_publish"):  # 🌐 мережу підключено — публікуємо самі, без нагадування
+                    res = await self.mz_publish(r["net"], v["text"])
+                    if res is not None and res[0]:
+                        r["st"], r["err"] = "done", ""
+                        await self.host.notify(r["by"], f"📤 Опубліковано в {icon} {name} за розкладом: #{r['did']} {esc(d['headline'][:80])}\n{esc(res[1])}",
+                                               [[("📰 Новина", self.cb("d", r["did"])), ("🗓 Черга", self.cb("pql"))]])
+                        continue
+                    if res is not None:  # підключено, але не вийшло — кажемо чому й нагадуємо вручну
+                        await self.host.notify(r["by"], f"⚠️ {icon} {name}: не вдалося опублікувати автоматично — {esc(res[1][:200])}. Нагадую вручну.")
                 body = (f"🔔 <b>Час публікувати в {icon} {name}</b> · #{r['did']}\n\n<pre>{esc(v['text'])}</pre>" if v else
                         f"🔔 <b>Час публікувати в {icon} {name}</b> · #{r['did']}\n\n⚠️ Версію підготувати не вдалося — відкрийте новину.")
                 if v and v.get("slides"):

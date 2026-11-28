@@ -44,6 +44,7 @@ from .alerts import AlertsUI
 from .weekstats import WeekStatsUI
 from .tools import ToolsUI
 from .extras import ExtrasUI
+from .metaui import MetaUI
 from .echo import KINDS as ECHO_KINDS, Echo
 from .collectors import MTProto, WebCollector
 
@@ -123,7 +124,7 @@ def src_links(sources, sep=" · "):
     return sep.join(f'<a href="{esc(s)}">{esc(_dom(s))}</a>' if str(s).startswith("http") else esc(s) for s in sources)
 
 
-class Plugin(ExtrasUI, ToolsUI, WeekStatsUI, AlertsUI, OursWroteUI, StyleUI, CardsUI, QueueUI, CrosspostUI, ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Base):
+class Plugin(MetaUI, ExtrasUI, ToolsUI, WeekStatsUI, AlertsUI, OursWroteUI, StyleUI, CardsUI, QueueUI, CrosspostUI, ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Base):
     id = "news"
     icon = "✍️"
     title = "Публікації"
@@ -133,7 +134,7 @@ class Plugin(ExtrasUI, ToolsUI, WeekStatsUI, AlertsUI, OursWroteUI, StyleUI, Car
                "переписує за правилами редакції на моделях Оріона, тримає точну довжину, готує зведення за добу й "
                "публікує в канал лише після вашого схвалення.\n\n"
                "Автоматичний рерайт — не фактчек: перед публікацією звіряйте цифри й імена (кнопка «🔎 Звірити» допомагає, але не замінює редактора).")
-    VIEWS = {"tl", "tv", "tm", "seo", "en", "pll", "cr", "crl", "lv", "yago", "nl", "ws", "wst", "eg", "al", "ow", "ows", "sty", "styd", "cd", "cds", "pql", "pq", "pqh", "xp", "xps", "ls", "d", "src", "dg", "so", "set", "q", "help", "ver", "len", "rules",
+    VIEWS = {"tl", "tv", "tm", "seo", "en", "pll", "cr", "crl", "lv", "yago", "nl", "ws", "wst", "eg", "mz", "mzc", "al", "ow", "ows", "sty", "styd", "cd", "cds", "pql", "pq", "pqh", "xp", "xps", "ls", "d", "src", "dg", "so", "set", "q", "help", "ver", "len", "rules",
              "L", "Lo", "Ls", "Lsort", "Lbulk", "Le", "Lacc", "Lhelp", "Elst", "Lmerge",
              "H1", "H2", "H3", "H4", "H5", "H6", "H7", "D", "Dm", "Fl", "Fo", "Ff", "Fi", "Fmv", "Fbl", "Tg", "Tgi", "Tp", "Bk", "Bkl",
              "Sp", "Ou", "Ours", "Sl", "St", "Wt", "more", "acs", "ace", "sch", "fld", "flds", "echo", "eci", "cls", "ctp", "cte", "cmk", "csl", "obh", "obt", "obc", "obd", "ob", "obi", "obl", "obs", "obup", "obws", "obdy", "obcp", "obcm"}
@@ -356,7 +357,7 @@ class Plugin(ExtrasUI, ToolsUI, WeekStatsUI, AlertsUI, OursWroteUI, StyleUI, Car
             self.queue.put_nowait(iid)
         loop = asyncio.get_running_loop()
         self._tasks = [loop.create_task(self._worker()), loop.create_task(self._rss_loop()),
-                       loop.create_task(self._lists_loop()), loop.create_task(self._mt_loop()), loop.create_task(self._tags_loop()), loop.create_task(self._sched_loop()), loop.create_task(self._pq_loop()), loop.create_task(self._ws_loop()), loop.create_task(self._obs_loop()), loop.create_task(self.cplan_watch()),
+                       loop.create_task(self._lists_loop()), loop.create_task(self._mt_loop()), loop.create_task(self._tags_loop()), loop.create_task(self._sched_loop()), loop.create_task(self._pq_loop()), loop.create_task(self._ws_loop()), loop.create_task(self._mz_loop()), loop.create_task(self._obs_loop()), loop.create_task(self.cplan_watch()),
                        loop.create_task(self._report_loop())]
         await asyncio.gather(*self._tasks)
 
@@ -1172,6 +1173,7 @@ class Plugin(ExtrasUI, ToolsUI, WeekStatsUI, AlertsUI, OursWroteUI, StyleUI, Car
              (("🔗 Джерела: так" if st.get("show_sources") else "🔗 Джерела: ні"), self.cb("tg", "show_sources"))],
             [("✒️ Підпис", self.cb("sig")), ("🕘 Години черги", self.cb("pqh"))],
             [("⚙️ Версії для мереж", self.cb("xps")), ("⚙️ Вигляд карток", self.cb("cds"))],
+            [("🌐 Facebook · Instagram · Threads", self.cb("mz"))],
             [("« Налаштування новинарні", self.cb("H2"))],
         ]
         return text, rows
@@ -1242,6 +1244,8 @@ class Plugin(ExtrasUI, ToolsUI, WeekStatsUI, AlertsUI, OursWroteUI, StyleUI, Car
         if a in ("seo", "seog", "en", "eng", "pll", "plg", "pls", "cr", "cri", "crl", "lv", "lvs", "lva", "lve", "yago", "yagoa",
                  "nl", "nla", "nlc", "nlh"):
             return await self.extras_route(chat, a, x, y)
+        if a in ("mz", "mzg", "mzs", "mzt", "mzc", "mzd", "mzh", "mzr", "mzp", "mzw"):  # 🌐 Facebook · Instagram · Threads
+            return await self.mz_route(chat, a, x, y)
         if a in ("eg", "egw", "egx"):  # ♻️ варто повторити
             return await self.eg_route(chat, a, x)
         if a in ("ws", "wst", "wsa", "wsq"):
@@ -1485,6 +1489,8 @@ class Plugin(ExtrasUI, ToolsUI, WeekStatsUI, AlertsUI, OursWroteUI, StyleUI, Car
             return await self.lists_text(chat, key, data, text)
         if key == "xpr":
             return await self.xp_text(chat, key, data, text)
+        if key == "mzw":
+            return await self.mz_text(chat, key, data, text)
         if key == "cdb":
             return await self.cd_text(chat, key, data, text)
         if key == "tmq":
