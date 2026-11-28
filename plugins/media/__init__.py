@@ -857,6 +857,15 @@ class Plugin(Base):
             return "⬇️ Починаю", (self.live_screen(chat) if self.in_app() else None)
         if a == "st":
             return None, self.live_screen(chat)
+        if a == "snd":  # 🔁 людина погодилась повторити завантаження зі звуком
+            job = self.jobs.get(chat)
+            if not job or job.token != x:
+                return "Це завантаження вже застаріло — надішліть посилання ще раз", None
+            if self.busy(chat):
+                return "⏳ Ще завантажую — дочекайтесь", None
+            job.options.__dict__["need_audio"] = True
+            self._bg(chat, self.download(chat, job, list(range(1, len(job.items) + 1))))
+            return "🔁 Завантажую ще раз — лише формати зі звуком", None
         if a == "force" and x in self.offers:  # ⬇️ людина свідомо хоче повторно (напр. інший формат)
             return self.start_quick(chat, self.offers[x][1], self.instr.get(chat) or None, force=True) or "🔎 Шукаю…", None
         if a == "re" and x in self.offers:  # 🔁 повторити після помилки
@@ -2230,6 +2239,7 @@ class Plugin(Base):
             # 🖼 кілька фото/відео з ОДНІЄЇ публікації — надсилаємо однією публікацією (альбомом), а не окремими
             album_mode = len(nums) > 1 and opts.target != "zip"
             album, album_hist = [], None
+            audio_retry = False  # 🔁 була помилка звуку — запропонуємо повторити (а не повторюємо самі)
             last_media = None  # (повідомлення, кнопки автора, запис) — сюди ж додамо й меню, щоб усе було одним дописом
             for k, n in enumerate(nums, 1):
                 item = job.items[n - 1]
@@ -2285,7 +2295,9 @@ class Plugin(Base):
                             gl += f' · <a href="{esc(self.mh_link(prev["id"]))}">попередній з групи</a>'
                         rel_line = gl + rel_line
                     if (info or {}).get("_no_audio") and opts.mode == "video":  # 🔇 чесно кажемо, що звуку немає й чому
-                        na = f"\n🔇 Звук не скачався: {(info or {})['_no_audio']}"
+                        audio_retry = audio_retry or bool((info or {}).get("_audio_retry"))
+                        na = f"\n🔇 Звук не скачався: {(info or {})['_no_audio']}" + (" — можна спробувати ще раз (кнопка нижче)"
+                                                                                   if (info or {}).get("_audio_retry") else "")
                         rel_line, rel_len = esc(na) + rel_line, rel_len + len(na)
                     tail = (f"\n\n👤 {who_html}" if who else "\n") + (f" · {esc(site)}" if site else "") \
                         + (f' · <a href="{esc(job.url)}">🔗 Допис</a>' if str(job.url).startswith("http") else "") + song_html + rel_line
@@ -2424,6 +2436,8 @@ class Plugin(Base):
         else:
             msg = "⚠️ Файлів не знайшлося. Спробуйте інший формат або якість."
         rows = [[("⚙️ Доналаштувати й завантажити ще" if quick else "📋 До набору", self.cb("opt" if quick else "menu", job.token))], [("« Медіа", self.cb())]]
+        if audio_retry:
+            rows.insert(0, [("🔁 Завантажити ще раз зі звуком?", self.cb("snd", job.token))])
         if sent and not failed and last_media and await self._merge_menu(chat, last_media, rows):
             try:  # усе в одному дописі: файл + кнопки автора + категорії + меню — окремого «✅ Готово» не треба
                 if status:
