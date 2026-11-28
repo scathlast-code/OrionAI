@@ -208,7 +208,9 @@ class Plugin(Base):
 
     # ================================================================ 🔗 пов'язане скачане
     REL = (("a", "👤 Автор"), ("t", "🏷 Тема (і «без теми»)"), ("g", "📍 Локація (і «без локації»)"), ("l", "🗣 Мова"),
-           ("f", "🆕 Вперше"), ("ai", "🤖 Визначати тему, локацію й мову за допомогою ШІ"))
+           ("f", "🆕 Вперше"), ("ai", "🤖 Визначати тему, локацію й мову за допомогою ШІ"),
+           ("see", "👁 ШІ дивиться на фото й кадр відео (тема за вмістом)"),
+           ("geo_author", "🧭 Немає місця в дописі — брати з інших дописів автора чи його сторінки"))
 
     def rel_on(self, chat, k):
         return (self.pref(chat, "rel", {}) or {}).get(k, True)
@@ -248,7 +250,37 @@ class Plugin(Base):
             found.append((kind, self.hist.learn_user(kind, name, phrase)))
         return found
 
-    async def detect(self, chat, text, geotag, who, alink, instr=None):
+    @staticmethod
+    async def _frame_b64(path):
+        """Кадр для ШІ (до 768 пікс., JPEG у base64): саме фото або кадр з 1-ї секунди відео."""
+        import base64
+        import io
+        try:
+            from PIL import Image
+            p = Path(path)
+            if p.suffix.lower() in (".mp4", ".mov", ".mkv", ".webm", ".m4v"):
+                out = p.with_suffix(".frame.jpg")
+                proc = await asyncio.create_subprocess_exec("ffmpeg", "-y", "-loglevel", "error", "-ss", "1", "-i", str(p),
+                                                            "-frames:v", "1", str(out))
+                await asyncio.wait_for(proc.wait(), 30)
+                if not out.exists():
+                    return None
+                p = out
+            def enc():
+                im = Image.open(p).convert("RGB")
+                im.thumbnail((768, 768))
+                buf = io.BytesIO()
+                im.save(buf, "JPEG", quality=80)
+                return base64.b64encode(buf.getvalue()).decode()
+            data = await asyncio.to_thread(enc)
+            if p.name.endswith(".frame.jpg"):
+                p.unlink(missing_ok=True)
+            return data
+        except Exception:  # noqa: BLE001 — без кадру: теги лише з тексту
+            log.info("related: кадр для ШІ не вийшов", exc_info=True)
+            return None
+
+    async def detect(self, chat, text, geotag, who, alink, instr=None, media=None):
         """Тема, локація, мова: ШІ (без обмежень) + словник + збережені теги людини + її вказівки до посилання;
         мова без тексту — як переважно пише автор. -> (ключі тем, ключі локацій, ключі мов) або None — «без тегів»."""
         instr = instr or {}
@@ -257,14 +289,18 @@ class Plugin(Base):
         d_t, d_g = R.tags(f"{text}\n{geotag}")
         a_t, a_g, lang = [], [], ""
         body = (text or "").strip()
-        if self.rel_on(chat, "ai") and (len(body) >= 12 or geotag):
-            try:
-                ans, _m = await asyncio.wait_for(self.host.ask_ai(
-                    R.ai_prompt(body, geotag, self.hist.known("t"), self.hist.known("g")), system=R.AI_SYSTEM,
-                    label="🔗 Тема й локація"), 40)
-                a_t, a_g, lang = R.parse_ai(ans)
-            except Exception:  # noqa: BLE001 — ШІ недоступний: лишається словник
-                log.info("related: ШІ не визначив тему — беру словник")
+        img = await self._frame_b64(media) if media and self.rel_on(chat, "ai") and self.rel_on(chat, "see") else None
+        if self.rel_on(chat, "ai") and (len(body) >= 2 or geotag or img):  # навіть «Саржин яр» — це вже місце
+            for pic in ((img, None) if img else (None,)):  # модель без зору — повтор лише за текстом
+                try:
+                    ans, _m = await asyncio.wait_for(self.host.ask_ai(
+                        R.ai_prompt(body, geotag, self.hist.known("t"), self.hist.known("g"), seen=bool(pic)),
+                        system=R.AI_SYSTEM, label="🔗 Тема й локація", image=pic), 60 if pic else 40)
+                    a_t, a_g, lang = R.parse_ai(ans)
+                    if a_t or a_g:
+                        break
+                except Exception:  # noqa: BLE001 — ШІ недоступний: лишається словник
+                    log.info("related: ШІ не визначив тему%s", " за кадром" if pic else " — беру словник")
         topics, geos = R.merge(a_t, d_t), R.merge(a_g, d_g)
         if geotag and not geos:  # геотег є, а ні ШІ, ні словник його не впізнали — беремо як є
             geos = [(geotag.strip()[:40], "· " + geotag.strip()[:40])]
@@ -275,6 +311,16 @@ class Plugin(Base):
         mine = self.hist.match_user(f"{text}\n{geotag}")  # ✍️ збережені теги людини, згадані в дописі
         t_k += [k for k in mine["t"] if k not in t_k]
         g_k += [k for k in mine["g"] if k not in g_k]
+        self.__dict__.setdefault("_geo_guess", {}).pop(chat, None)
+        if not g_k and self.rel_on(chat, "geo_author"):  # 📍 у дописі місця немає — шукаємо в автора (є — не шукаємо)
+            try:
+                more, why = await self.author_geo(chat, who, alink)
+            except Exception:  # noqa: BLE001
+                more, why = [], ""
+            if more:
+                g_k += more
+                self._geo_guess[chat] = (more, why)  # у підписі — «імовірна локація», не як факт допису
+                log.info("related: імовірна локація з «%s»: %s", why, more)
         for kind, k in (await self.user_tags(chat, instr["add"]) if instr.get("add") else []):
             (t_k if kind == "t" else g_k).insert(0, k) if k not in (t_k if kind == "t" else g_k) else None
         for d in instr.get("drop", []):  # «не став тег …»
@@ -282,6 +328,38 @@ class Plugin(Base):
             for lst, kind in ((t_k, "t"), (g_k, "g"), (l_k, "l")):
                 lst[:] = [k for k in lst if not (k == R.key_of(d) or (rx and rx.search(self.hist.name(kind, k))))]
         return t_k, g_k, l_k
+
+    async def author_geo(self, chat, who, alink):
+        """Допис без місця: локація, яку автор найчастіше ставить в інших скачаних дописах, інакше — з опису його сторінки."""
+        a = R.norm_author(who)
+        cnt = {}
+        for e in self.hist.items(chat):
+            if a and e.get("author") == a:
+                for k in e.get("geos", []):
+                    cnt[k] = cnt.get(k, 0) + 1
+        if cnt:
+            best = max(cnt.values())
+            return [k for k, v in cnt.items() if v == best][:2], "дописи автора"
+        if not alink:
+            return [], ""
+        try:
+            _u, page = await asyncio.wait_for(M._grab(alink, 600_000), 12)
+        except Exception:  # noqa: BLE001
+            return [], ""
+        bio = " ".join(re.findall(r'<meta[^>]+(?:og:description|name="description")[^>]+content="([^"]*)"', page))
+        bio = __import__("html").unescape(bio)[:600]
+        if not bio.strip():
+            return [], ""
+        _t, geos = R.tags(bio)
+        if not geos and self.rel_on(chat, "ai"):
+            try:
+                ans, _m = await asyncio.wait_for(self.host.ask_ai(
+                    "Це опис сторінки автора, не допис. Якщо в ньому вказано, де автор живе чи працює, — це місце; теми не потрібні.\n\n"
+                    + R.ai_prompt(bio, "", [], self.hist.known("g")), system=R.AI_SYSTEM, label="🔗 Локація автора"), 30)
+                _t, geos, _l = R.parse_ai(ans)
+            except Exception:  # noqa: BLE001
+                geos = []
+        return (self.hist.learn("g", geos[:2]), "сторінка автора") if geos else ([], "")
 
     async def author_lang(self, chat, who, alink):
         """Переважна мова автора: з його попередніх скачаних дописів, інакше — з опису його сторінки."""
@@ -2467,7 +2545,17 @@ class Plugin(Base):
                     who_html = (f'<a href="{esc(link)}">{esc(who)}</a>' if link else esc(who)) if who else ""
                     site = M.site_name(job.url) if str(job.url).startswith("http") else (job.__dict__.get("src") or "")
                     geotag = M.geotag(info)
-                    rel = await self.detect(chat, desc or "", geotag, who, link, self.instr.get(chat))
+                    rkey = (chat, str(job.url), desc or "", geotag)  # теги — на весь допис: ШІ з кадром один раз, не на кожен файл
+                    rc = self.__dict__.setdefault("_relc", {})
+                    if rkey in rc and time.time() - rc[rkey][0] < 900:
+                        rel, guess = rc[rkey][1], rc[rkey][2]
+                    else:
+                        media0 = next((o for o in outs if Path(o).suffix.lower() in (".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mov", ".mkv", ".webm")), None) if outs else path
+                        rel = await self.detect(chat, desc or "", geotag, who, link, self.instr.get(chat), media=media0)
+                        guess = self.__dict__.get("_geo_guess", {}).pop(chat, None)
+                        rc[rkey] = (time.time(), rel, guess)
+                        for k in [k for k, v in rc.items() if time.time() - v[0] > 900]:
+                            rc.pop(k, None)
                     if rel is None:  # людина попросила без тегів — без сортування й без запису
                         rel_t = rel_g = rel_l = rel_f = rel_btns = []
                         rel_line, rel_len = "", 0
@@ -2476,6 +2564,10 @@ class Plugin(Base):
                         rel_line, rel_len, rel_btns, rel_f = self.related_parts(chat, who, rel_t, rel_g, rel_l)
                     if geotag:
                         rel_line, rel_len = f"\n📍 {esc(geotag[:60])}" + rel_line, rel_len + len(geotag[:60]) + 3
+                    elif guess and rel is not None:  # місце не з самого допису — лише припущення
+                        gname = ", ".join(self.hist.name("g", k) for k in guess[0])[:60]
+                        gl = f"\n📍 Імовірна локація: {esc(gname)} ({guess[1]})"
+                        rel_line, rel_len = gl + rel_line, rel_len + len(gl)
                     gx = self.gctx.get(chat)
                     if gx:  # 📦 позначка групи й посилання на попередній із неї
                         prev = next((e for e in reversed(self.hist.items(chat)) if e.get("group") == gx["id"]), None)

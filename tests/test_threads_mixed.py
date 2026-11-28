@@ -13,3 +13,15 @@ def test_mixed_keeps_photos_without_poster():
     out = M._in_page_order(vids + photos, HTML)
     assert [x[1] for x in out] == [".mp4", ".jpg", ".jpg"]
     assert all("POSTER" not in u and "AV_" not in u for u, _ in out)
+
+
+def test_embed_place():
+    assert M._embed_place('<html><div><span>Харків • Kharkiv • Харьков</span></div></html>') == "Харків"
+    assert M._embed_place('x "location":{"pk":1,"name":"Kyiv, Ukraine"} y') == "Kyiv, Ukraine"
+    assert M._embed_place('<p>Сьогодні • гарно</p><p>Ранок • Вечір</p>') == ""
+
+
+def test_ai_prompt_seen():
+    from plugins.media import related as R
+    assert "кадр" in R.ai_prompt("Саржин яр", "", [], [], seen=True)
+    assert "кадр" not in R.ai_prompt("Саржин яр", "", [], [])

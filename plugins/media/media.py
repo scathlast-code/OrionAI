@@ -666,6 +666,30 @@ def _raw_post_images(text):
     return [(u, ".jpg") for _, u in best.values()]
 
 
+PLACE_JSON_RE = re.compile(r'"location"\s*:\s*\{[^{}]*?"name"\s*:\s*"([^"]{2,80})"')
+
+
+def _embed_place(text):
+    """Геотег зі сторінки вбудовування Threads: з JSON, якщо він є, або з рядка «Місто • City • Город» під дописом."""
+    m = PLACE_JSON_RE.search(text or "")
+    if m:
+        try:
+            return json.loads(f'"{m[1]}"').strip()[:80]
+        except ValueError:
+            return m[1][:80]
+    try:
+        doc = read_html((text or "").encode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return ""
+    for node in doc.xpath("//*[contains(text(), '•')]"):
+        t = re.sub(r"\s+", " ", node.text_content() or "").strip()
+        parts = [x.strip() for x in t.split("•")]
+        if 2 <= len(parts) <= 4 and all(1 < len(x) <= 40 and x[0].isupper() and not re.search(r"\d|@|http|·", x) for x in parts) \
+                and any(re.fullmatch(r"[A-Za-z .,'-]+", x) for x in parts):  # назва кількома мовами, одна з них латиницею
+            return parts[0]  # перша назва — мовою автора допису
+    return ""
+
+
 def _img_key(url):
     """Назва файлу без розміру — та сама картинка в різних розмірах має однаковий ключ."""
     return urlsplit(url.replace("\\/", "/")).path.rsplit("/", 1)[-1].split(".")[0]
@@ -770,6 +794,9 @@ async def threads_probe(url, work):
             if not links:
                 links = _embed_media(etext, efinal)
             raw = _raw_post_images(etext)
+            place = _embed_place(etext)
+            if place and not info.get("location"):  # 📍 геотег під дописом (Threads показує «Харків • Kharkiv • Харьков»)
+                info["location"] = place
             log.info("threads %s embed: %d КБ, JSON: %s, посилань: %d, фото в тексті: %d; CDN: %s", code, len(etext) // 1024,
                      bool(epost), len(links), len(raw), _img_census(etext))
             vids = [x for x in links if x[1] == ".mp4"]

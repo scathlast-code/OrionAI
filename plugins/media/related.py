@@ -222,9 +222,12 @@ AI_SYSTEM = ("Ти визначаєш тему, локацію й мову до�
              "незрозуміла тема — topics: [].")
 
 
-def ai_prompt(text, geotag, known_t, known_g, user_tags=()):
+def ai_prompt(text, geotag, known_t, known_g, user_tags=(), seen=False):
     ask = f"\n\nКористувач просить поставити теги: {', '.join(user_tags)}" if user_tags else ""
-    return (f"Текст допису:\n{(text or '')[:1500]}\n\nГеотег допису: {geotag or 'немає'}{ask}\n\n"
+    look = ("\n\nДо запиту додано кадр із фото чи відео допису: визнач теми й за тим, що на ньому видно "
+            "(тварини, природа, погода, подія, місце), а не лише за текстом. Місце за картинкою не вгадуй — лише з тексту й геотегу."
+            if seen else "")
+    return (f"Текст допису:\n{(text or '')[:1500]}\n\nГеотег допису: {geotag or 'немає'}{ask}{look}\n\n"
             f"Теми, що вже є: {', '.join(known_t[:120])}\nЛокації, що вже є: {', '.join(known_g[:120])}")
 
 
