@@ -3089,6 +3089,7 @@ PLUGINS = orion_plugins.Registry(orion_plugins.Host(
            "real_bot": lambda: tg_app.bot if tg_app else None, "hubclient": hub,
            "touched_since": lambda chat, t: LAST_CB.get(chat, 0) > t,
            "utm_screen": lambda chat: on_utm_screen(chat),
+           "today_screen": lambda chat: scr_today(chat),  # 🌅 ранкове зведення = те саме, що кнопка «Сьогодні»
            "miniapp_url": miniapp_url(),
            "awaiting": lambda chat: chat in AWAIT or CM.wants_text(chat),
            "node_active": lambda: NODE.active,
@@ -6374,10 +6375,19 @@ async def _col_deliver(bot, chat_id, title, sections, fname):
         return await bot.send_document(chat_id, InputFile(io.BytesIO(data), filename=f"{fname}-{stamp}.docx"), caption=title[:1000])
     body = "\n\n".join(f"{h}\n\n{t}" for h, t in sections)
     if how == "txt":
-        return await bot.send_document(chat_id, InputFile(io.BytesIO(body.encode("utf-8")), filename=f"{fname}-{stamp}.txt"), caption=title[:1000])
-    parts = collect_mod.chunks(f"{title}\n\n{body}")
+        return await bot.send_document(chat_id, InputFile(io.BytesIO(demarkdown(body).encode("utf-8")), filename=f"{fname}-{stamp}.txt"),
+                                       caption=title[:1000])
+    # 📨 повідомленнями — з оформленням: жирні заголовки тем, **місця** жирним, посилання — гіперпосиланнями, без карток-прев'ю
+    from footnotes import html_split
+    head, _, rest = title.partition("\n")
+    html = f"<b>{esc(head)}</b>" + (f"\n<i>{esc(rest)}</i>" if rest else "") + "\n\n" + "\n\n".join(
+        f"<b>{esc(h)}</b>\n{md_html(t)}" for h, t in sections)
+    parts = html_split(html, 3900)
     for i, part in enumerate(parts):
-        await bot.send_message(chat_id, part if len(parts) == 1 else f"({i + 1}/{len(parts)})\n{part}")
+        try:
+            await bot.send_message(chat_id, part, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        except Exception:  # noqa: BLE001 — розмітка не пройшла: той самий текст без неї
+            await bot.send_message(chat_id, re.sub(r"<[^>]+>", "", part), disable_web_page_preview=True)
 
 
 def _col_span(items):
@@ -6393,6 +6403,35 @@ def _col_clean(chat_id, text):
     """🧹 Технічні приписки чужих каналів прибираємо лише тепер, коли пишемо новину/зведення (збереженим лишається оригінал)."""
     import postclean
     return postclean.clean(text) if prefs(chat_id).get("strip_junk", True) else text
+
+
+def _no_links(text):
+    """Зведення — без посилань і адрес: [текст](url) → текст (назви джерел — геть), голі адреси й «t.me/…» — геть."""
+    def md(m):
+        lab = m.group(1).strip()
+        return "" if re.match(r"(?i)^(?:джерело|посилання|детальніше|[\w.-]+\.(?:ua|com|net|org|me|info)|уніан|укрінформ|суспільне|lb\.ua)$", lab) else " " + lab
+    t = re.sub(r"\s*\[([^\]\n]{1,120})\]\((https?://[^)\s]+)\)", md, text or "")
+    t = re.sub(r"\(?\s*(?:https?://|www\.|t\.me/)[^\s)]+\s*\)?", "", t)
+    t = re.sub(r"[ \t]+([.,;:])", r"\1", t)
+    return re.sub(r"[ \t]{2,}", " ", t).strip()
+
+
+def _only_source_links(text, items):
+    """Лишаємо лише посилання, які справді є в матеріалах: вигадані ШІ (чи чужі статті 2024 року) — прибираємо."""
+    src = " ".join(i.get("text") or "" for i in items)
+    srcs = set(re.findall(r"https?://[^\s)\]>»\"']+", src))
+    hosts = {re.sub(r"^www\.", "", u.split("/")[2]) for u in srcs if u.count("/") >= 2}
+
+    def keep(m):
+        url = m.group(2).rstrip(".,")
+        if url in srcs or any(url.startswith(x) or x.startswith(url) for x in srcs):
+            return m.group(0)
+        return ""  # посилання немає в матеріалах — не показуємо
+
+    out = re.sub(r"\s*\[([^\]\n]{1,120})\]\((https?://[^)\s]+)\)", keep, text or "")
+    out = re.sub(r"(?<![\w(\[])https?://[^\s)]+", lambda m: m.group(0) if m.group(0).rstrip(".,") in srcs or
+                 re.sub(r"^www\.", "", m.group(0).split("/")[2]) in hosts else "", out)
+    return out.strip()
 
 
 async def col_summarize(bot, chat_id, auto=False, kind="summary", topic=None):
@@ -6420,7 +6459,7 @@ async def col_summarize(bot, chat_id, auto=False, kind="summary", topic=None):
             if kind == "news":
                 prompt = collect_mod.NEWS_PROMPT
                 text, _m = await _plugin_ai(prompt + "\n\n———\n\n".join(_col_clean(chat_id, i["text"]) for i in items), label="📥 Новина з пересланого")
-                text = (text or "").strip()
+                text = _only_source_links(text, items)
                 if not text:
                     await bot.send_message(chat_id, "⚠️ Не вдалося написати новину — моделі зараз недоступні. Матеріали збережено.")
                     return
@@ -6453,7 +6492,7 @@ async def col_summarize(bot, chat_id, auto=False, kind="summary", topic=None):
                     body, _m = await _plugin_ai(collect_mod.TOPIC_PROMPT.format(topic=head.split(" ", 1)[-1])
                                                 + "\n\n———\n\n".join(_col_clean(chat_id, i["text"]) for i in its),
                                                 label=f"📥 Зведення · {head}")
-                    body = (body or "").strip()
+                    body = _no_links(body)  # у зведенні — жодних посилань (власник)
                     if not body:
                         await bot.send_message(chat_id, "⚠️ Не вдалося написати зведення — моделі зараз недоступні. Матеріали збережено, спробую ще раз "
                                                "пізніше або напишіть «готуй зведення».")
@@ -6731,13 +6770,31 @@ async def premium_loop():
         await asyncio.sleep(60)
 
 
+def lifeboat_time():
+    """Щоденна рятувальна копія — за 2 хвилини до ранкового зведення (за замовчуванням 07:28)."""
+    news = PLUGINS.get("news")
+    hm = (news.store.get("obs_time") if news and hasattr(news, "store") else None) or "07:30"
+    try:
+        h, m = map(int, hm.split(":"))
+    except ValueError:
+        h, m = 7, 30
+    t = (h * 60 + m - 2) % 1440
+    return f"{t // 60:02d}:{t % 60:02d}"
+
+
 async def lifeboat_loop():
-    """Щохвилини зберігаємо стан у пам'яті; раз на LIFEBOAT_HOURS — рятувальна копія."""
+    """Щохвилини зберігаємо стан у пам'яті; щодня за 2 хв до ранкового зведення — рятувальна копія
+    (і запасно — якщо понад LIFEBOAT_HOURS + 2 год її не було, напр. бот спав у цю хвилину)."""
     while True:
-        await asyncio.sleep(60)
+        await asyncio.sleep(30)
         RSTATE.save()
         try:
-            if tg_app and lb_on() and time.time() - float(kv_get("lifeboat_check") or kv_get("lifeboat_t") or 0) > LIFEBOAT_HOURS * 3600:
+            now = datetime.now(TZ)
+            today = now.date().isoformat()
+            due = now.strftime("%H:%M") == lifeboat_time() and kv_get("lifeboat_day") != today
+            late = time.time() - float(kv_get("lifeboat_check") or kv_get("lifeboat_t") or 0) > (LIFEBOAT_HOURS + 2) * 3600
+            if tg_app and lb_on() and (due or late):
+                kv_set("lifeboat_day", today)
                 await lifeboat_make(tg_app.bot)
                 ACTLOG.prune()
         except Exception as exc:  # noqa: BLE001

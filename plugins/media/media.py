@@ -1131,6 +1131,27 @@ async def inspect_link(url, work):
     raise JobError(explain(errors[0][1] if errors else "Джерело не повернуло медіа або тексту."))
 
 
+VIDEO_EXT = (".mp4", ".mov", ".m4v", ".webm", ".mkv")
+
+
+async def has_audio(path):
+    """Чи є у відео звукова доріжка (ffprobe)."""
+    try:
+        data = await probe_media(path)
+    except Exception:  # noqa: BLE001
+        return True  # не змогли перевірити — не лякаємо даремно
+    return any(st.get("codec_type") == "audio" for st in data.get("streams", []))
+
+
+def source_has_audio(info):
+    """Чи був звук в оригіналі: у бодай одному форматі сайту є аудіокодек."""
+    info = info or {}
+    fmts = info.get("formats") or []
+    if any((f.get("acodec") or "none") != "none" for f in fmts if isinstance(f, dict)):
+        return True
+    return (info.get("acodec") or "none") != "none"
+
+
 async def fetch_direct(item, source, options, work, progress=None):
     if options.audio != "auto" or options.subs != "off":
         raise JobError("Прямий файл має власну доріжку. Вибери /audio auto і /subs off.")
@@ -1180,7 +1201,9 @@ async def _fetch_direct_one(item, address, source, work, progress):
             path.unlink(missing_ok=True)
             path = joined.rename(path.with_suffix(".mp4"))
         except (JobError, httpx.HTTPError, OSError):
-            pass  # без звуку краще, ніж нічого
+            item.info["_no_audio"] = "звукову доріжку не вдалося завантажити (помилка сайту) — спробуйте ще раз"
+    elif path.suffix.lower() in VIDEO_EXT and not await has_audio(path):
+        item.info["_no_audio"] = "у файлі, який віддав сайт, звуку немає (в оригіналі його могло не бути)"
     return path, [], item.info
 
 
@@ -1284,6 +1307,24 @@ async def fetch(item, source, options, work, progress=None):
         raise JobError("Сайт віддав не те відео, на яке вказує посилання. Нічого стороннього не надсилаю — "
                        "спробуйте ще раз пізніше або інше посилання на це ж відео.")
     stem = Path(safe_name(ua_title(info.get("title") or item.title)[:70], "media")).stem
+    if options.mode == "video" and files[0].suffix.lower() in VIDEO_EXT and not await has_audio(files[0]):
+        if source_has_audio(info):  # 🔇 у джерелі звук є, а прийшло німе — ще раз, найкращий формат одразу зі звуком
+            try:
+                for leftover in work.iterdir():
+                    if leftover.is_file():
+                        leftover.unlink()
+                selector = f"b{height}/bv*+ba/b"
+                await go(extra)
+                again = [p for p in work.iterdir() if p.is_file() and p.suffix.lower() in MEDIA and p.stat().st_size > 0]
+                if len(again) == 1:
+                    files = again
+                    outputs = [p for p in work.iterdir() if p.is_file()]
+            except JobError:
+                log.info("повторне завантаження зі звуком не вдалося", exc_info=True)
+            if not await has_audio(files[0]):
+                info["_no_audio"] = "звук не вдалося отримати з сайту (помилка) — спробуйте ще раз або інший формат"
+        else:
+            info["_no_audio"] = "в оригіналі звукової доріжки немає"
     path = files[0].rename(work / (stem + files[0].suffix.lower()))
     tracks = [
         track.rename(work / (stem + track.name.removeprefix("media")))

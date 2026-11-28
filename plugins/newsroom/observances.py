@@ -1812,6 +1812,10 @@ class ObservancesUI:
                 log.exception("observances loop")
             await asyncio.sleep(30)
 
+    def morning_digest_for(self, uid):
+        """Чи отримує людина повне ранкове зведення («Сьогодні») — тоді окремий погодний ранковий звіт не дублюємо."""
+        return bool(self.on() and self.store.get("obs_morning") is not False and uid in self.host.admins())
+
     async def send_digest(self):
         """Кожному — своє зведення (зі своїми особистими темами й обраним) і, окремо, попередження про важливі дні."""
         import notify
@@ -1823,9 +1827,14 @@ class ObservancesUI:
         for uid in dict.fromkeys(self.host.admins()):
             try:
                 with notify.kind("morning"):
-                    if notify.wanted(uid, "morning"):
-                        text, rows = await self.obs_digest(uid)
-                        await self.host.notify(uid, "🌅 " + text, rows)
+                    if notify.wanted(uid, "morning"):  # те саме зведення, що й кнопка «🌅 Сьогодні» (дні, погода, прикмети, список дня)
+                        today = self.host.extra.get("today_screen")
+                        if today:
+                            text, rows = await today(uid)
+                        else:
+                            text, rows = await self.obs_digest(uid)
+                            text = "🌅 " + text
+                        await self.host.notify(uid, text, rows)
                 with notify.kind("warn"):
                     if not notify.wanted(uid, "warn"):
                         continue
