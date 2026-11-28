@@ -63,3 +63,10 @@ def test_quality(tmp_path):
     q = asyncio.run(p.quality(small))
     assert any("роздільність" in x for x in q) and "розмите" in q
     assert "📉 Якість: №2 — розмите" in R.risks_line({"q:№2 — розмите"})
+
+
+def test_music_post_line():
+    from plugins.media import related as R
+    line = R.risks_line({"music_post"}, "Auni — Twinkling Lights")
+    assert "прикріплено музику (Auni — Twinkling Lights)" in line and "у скачаному файлі її немає" in line
+    assert "прикріплено" not in R.risks_line({"music", "music_post"}, "X")
