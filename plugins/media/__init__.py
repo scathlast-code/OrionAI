@@ -390,6 +390,9 @@ class Plugin(Base):
                         system=R.AI_SYSTEM, label="⚠️ Перевірка файлу", image=pic), 70 if pic else 40)
                     if re.search(r"\{.*\}", ans or "", re.S):
                         risks |= R.parse_risks(ans)
+                    seen = R.parse_seen(ans)
+                    if seen:
+                        self.__dict__.setdefault("_seen", {})[chat] = seen
                         break
                 except Exception:  # noqa: BLE001
                     log.info("scan: ШІ не перевірив файл", exc_info=True)
@@ -441,6 +444,7 @@ class Plugin(Base):
         a_t, a_g, lang = [], [], ""
         body = (text or "").strip()
         self.__dict__.setdefault("_about", {}).pop(chat, None)
+        self.__dict__.setdefault("_seen", {}).pop(chat, None)
         img, notes, nimg = (None, "", 0)
         risks = set()
         if self.rel_on(chat, "ai"):
@@ -473,6 +477,13 @@ class Plugin(Base):
             risks.add("ru")
         if (ctx or {}).get("song_overlay") or re.search(r"(?i)\[(?:music|музика|музыка)\]|♪", said):
             risks.add("music")
+        seen_t = self.__dict__.get("_seen", {}).get(chat, "")
+        if seen_t:  # ⚠️ і в написах на кадрах
+            if R.swear_hits(seen_t):
+                risks.add("swear")
+            if R.guess_lang(seen_t) == "ru":
+                risks.add("ru")
+        self.__dict__.setdefault("_said", {})[chat] = said.split(": ", 1)[-1] if said else ""
         self.__dict__.setdefault("_risk", {})[chat] = risks if self.rel_on(chat, "risk") else set()
         topics, geos = R.merge(a_t, d_t), R.merge(a_g, d_g)
         if geotag and not geos:  # геотег є, а ні ШІ, ні словник його не впізнали — беремо як є
@@ -2944,11 +2955,29 @@ class Plugin(Base):
                                                      "song_overlay": bool(s2 and s2[2]), "files": files, "site": site})
                         guess = self.__dict__.get("_geo_guess", {}).pop(chat, None)
                         rc[rkey] = (time.time(), rel, guess, self.__dict__.get("_about", {}).pop(chat, ""),
-                                    self.__dict__.get("_risk", {}).pop(chat, set()), self.song_name(s2) if s2 and s2[2] else "")
+                                    self.__dict__.get("_risk", {}).pop(chat, set()), self.song_name(s2) if s2 and s2[2] else "",
+                                    self.__dict__.get("_seen", {}).pop(chat, ""), self.__dict__.get("_said", {}).pop(chat, ""),
+                                    str(media0) if media0 else "", [])
                         for k in [k for k, v in rc.items() if time.time() - v[0] > 900]:
                             rc.pop(k, None)
                     about = rc[rkey][3] if rkey in rc else ""
                     risks, rsong = (rc[rkey][4], rc[rkey][5]) if rkey in rc else (set(), "")
+                    ocr_t, said_t = (rc[rkey][6], rc[rkey][7]) if rkey in rc else ("", "")
+                    post_said = rc[rkey][9] if rkey in rc else []  # 🎙 розшифровки інших відео/аудіо цього ж допису
+                    if rkey in rc and self.rel_on(chat, "ai") and self.rel_on(chat, "hear"):
+                        for o in outs:  # кожне відео й аудіо допису — не лише перше: текст для пошуку й перевірки небезпек
+                            if str(o) != rc[rkey][8] and Path(o).suffix.lower() in self.VIDEO_EXT + self.AUD_EXT:
+                                heard = await self._hear(o)
+                                if heard:
+                                    post_said.append(heard)
+                                    more = set()
+                                    if R.swear_hits(heard):
+                                        more.add("swear")
+                                    if R.guess_lang(heard) == "ru":
+                                        more.add("ru")
+                                    if more - risks and self.rel_on(chat, "risk"):
+                                        risks = set(risks) | more
+                                        rc[rkey] = rc[rkey][:4] + (risks,) + rc[rkey][5:]
                     if rel is None:  # людина попросила без тегів — без сортування й без запису
                         rel_t = rel_g = rel_l = rel_f = rel_btns = []
                         rel_line, rel_len = "", 0
@@ -3007,7 +3036,7 @@ class Plugin(Base):
                             if not recorded and album_hist is None:
                                 album_hist = dict(author=R.norm_author(who), who=who, alink=link, site=site, url=str(job.url),
                                                   src_url=self.cur_url.get(chat) or "", title=(desc or item.title or "")[:80],
-                                                  topics=rel_t, geos=rel_g, langs=rel_l, first=rel_f, geotag=geotag, about=about or "", risks=sorted(risks),
+                                                  topics=rel_t, geos=rel_g, langs=rel_l, first=rel_f, geotag=geotag, about=about or "", risks=sorted(risks), ocr=ocr_t, said=" · ".join([said_t] + post_said)[:1500],
                                                   **({"group": gx["id"], "gi": gx["i"]} if gx else {}),
                                                   **({"notag": True} if rel is None else {}), _btns=rel_btns)
                             recorded = True
@@ -3023,7 +3052,7 @@ class Plugin(Base):
                         if not recorded and getattr(msg_, "message_id", None):  # 🔗 запам'ятовуємо для «попереднє …»
                             recorded = True
                             rid_ = self.hist.add(chat, msg=msg_.message_id, author=R.norm_author(who), who=who, alink=link, site=site,
-                                          url=str(job.url), src_url=self.cur_url.get(chat) or "", size=size_, title=(desc or item.title or "")[:80], topics=rel_t, geos=rel_g, langs=rel_l, first=rel_f, geotag=geotag, about=about or "", risks=sorted(risks),
+                                          url=str(job.url), src_url=self.cur_url.get(chat) or "", size=size_, title=(desc or item.title or "")[:80], topics=rel_t, geos=rel_g, langs=rel_l, first=rel_f, geotag=geotag, about=about or "", risks=sorted(risks), ocr=ocr_t, said=" · ".join([said_t] + post_said)[:1500],
                                           **({"group": gx["id"], "gi": gx["i"]} if gx else {}), **({"notag": True} if rel is None else {}))
                             await self._cat_button(chat, msg_.message_id, rid_, rel_btns)
                             last_media = (msg_.message_id, rel_btns, rid_)
@@ -3065,6 +3094,13 @@ class Plugin(Base):
                 cur["k"], cur["frac"] = len(nums), 0.95
                 await stage(f"⬆️ Надсилаю однією публікацією: {len(album)} файл(ів)…", force=True)
                 msgs = None
+                for v in self.__dict__.get("_relc", {}).values():  # ⚠️ небезпеки, знайдені в інших файлах допису, — і в підпис альбому
+                    if len(v) > 9 and v[4] and album and album_hist is not None and album_hist.get("about", "") == v[3]:
+                        line = esc(R.risks_line(v[4], v[5][:60]))
+                        c0 = album[0]["cap"] or ""
+                        new = re.sub(r"⚠️ Увага:[^\n]*", line, c0) if "⚠️ Увага:" in c0 else (c0 + "\n" + line).strip()
+                        if len(re.sub(r"<[^>]+>|&\w+;", "", new)) <= 1024:
+                            album[0]["cap"] = new
                 gone = [a for a in album if not a["out"].is_file()]
                 if gone:  # файл зник між обробкою й надсиланням — не валимо весь допис, а пишемо в журнал, що саме і що лишилось поруч
                     for a in gone:
@@ -3093,6 +3129,10 @@ class Plugin(Base):
                 try:
                     if msgs and album_hist is not None:
                         btns = album_hist.pop("_btns", [])
+                        for v in self.__dict__.get("_relc", {}).values():  # 🎙 розшифровки всіх відео допису й нові ⚠️ — у запис
+                            if len(v) > 9 and v[1] is not None and album_hist.get("about", "") == v[3]:
+                                album_hist["said"] = " · ".join([v[7]] + v[9])[:1500]
+                                album_hist["risks"] = sorted(v[4])
                         rid_ = self.hist.add(chat, msg=msgs[0].message_id, size=size_all, count=len(album), **album_hist)
                         if car:
                             last_media = (car.message_id, btns, rid_)  # звичайний допис — меню додасться кнопками
