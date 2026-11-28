@@ -528,6 +528,11 @@ class Plugin(StudioUI, Base):
             except Exception:  # noqa: BLE001
                 pass
         self._shz_checked = checked  # скільки шматків Shazam реально перевірив (0 — перевірити не вдалося)
+        try:
+            import health
+            health.ok("shazam") if checked else health.fail("shazam", "жоден шматок не перевірено")
+        except Exception:  # noqa: BLE001
+            pass
         if all_hits:
             return hits
         return hits[0] if hits else None
@@ -2707,9 +2712,19 @@ class Plugin(StudioUI, Base):
             ans, _m = await asyncio.wait_for(self.host.ask_ai("Що написано на картці допису?", system=self.CARD_SYSTEM, label="🧾 Картка допису",
                                                               image=base64.b64encode(data).decode()), 45)
             c = self.card_parse(ans)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             log.info("card: не прочитано", exc_info=True)
+            try:
+                import health
+                health.fail("vision", str(exc)[:200])
+            except Exception:  # noqa: BLE001
+                pass
             return
+        try:
+            import health
+            health.ok("vision")
+        except Exception:  # noqa: BLE001
+            pass
         log.info("card: прочитано %s", {k: v for k, v in c.items() if v and k != "text"})
         if not c:
             return
@@ -3165,6 +3180,7 @@ class Plugin(StudioUI, Base):
                 await self.download(chat, song, [1], status=status)
                 log.info("song: %s → %s", song.__dict__["src"], "надіслано" if song.__dict__.get("sent_n") else "не вдалося")
                 if song.__dict__.get("sent_n"):
+                    self._health_ok("song")
                     return
                 last = f"{song.__dict__['src']}: знайшов, але скачати не вдалося"
                 status = await self._status(chat, None, f"🔁 {song.__dict__['src']} не віддав пісню — пробую наступне джерело…",
@@ -3176,8 +3192,21 @@ class Plugin(StudioUI, Base):
             return
         if await self.song_preview(chat, artist, track, status):  # 🎵 хоча б фрагмент цієї пісні
             return
+        try:
+            import health
+            health.fail("song", last or "ніде не знайдено")
+        except Exception:  # noqa: BLE001
+            pass
         await self._status(chat, status, "⚠️ Не знайшов ні повної пісні (SoundCloud, YouTube Music, YouTube, Audius), ні її фрагмента (Apple Music, Deezer)."
                            + (f"\n\n{esc(last[:300])}" if last else ""), [[("« Медіа", self.cb())]])
+
+    @staticmethod
+    def _health_ok(kind):
+        try:
+            import health
+            health.ok(kind)
+        except Exception:  # noqa: BLE001
+            pass
 
     async def song_audius(self, chat, artist, track, status=None):
         """🎧 Повна пісня з Audius (відкрита музична платформа, безкоштовний API без ключа) — якщо сам виконавець її там виклав."""

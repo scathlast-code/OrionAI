@@ -412,6 +412,7 @@ async def transcribe(data, filename="voice.ogg", language=None):
         try:
             text = await fn(data, filename, language)
             if text:
+                _health("ok", "stt")
                 return text, pid, errors
             errors.append((pid, MediaError(pid, "empty", "порожня розшифровка")))
         except MediaError as e:
@@ -420,7 +421,16 @@ async def transcribe(data, filename="voice.ogg", language=None):
             errors.append((pid, MediaError(pid, "timeout", "не відповів вчасно")))
         except httpx.HTTPError as e:
             errors.append((pid, MediaError(pid, "network", str(e) or type(e).__name__)))
+    _health("fail", "stt", "; ".join(f"{p}: {e.kind} {getattr(e, 'detail', '')[:120]}" for p, e in errors) or "немає сервісу розшифровки")
     raise MediaError("all", "unavailable", "; ".join(f"{p}: {e.kind}" for p, e in errors) or "немає сервісу розшифровки: потрібен GROQ_API_KEY, Cloudflare або GEMINI_API_KEY")
+
+
+def _health(what, kind, detail=""):
+    try:
+        import health
+        health.ok(kind) if what == "ok" else health.fail(kind, detail)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 TIMED_RE = re.compile(r"^\s*\[?(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(?:[-–]\s*(\d{1,2}):(\d{2})(?::(\d{2}))?)?\]?\s*[-–:]?\s*(.+)$")
