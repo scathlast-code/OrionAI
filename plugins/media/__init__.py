@@ -1097,6 +1097,54 @@ class Plugin(Base):
             else:
                 self._bg(chat, self.sep_go(chat, job, a[-1] if a != "osv" else "v"))
             return "⬇️ Починаю", (self.live_screen(chat) if self.in_app() else None)
+        if a in ("pil", "pi", "pim", "pif", "pia", "pir"):  # 🔢 окремо для кожного файлу
+            job = self.job_by(chat, x)
+            if not job:
+                return "Посилання застаріло — надішліть його ще раз", None
+            if a == "pil":
+                return None, self.per_screen(chat, job)
+            if a == "pir":
+                job.__dict__["per"] = {}
+                return "♻️ Скинуто", self.per_screen(chat, job)
+            n = int(y) if str(y).isdigit() else 0
+            if not 1 <= n <= len(job.items):
+                return "Такого файлу немає", None
+            if a == "pi":
+                return None, self.per_item_screen(chat, job, n)
+            if a == "pim":
+                m = args[3] if len(args) > 3 else "-"
+                p = self.per(job, n)
+                if (p.get("mode") == "audio") != (m == "audio"):
+                    p.pop("fmt", None)  # звук ↔ відео: формат попереднього виду вже не підходить
+                if m == "-":
+                    p.pop("mode", None)
+                else:
+                    p["mode"] = m
+                if not p:
+                    self.per(job).pop(n, None)
+                return None, self.per_item_screen(chat, job, n)
+            if a == "pif":
+                kind = self.item_kind(job, n)
+                fm = self.file_formats(job, 1 if kind == "vid" else 0, [n] if kind == "img" else [])
+                p = self.per(job, n)
+                if kind == "aud" or p.get("mode") == "audio":
+                    fm = ["", *M.AUDIO_FMTS, "orig"]
+                cur = p.get("fmt", job.options.fmt if job.options.fmt in fm else "")
+                p["fmt"] = fm[(fm.index(cur) + 1) % len(fm)] if cur in fm else fm[0]
+                return None, self.per_item_screen(chat, job, n)
+            if a == "pia":
+                what = args[3] if len(args) > 3 else ""
+                if what == "sep":
+                    sub = self.sub_job(job, n)
+                    return None, self.sep_screen(sub)
+                if self.busy(chat):
+                    return "⏳ Ще завантажую попереднє", None
+                sub = self.sub_job(job, n)
+                if what == "mus":
+                    self._bg(chat, self.post_audio(chat, sub))
+                elif what == "rec":
+                    self._bg(chat, self.recognize(chat, sub))
+                return "⬇️ Починаю", (self.live_screen(chat) if self.in_app() else None)
         if a in ("fau", "fab", "fvf", "fvs"):
             job = self.job_by(chat, x)
             if not job:
@@ -2230,6 +2278,100 @@ class Plugin(Base):
         imgs = [k for k in vis if M.is_image_item(job.items[k - 1])]
         return vis, aud, imgs
 
+    # ---------------------------------------------------------------- ⚙️ окремо для кожного файлу допису
+    PI_MODES = (("", "як усі"), ("video", "🎬 зі звуком"), ("mute", "🔇 без звуку"), ("audio", "🔊 лише звук"), ("skip", "⛔ не качати"))
+
+    def per(self, job, n=None):
+        d = job.__dict__.setdefault("per", {})
+        return d if n is None else d.setdefault(int(n), {})
+
+    def item_opts(self, job, n, base):
+        """Налаштування для одного файлу: загальні + його власні (режим, формат)."""
+        p = self.per(job).get(int(n)) or {}
+        if not p:
+            return base
+        o = replace(base)
+        if p.get("mode") in ("video", "mute"):
+            o.mode = p["mode"]
+        if "fmt" in p:
+            o.fmt = p["fmt"]
+        return o
+
+    def item_kind(self, job, n):
+        it = job.items[n - 1]
+        return "img" if M.is_image_item(it) else "aud" if M.is_audio_item(it) else "vid"
+
+    def per_label(self, job, n):
+        p = self.per(job).get(n) or {}
+        kind = self.item_kind(job, n)
+        icon = {"img": "🖼", "aud": "🎵", "vid": "🎬"}[kind]
+        bits = []
+        if p.get("mode"):
+            bits.append(dict(self.PI_MODES)[p["mode"]])
+        if p.get("fmt"):
+            bits.append(p["fmt"].upper())
+        return f"{icon} {n}" + (" · " + " · ".join(bits) if bits else "")
+
+    def per_screen(self, chat, job):
+        """🔢 Кожен файл допису окремо: що качати й як — до завантаження."""
+        vis, aud, _ = self.parts(job)
+        nums = vis + aud
+        tok = job.token
+        lines = ["🔢 <b>Окремо для кожного файлу</b>", "",
+                 "Натисніть файл, щоб задати саме йому: зі звуком чи без, лише звук, формат, не качати; "
+                 "для відео — ще музика окремо, чистий звук, розпізнати музику. Решта — як у загальних налаштуваннях."]
+        if self.total_line(job):
+            lines.append(self.total_line(job))
+        btns = [(self.per_label(job, n), self.cb("pi", tok, n)) for n in nums[:60]]
+        rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
+        go = [n for n in nums if (self.per(job).get(n) or {}).get("mode") != "skip"]
+        rows.append([(f"⬇️ Завантажити вибране · {len(go)} з {len(nums)}", self.cb("og", tok))])
+        if self.per(job):
+            rows.append([("♻️ Скинути окремі налаштування", self.cb("pir", tok))])
+        rows.append([("« Налаштування завантаження", self.cb("opt", tok))])
+        return "\n".join(lines)[:4000], rows
+
+    def per_item_screen(self, chat, job, n):
+        it = job.items[n - 1]
+        tok, kind, p = job.token, self.item_kind(job, n), self.per(job).get(n) or {}
+        info = it.info or {}
+        size = None
+        if info.get("formats"):
+            out, a_size = self.sizes(info)
+            size = a_size if kind == "aud" else (out[-1][1] if out and out[-1][1] else None)
+        size = size or info.get("filesize") or info.get("filesize_approx")
+        lines = [f"{self.per_label(job, n)} · <b>{esc(it.title[:120])}</b>"]
+        if size:
+            lines.append(f"💾 ≈{mb(size)}")
+        lines += ["", "Режим і формат — лише для цього файлу. Дії нижче («🎵», «🗣», «🔎») виконуються одразу й окремо."]
+        cur = p.get("mode", "")
+        modes = [m for m in self.PI_MODES if kind == "vid" or m[0] in ("", "skip")]
+        rows = [[(("● " if cur == m else "○ ") + lab, self.cb("pim", tok, n, m or "-")) for m, lab in modes[i:i + 3]] for i in range(0, len(modes), 3)]
+        fm = self.file_formats(job, 1 if kind == "vid" else 0, [n] if kind == "img" else [])
+        if kind == "aud" or cur == "audio":  # звук — формати звуку
+            fm = ["", *M.AUDIO_FMTS, "orig"]
+        if len(fm) > 1:
+            fcur = p.get("fmt", job.options.fmt if job.options.fmt in fm else "")
+            rows.append([(f"📦 Формат цього файлу: {(fcur or 'як є').upper()} ▸", self.cb("pif", tok, n))])
+        if kind == "vid":
+            rows.append([("🎵 Музика окремо", self.cb("pia", tok, n, "mus")), ("🔎 Розпізнати", self.cb("pia", tok, n, "rec"))])
+            rows.append([("🗣 Чистий звук ▸", self.cb("pia", tok, n, "sep"))])
+        rows.append([("« Усі файли", self.cb("pil", tok))])
+        return "\n".join(lines)[:4000], rows
+
+    def sub_job(self, job, n, mode=None):
+        """Окреме завдання з одного файлу допису — для дій «музика окремо», «чистий звук», «розпізнати»."""
+        sub = Job(secrets.token_hex(4), job.url, [job.items[n - 1]])
+        sub.__dict__["src"] = job.__dict__.get("src")
+        sub.options = replace(job.options)
+        if mode:
+            sub.options.mode = mode
+        self.jobs_extra = getattr(self, "jobs_extra", {})
+        if len(self.jobs_extra) > 50:
+            self.jobs_extra.pop(next(iter(self.jobs_extra)))
+        self.jobs_extra[sub.token] = sub
+        return sub
+
     async def post_total(self, job):
         """💾 Розмір усіх файлів допису однією цифрою (до завантаження): з даних сайту, а для прямих файлів — з заголовків.
         -> (байтів, скільки файлів з відомим розміром, усього файлів); кешується в job."""
@@ -2313,8 +2455,9 @@ class Plugin(Base):
         if len(fmts) > 1:
             cur = job.options.fmt if job.options.fmt in fmts else ""
             rows.append([(f"📦 Формат файлу: {(cur or 'як є').upper()} ▸", self.cb("ofm", tok))])
-        if len(vis) > 1:
-            rows.append([("🔢 Вибрати окремі", self.cb("menu", tok))])
+        if len(vis + aud) > 1:
+            n_per = len(self.per(job))
+            rows.append([("🔢 Окремо для кожного файлу" + (f" · налаштовано {n_per}" if n_per else ""), self.cb("pil", tok))])
         lines += ["", "<i>☑️ — додати до завантаження. «🎵 Музика окремо» — доріжка саме з цього допису; "
                   "«🎶 Повна пісня» — повна версія з YouTube/SoundCloud.</i>", self.limits_line()]
         return "\n".join(lines)[:4000], rows
@@ -2346,9 +2489,19 @@ class Plugin(Base):
         x = job.__dict__.get("x", set())
         vis, aud, _ = self.parts(job)
         nums = vis or aud
+        per = self.per(job)
+        if per:  # окремі налаштування: «не качати» — пропускаємо; «лише звук» — окремим MP3 після допису
+            nums = [n for n in (vis + aud) if (per.get(n) or {}).get("mode") not in ("skip", "audio")]
+        only_audio = [n for n, p in per.items() if p.get("mode") == "audio"]
         job.options.mode, job.options.cuts = ("mute" if "mute" in x else "video"), ()
         status = await self._status(chat, None, f"⬇️ Готую: {esc(job.__dict__.get('src') or '')}…", [[("⏹ Зупинити", self.cb("stop"))]])
-        await self.download(chat, job, nums, status=status)
+        if nums:
+            await self.download(chat, job, nums, status=status)
+        for n in sorted(only_audio):
+            sub = self.sub_job(job, n, "audio")
+            if per[n].get("fmt"):
+                sub.options.fmt = per[n]["fmt"]
+            await self.download(chat, sub, [1])
         if "mus" in x:
             await self.post_audio(chat, job)
         if "full" in x and self.song_of(job):
@@ -2565,7 +2718,9 @@ class Plugin(Base):
 
     def job_by(self, chat, tok):
         job = self.jobs.get(chat)
-        return job if job and job.token == tok else None
+        if job and job.token == tok:
+            return job
+        return getattr(self, "jobs_extra", {}).get(tok)  # окремий файл допису (дії «🗣 чистий звук» тощо)
 
     async def fmt_go(self, chat, job, nums, **opts):
         """Вибраний формат / сторіс: окреме повідомлення-статус і завантаження."""
@@ -2710,8 +2865,10 @@ class Plugin(Base):
             album, album_hist = [], None
             audio_retry = False  # 🔁 була помилка звуку — запропонуємо повторити (а не повторюємо самі)
             last_media = None  # (повідомлення, кнопки автора, запис) — сюди ж додамо й меню, щоб усе було одним дописом
+            base_opts = opts
             for k, n in enumerate(nums, 1):
                 item = job.items[n - 1]
+                opts = self.item_opts(job, n, base_opts)  # ⚙️ окремі налаштування саме цього файлу (без звуку, формат)
                 work = root / f"{n:03d}"
                 work.mkdir()
                 left = ""
