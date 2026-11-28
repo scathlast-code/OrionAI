@@ -141,7 +141,7 @@ class ActionsUI:
 
     def more_screen(self, did):
         d = self.store.draft(did)
-        rows = [[("📏 Довжина", self.cb("len", did)), ("🔎 Звірити", self.cb("chk", did))],
+        rows = [[("📏 Довжина", self.cb("len", did)), ("🔎 Звірити", self.cb("chk", did)), ("✍️ Стиль", self.cb("sty", did))],
                 [("📄 Оригінал", self.cb("src", did)), (f"🕘 Версії · {d['version']}", self.cb("ver", did))]]
         if d["status"] in ("draft", "length_mismatch"):
             rows.append([("❌ Відхилити", self.cb("no", did))])

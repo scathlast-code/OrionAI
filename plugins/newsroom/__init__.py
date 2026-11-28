@@ -38,6 +38,7 @@ from .report import ReportUI
 from .crosspost import CrosspostUI
 from .pubqueue import QueueUI
 from .cards import CardsUI
+from .styleguide import StyleUI
 from .echo import KINDS as ECHO_KINDS, Echo
 from .collectors import MTProto, WebCollector
 
@@ -117,7 +118,7 @@ def src_links(sources, sep=" · "):
     return sep.join(f'<a href="{esc(s)}">{esc(_dom(s))}</a>' if str(s).startswith("http") else esc(s) for s in sources)
 
 
-class Plugin(CardsUI, QueueUI, CrosspostUI, ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Base):
+class Plugin(StyleUI, CardsUI, QueueUI, CrosspostUI, ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Base):
     id = "news"
     icon = "✍️"
     title = "Публікації"
@@ -127,7 +128,7 @@ class Plugin(CardsUI, QueueUI, CrosspostUI, ReportUI, ObservancesUI, DigestMode,
                "переписує за правилами редакції на моделях Оріона, тримає точну довжину, готує зведення за добу й "
                "публікує в канал лише після вашого схвалення.\n\n"
                "Автоматичний рерайт — не фактчек: перед публікацією звіряйте цифри й імена (кнопка «🔎 Звірити» допомагає, але не замінює редактора).")
-    VIEWS = {"cd", "cds", "pql", "pq", "pqh", "xp", "xps", "ls", "d", "src", "dg", "so", "set", "q", "help", "ver", "len", "rules",
+    VIEWS = {"sty", "styd", "cd", "cds", "pql", "pq", "pqh", "xp", "xps", "ls", "d", "src", "dg", "so", "set", "q", "help", "ver", "len", "rules",
              "L", "Lo", "Ls", "Lsort", "Lbulk", "Le", "Lacc", "Lhelp", "Elst", "Lmerge",
              "H1", "H2", "H3", "H4", "H5", "D", "Dm", "Fl", "Fo", "Ff", "Fi", "Fmv", "Fbl", "Tg", "Tgi", "Tp", "Bk", "Bkl",
              "Sp", "Ou", "Ours", "Sl", "St", "Wt", "more", "acs", "ace", "sch", "fld", "flds", "echo", "eci", "cls", "ctp", "cte", "cmk", "csl", "obh", "obt", "obc", "obd", "ob", "obi", "obl", "obs", "obup", "obws", "obdy", "obcp", "obcm"}
@@ -1126,7 +1127,7 @@ class Plugin(CardsUI, QueueUI, CrosspostUI, ReportUI, ObservancesUI, DigestMode,
             [(("🚀 Одразу: так" if st.get("publish_on_approve") else "🚀 Одразу: ні"), self.cb("tg", "publish_on_approve")),
              (("🔗 Джерела: так" if st.get("show_sources") else "🔗 Джерела: ні"), self.cb("tg", "show_sources"))],
             [("✒️ Підпис", self.cb("sig")), ("⚙️ Версії для мереж", self.cb("xps"))],
-            [("⚙️ Вигляд карток", self.cb("cds"))],
+            [("⚙️ Вигляд карток", self.cb("cds")), ("📖 Словник редакції", self.cb("styd"))],
             [("« Налаштування новинарні", self.cb("H2"))],
         ]
         return text, rows
@@ -1192,6 +1193,8 @@ class Plugin(CardsUI, QueueUI, CrosspostUI, ReportUI, ObservancesUI, DigestMode,
             return await self.actions_route(chat, a, x, y)
         if a in ("rp", "rpsel", "rpt", "rpin", "rpshow", "rpau", "rpun", "rpa", "rgo"):
             return await self.report_route(chat, a, x, y)
+        if a in ("sty", "styfix", "styd", "stydi", "stydx"):
+            return await self.sty_route(chat, a, x, y)
         if a in ("cd", "cdv", "cda", "cdtone", "cdx", "cdp", "cdr", "cdu", "cdl", "cdlx", "cdn", "cdf", "cds", "cdc", "cdz", "cdb"):
             return await self.cd_route(chat, a, x, y)
         if a in ("pq", "pql", "pqs", "pqt", "pqi", "pqp", "pqx", "pqn", "pqr", "pqdone", "pqh", "pqhi", "pqhr"):
@@ -1421,6 +1424,8 @@ class Plugin(CardsUI, QueueUI, CrosspostUI, ReportUI, ObservancesUI, DigestMode,
             return await self.xp_text(chat, key, data, text)
         if key == "cdb":
             return await self.cd_text(chat, key, data, text)
+        if key == "styd":
+            return await self.sty_text(chat, key, data, text)
         if key in ("pqi", "pqh"):
             return await self.pq_text(chat, key, data, text)
         if key == "ecb":
@@ -1528,6 +1533,10 @@ class Plugin(CardsUI, QueueUI, CrosspostUI, ReportUI, ObservancesUI, DigestMode,
             bits = langguard.foreign((d.get("headline") or "") + "\n" + (d.get("body") or ""))
             if bits:
                 report = (report or "") + "\n🔤 Іншомовні вставки — замініть: " + ", ".join(bits[:10])
+            from . import styleguide
+            sn = styleguide.check(d.get("headline") or "", d.get("body") or "", self.sty_custom())
+            if sn:
+                report = (report or "") + "\n" + styleguide.report(sn, 5)
             self.store.update_draft(did, keep_version=True, check_report=report or "✅ Перевірено автоматично: зауважень немає")
         try:
             t = asyncio.get_running_loop().create_task(go())
