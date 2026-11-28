@@ -635,7 +635,17 @@ def _threads_post(text, code):
 
 
 ICON_RE = re.compile(r"(?i)static\.cdninstagram|rsrc\.php|/static/|\.svg(?:\?|$)|emoji|sprite|/images/|s\d{2,3}x\d{2,3}[/_]")
-POST_IMG_RE = re.compile(r"https:(?:\\?/){2}scontent[^\"'\s<>]+?\.(?:jpe?g|webp|heic)[^\"'\s<>]*")
+POST_IMG_RE = re.compile(r"https:(?:\\?/){2}[\w.-]*(?:cdninstagram\.com|fbcdn\.net)(?:\\?/)[^\"'\s<>]+?\.(?:jpe?g|webp|heic)[^\"'\s<>]*")
+CDN_ANY_RE = re.compile(r"https:(?:\\?/){2}([\w.-]*(?:cdninstagram\.com|fbcdn\.net))(?:\\?/)[^\"'\s<>]*?(t\d+\.\d+-\d+)")
+
+
+def _img_census(text):
+    """Для журналу: які зображення з CDN є на сторінці (хост · клас → кількість) — щоб бачити, що відсіюється."""
+    seen = {}
+    for host, cls in CDN_ANY_RE.findall(text or ""):
+        k = f"{host.split('.')[0][:14]}:{cls}"
+        seen[k] = seen.get(k, 0) + 1
+    return ", ".join(f"{k}×{v}" for k, v in sorted(seen.items(), key=lambda kv: -kv[1])[:8]) or "немає"
 
 
 def _raw_post_images(text):
@@ -692,6 +702,8 @@ async def threads_probe(url, work):
     log.info("threads %s: сторінка %d КБ, допис у JSON: %s, карусель: %s з %s, фото в тексті: %d", code, len(text) // 1024,
              bool(post), len((post or {}).get("carousel_media") or []), (post or {}).get("carousel_media_count"),
              len(_raw_post_images(text)))
+    if not post:
+        log.info("threads %s: CDN на сторінці: %s; вхід: %s", code, _img_census(text), "login" in final or "loginForm" in text)
     if post:
         caption = post.get("caption") or {}
         if isinstance(caption, dict) and caption.get("text"):
@@ -722,8 +734,8 @@ async def threads_probe(url, work):
             if not links:
                 links = _embed_media(etext, efinal)
             raw = _raw_post_images(etext)
-            log.info("threads %s embed: %d КБ, JSON: %s, посилань: %d, фото в тексті: %d", code, len(etext) // 1024, bool(epost),
-                     len(links), len(raw))
+            log.info("threads %s embed: %d КБ, JSON: %s, посилань: %d, фото в тексті: %d; CDN: %s", code, len(etext) // 1024,
+                     bool(epost), len(links), len(raw), _img_census(etext))
             if len(raw) > len([x for x in links if x[1] != ".mp4"]) and not any(x[1] == ".mp4" for x in links):
                 links = raw  # карусель фото: беремо всі справжні фото, без значків
             if links:
