@@ -451,22 +451,58 @@ class Plugin(Base):
         except Exception:  # noqa: BLE001
             return True  # не змогли перевірити — вважаємо, що звук є
 
-    async def _shazam(self, path):
-        """Тиха перевірка Shazam (25 с звуку) -> (виконавець, назва) або None; без встановлення на льоту."""
+    @staticmethod
+    async def _duration(path):
+        try:
+            proc = await asyncio.create_subprocess_exec("ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
+                                                        str(path), stdout=asyncio.subprocess.PIPE)
+            out, _ = await asyncio.wait_for(proc.communicate(), 20)
+            return float(out.strip() or 0)
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    @staticmethod
+    def shazam_windows(dur, clip=20, most=6):
+        """Звідки брати шматки звуку: музика буває на початку, посередині чи наприкінці.
+        Коротке відео — один шматок; довше — рівномірно по всій довжині, включно з кінцем (до 6 шматків по 20 с)."""
+        if dur <= clip + 2:
+            return [0.0]
+        n = max(2, min(most, int(dur // clip)))
+        last = max(0.0, dur - clip)
+        return sorted({round(last * i / (n - 1), 1) for i in range(n)})
+
+    async def _shazam(self, path, all_hits=False):
+        """Shazam по кількох шматках усього відео (початок, середина, кінець) -> (виконавець, назва) першої знайденої пісні,
+        або список усіх різних пісень (all_hits=True); None — нічого."""
         try:
             from shazamio import Shazam
         except ImportError:
             return None
+        hits = []
         try:
+            sh = Shazam()
+            dur = await self._duration(path)
             with tempfile.TemporaryDirectory(prefix="orion-shz-") as work:
-                clip = Path(work) / "clip.mp3"
-                await run("ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-t", "25", "-i", str(path), "-ac", "1", clip, timeout=120)
-                sh = Shazam()
-                out = await asyncio.wait_for(sh.recognize(str(clip)) if hasattr(sh, "recognize") else sh.recognize_song(str(clip)), 40)
-            tr = (out or {}).get("track") or {}
-            return (tr.get("subtitle") or "", tr["title"]) if tr.get("title") else None
+                for i, start in enumerate(self.shazam_windows(dur)):
+                    clip = Path(work) / f"c{i}.mp3"
+                    await run("ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", str(start), "-t", "20", "-i", str(path),
+                              "-vn", "-ac", "1", clip, timeout=120)
+                    if not clip.is_file() or clip.stat().st_size < 4000:
+                        continue
+                    try:
+                        out = await asyncio.wait_for(sh.recognize(str(clip)) if hasattr(sh, "recognize") else sh.recognize_song(str(clip)), 40)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    tr = (out or {}).get("track") or {}
+                    if tr.get("title"):
+                        hit = (tr.get("subtitle") or "", tr["title"])
+                        if not all_hits:
+                            return hit
+                        if hit not in hits:
+                            hits.append(hit)
         except Exception:  # noqa: BLE001
-            return None
+            log.info("shazam не вдався", exc_info=True)
+        return hits if all_hits else None
 
     async def post_music_in_file(self, media, song):
         """Threads: музика прикріплена до допису. Чи є вона в самому скачаному файлі?
@@ -2843,16 +2879,16 @@ class Plugin(Base):
             with tempfile.TemporaryDirectory(prefix="orion-rec-") as work:
                 work = Path(work)
                 path, _t, _i = await M.fetch(job.items[0], job.url, opts, work)
-                clip = work / "clip.mp3"
-                await run("ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-t", "25", "-i", path, "-ac", "1", clip, timeout=120)
-                sh = Shazam()
-                out = await (sh.recognize(str(clip)) if hasattr(sh, "recognize") else sh.recognize_song(str(clip)))
-            tr = (out or {}).get("track") or {}
-            if not tr.get("title"):
-                await self._status(chat, status, "🤷 Не впізнав музику — можливо, це оригінальний звук або голос.", [[("« Медіа", self.cb())]])
+                await self._status(chat, status, "🔎 Слухаю все відео — початок, середину й кінець…")
+                hits = await self._shazam(path, all_hits=True) or []
+            if not hits:
+                await self._status(chat, status, "🤷 Не впізнав музику по всьому відео — можливо, це оригінальний звук або голос.",
+                                   [[("« Медіа", self.cb())]])
                 return
-            job.__dict__["song"] = (tr.get("subtitle") or "", tr["title"], True)
-            await self._status(chat, status, f"🎵 Це: <b>{esc(tr.get('subtitle') or '')} — {esc(tr['title'])}</b>",
+            job.__dict__["song"] = (hits[0][0], hits[0][1], True)
+            more = "".join(f"\n• {esc(a)} — {esc(t)}" for a, t in hits[1:])
+            await self._status(chat, status, f"🎵 Це: <b>{esc(hits[0][0])} — {esc(hits[0][1])}</b>"
+                               + (f"\n\nЩе у відео:{more}" if more else ""),
                                [[("🎵 Фрагмент з відео", self.cb("fa", job.token)), ("🎶 Повна пісня", self.cb("ff", job.token))]])
         except (JobError, ImportError) as exc:
             await self._status(chat, status, f"⚠️ Розпізнати не вдалося: {esc(str(exc)[:300])}", [[("« Медіа", self.cb())]])

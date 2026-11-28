@@ -24,3 +24,11 @@ def test_ai_risks(tmp_path):
     g.write_bytes(b"\xff\xd8 plain photo \xff\xd9")
     assert not R.ai_marks_in_file(g)
     assert R.ai_marks_in_info({"x": {"aigc_label_type": 1}}) and not R.ai_marks_in_info({"title": "AI talk"})
+
+
+def test_shazam_windows():
+    w = Plugin.shazam_windows
+    assert w(10) == [0.0]
+    assert w(60)[0] == 0.0 and w(60)[-1] == 40.0 and len(w(60)) == 3
+    long = w(600)
+    assert len(long) == 6 and long[-1] == 580.0
