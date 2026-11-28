@@ -164,6 +164,10 @@ class DeskUI:
             fid = self.desk.add_find(origin, ref, c, sc, pr)
             if fid:
                 ids.append(fid)
+                try:  # ⚡ термінове — одразу, без чекання зведення
+                    await self.al_maybe(c["title"], c.get("snippet", ""), sc, c.get("source", ""), c.get("url", ""), ("find", fid))
+                except Exception:  # noqa: BLE001
+                    log.exception("alert")
         return ids
 
     async def material_text(self, f):
