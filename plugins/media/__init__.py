@@ -2636,7 +2636,7 @@ class Plugin(StudioUI, Base):
         status = await self._status(chat, None, "🧪 Перевіряю розшифровку мови, зір ШІ й Shazam… (до хвилини)", [[("⏹ Зупинити", self.cb("stop"))]])
         # 1) мова: TTS → STT
         keys = [("Groq", bool(getattr(core, "GROQ_KEY", ""))), ("Cloudflare", bool(getattr(core, "CF_TOKEN", "") and getattr(core, "CF_ACCOUNT", ""))),
-                ("Gemini", bool(getattr(core, "GEMINI_KEY", "")))]
+                ("Gemini", bool(getattr(core, "GEMINI_KEY", ""))), ("OpenRouter (безкоштовні)", bool(getattr(core, "OPENROUTER_KEY", "")))]
         lines.append("🗣 Сервіси розшифровки: " + ", ".join(f"{'✅' if ok else '—'} {n}" for n, ok in keys))
         ogg = None
         try:

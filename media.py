@@ -292,10 +292,71 @@ STT_PROVIDERS = {
     "groq_stt": {"title": "Groq Whisper", "ready": lambda: bool(GROQ_KEY)},
     "cloudflare_stt": {"title": "Cloudflare Whisper", "ready": lambda: bool(CF_TOKEN and CF_ACCOUNT)},
     "gemini_stt": {"title": "Gemini (аудіо й відео)", "ready": lambda: bool(GEMINI_KEY)},
+    "openrouter_stt": {"title": "OpenRouter (безкоштовні моделі зі слухом)", "ready": lambda: bool(OPENROUTER_KEY) and env("OPENROUTER_STT", "1") == "1"},
 }
 MIME_BY_EXT = {"ogg": "audio/ogg", "oga": "audio/ogg", "opus": "audio/ogg", "mp3": "audio/mpeg", "m4a": "audio/mp4", "wav": "audio/wav",
                "aac": "audio/aac", "flac": "audio/flac", "mp4": "video/mp4", "mov": "video/quicktime", "webm": "video/webm",
                "mpeg": "video/mpeg", "3gp": "video/3gpp"}
+
+
+_OR_MODELS = {"t": 0, "list": []}
+
+
+async def _openrouter_audio_models():
+    """Безкоштовні моделі OpenRouter, що приймають звук (ціна 0 — кредити не витрачаються); список від OpenRouter, кеш 6 год."""
+    if _OR_MODELS["list"] and time.time() - _OR_MODELS["t"] < 6 * 3600:
+        return _OR_MODELS["list"]
+    out = []
+    try:
+        async with httpx.AsyncClient(timeout=25) as c:
+            r = await c.get("https://openrouter.ai/api/v1/models")
+        for m in (r.json().get("data") or []) if r.status_code == 200 else []:
+            arch, price = m.get("architecture") or {}, m.get("pricing") or {}
+            if "audio" in (arch.get("input_modalities") or []) and str(price.get("prompt", "1")) in ("0", "0.0") \
+                    and str(price.get("completion", "1")) in ("0", "0.0"):
+                out.append(m["id"])
+    except Exception:  # noqa: BLE001
+        log.info("openrouter: список моделей не отримано", exc_info=True)
+    _OR_MODELS.update(t=time.time(), list=out[:5])
+    return _OR_MODELS["list"]
+
+
+async def stt_openrouter(data, filename, language=None, prompt=None):
+    """Запасна розшифровка через OpenRouter — лише безкоштовні моделі зі слухом (кредити не витрачаються)."""
+    models = await _openrouter_audio_models()
+    if not models:
+        raise MediaError("openrouter_stt", "unavailable", "безкоштовних моделей зі слухом зараз немає")
+    ext = (filename.rsplit(".", 1)[-1] if "." in filename else "ogg").lower()
+    if ext not in ("mp3", "wav"):  # OpenRouter приймає mp3 або wav
+        proc = await asyncio.create_subprocess_exec("ffmpeg", "-loglevel", "error", "-i", "pipe:0", "-vn", "-ac", "1", "-ar", "16000",
+                                                    "-b:a", "48k", "-f", "mp3", "pipe:1", stdin=asyncio.subprocess.PIPE,
+                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        data, _err = await proc.communicate(data)
+        ext = "mp3"
+    if len(data) > 19 * 1024 * 1024:
+        raise MediaError("openrouter_stt", "too_big", "файл завеликий (до 19 МБ)")
+    b64 = base64.b64encode(data).decode()
+    last = None
+    for model in models:
+        body = {"model": model, "messages": [{"role": "user", "content": [
+            {"type": "text", "text": prompt or "Дослівно розшифруй мовлення з цього запису тією мовою, якою говорять (не перекладай). Лише текст."},
+            {"type": "input_audio", "input_audio": {"data": b64, "format": ext}}]}]}
+        async with httpx.AsyncClient(timeout=120) as c:
+            r = await c.post("https://openrouter.ai/api/v1/chat/completions", json=body,
+                             headers={"Authorization": f"Bearer {OPENROUTER_KEY}", "X-Title": "OrionAI"})
+        if r.status_code == 200:
+            try:
+                text = r.json()["choices"][0]["message"]["content"]
+                if isinstance(text, list):
+                    text = "".join(p.get("text", "") for p in text if isinstance(p, dict))
+                if (text or "").strip():
+                    return text.strip()
+            except (KeyError, IndexError, ValueError):
+                pass
+        last = r
+        log.warning("openrouter_stt %s: HTTP %s %s", model, r.status_code, r.text[:200])
+    raise MediaError("openrouter_stt", _kind(last.status_code, last.text) if last is not None else "empty",
+                     f"HTTP {getattr(last, 'status_code', '?')}")
 
 
 _GEM_MODELS = {"t": 0, "list": []}
@@ -406,7 +467,7 @@ async def stt_cloudflare(data, filename, language):
 async def transcribe(data, filename="voice.ogg", language=None):
     """Розшифровка голосу. Повертає (текст, провайдер, помилки)."""
     errors = []
-    for pid, fn in (("groq_stt", stt_groq), ("cloudflare_stt", stt_cloudflare), ("gemini_stt", stt_gemini)):
+    for pid, fn in (("groq_stt", stt_groq), ("cloudflare_stt", stt_cloudflare), ("gemini_stt", stt_gemini), ("openrouter_stt", stt_openrouter)):
         if not STT_PROVIDERS[pid]["ready"]():
             continue
         try:
@@ -498,8 +559,41 @@ async def transcribe_timed(data, filename="audio.mp3", language=None):
             segs = parse_timed(txt)
             if segs:
                 return segs, "gemini_stt"
+    if STT_PROVIDERS["openrouter_stt"]["ready"]():  # запасний шлях із мітками часу — безкоштовні моделі OpenRouter
+        try:
+            txt = await stt_openrouter(data, filename, language, prompt=(
+                "Дослівно розшифруй мовлення тією мовою, якою говорять (не перекладай). Кожну фразу — з нового рядка у форматі "
+                "[ММ:СС-ММ:СС] текст (час від початку запису). Лише розшифровка."))
+            segs = parse_timed(txt)
+            if segs:
+                return segs, "openrouter_stt"
+        except MediaError:
+            pass
     text, prov, _err = await transcribe(data, filename, language)
+    dur = await _audio_seconds(data, filename)
+    if dur and text:  # сервіс дав лише текст — розкладаємо речення рівномірно по тривалості (приблизні субтитри краще, ніж жодних)
+        parts = [p.strip() for p in re.split(r"(?<=[.!?…])\s+", text) if p.strip()] or [text]
+        total = sum(len(p) for p in parts) or 1
+        out, t = [], 0.0
+        for p in parts:
+            d = dur * len(p) / total
+            out.append((round(t, 2), round(t + d, 2), p))
+            t += d
+        return out, prov
     return [(0.0, 0.0, text)], prov
+
+
+async def _audio_seconds(data, filename):
+    try:
+        with tempfile.NamedTemporaryFile(suffix="." + (filename.rsplit(".", 1)[-1] if "." in filename else "mp3")) as f:
+            f.write(data)
+            f.flush()
+            proc = await asyncio.create_subprocess_exec("ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
+                                                        f.name, stdout=asyncio.subprocess.PIPE)
+            out, _ = await proc.communicate()
+        return float(out.strip() or 0)
+    except Exception:  # noqa: BLE001
+        return 0.0
 
 
 async def tts(text, voice="polina", rate=0):

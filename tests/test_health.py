@@ -32,3 +32,19 @@ def test_disk_report(tmp_path):
     db.write_bytes(b"x" * 10)
     pct, used, total, size, folder = health.disk_report(str(db))
     assert 0 <= pct <= 100 and size == 10
+
+
+def test_timed_even_split(monkeypatch):
+    import asyncio
+    import media
+
+    async def tr(data, filename, language=None):
+        return "Перше речення. Друге довше речення!", "x", []
+    async def secs(data, filename):
+        return 10.0
+    monkeypatch.setattr(media, "transcribe", tr)
+    monkeypatch.setattr(media, "_audio_seconds", secs)
+    for k in ("groq_stt", "gemini_stt", "openrouter_stt"):
+        monkeypatch.setitem(media.STT_PROVIDERS, k, {"title": k, "ready": lambda: False})
+    segs, prov = asyncio.run(media.transcribe_timed(b"x", "a.mp3"))
+    assert len(segs) == 2 and segs[0][0] == 0 and abs(segs[-1][1] - 10) < 0.01
