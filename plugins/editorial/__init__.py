@@ -36,6 +36,39 @@ TASK_RE = re.compile(r"(?i)\b(?:треба|потрібно|необхідно|�
 DECISION_RE = re.compile(r"(?i)\b(?:вирішили|домовились|домовилися|рішення|затвердж\w*|погоджено|погодили|ухвалили|остаточно)\b")
 TAKE_RE = re.compile(r"(?i)\b(?:я візьму|беру|візьму на себе|я напишу|я зроблю)\b")
 WHERE_TASK = {"Сайт": "🌐 Сайт", "Блог": "✍️ Блог", "Соцмережі": "📱 Соцмережі", "SMM": "📱 Соцмережі"}
+SOCIAL = {"Соцмережі", "SMM"}
+# стан завдання: від «нове» до «готово»; для соцмереж — окремо по кожній мережі редакції
+STATUS = {"new": "◽ Нове", "work": "🛠 У роботі", "review": "👀 На перевірці", "done": "✅ Готово"}
+NET_STEP = {"new": "work", "work": "done", "done": "new"}
+NET_MARK = {"new": "◽", "work": "🛠", "done": "✅"}
+DRAFT_TO = {"draft": "work", "length_mismatch": "work", "approved": "review", "published": "done"}
+
+
+def parse_day(t, today):
+    """«30.11», «30.11.2026», «завтра», «сьогодні», «+3» → ISO-дата; «-» → None (без дедлайну); незрозуміле → False."""
+    t = (t or "").strip().lower()
+    if t in ("-", "—", "без"):
+        return None
+    if t in ("сьогодні",):
+        return today.isoformat()
+    if t in ("завтра",):
+        return (today + dt.timedelta(days=1)).isoformat()
+    if t in ("післязавтра",):
+        return (today + dt.timedelta(days=2)).isoformat()
+    m = re.fullmatch(r"\+\s*(\d{1,3})", t)
+    if m:
+        return (today + dt.timedelta(days=int(m[1]))).isoformat()
+    m = re.fullmatch(r"(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?", t)
+    if m:
+        y = int(m[3]) + (2000 if m[3] and len(m[3]) == 2 else 0) if m[3] else today.year
+        try:
+            d = dt.date(y, int(m[2]), int(m[1]))
+        except ValueError:
+            return False
+        if d < today - dt.timedelta(days=30) and not m[3]:
+            d = d.replace(year=y + 1)
+        return d.isoformat()
+    return False
 
 
 class Plugin(Base):
@@ -54,6 +87,10 @@ class Plugin(Base):
         self.db_path = self.dir / "editorial.db"
         with closing(self.db()) as con, con:
             con.executescript(SCHEMA)
+            cols = {r[1] for r in con.execute("PRAGMA table_info(items)")}
+            for col, typ in (("status", "TEXT DEFAULT ''"), ("nets", "TEXT DEFAULT ''"), ("news", "INTEGER DEFAULT 0")):
+                if col not in cols:
+                    con.execute(f"ALTER TABLE items ADD COLUMN {col} {typ}")
             if not con.execute("SELECT 1 FROM accounts LIMIT 1").fetchone():  # одна прив'язка на ім'я → кілька акаунтів
                 con.execute("INSERT INTO accounts(name,uid,username,at) SELECT name,uid,COALESCE(username,''),at FROM links")
 
@@ -370,6 +407,60 @@ class Plugin(Base):
         from footnotes import html_cut
         return html_cut("\n".join(lines), 4000), rows
 
+    # ---------------------------------------------------------------- стан завдань
+    def our_nets(self):
+        """Мережі редакції — ті, що вибрані в «📲 Під мережі» Новинарні (там же їх і змінюють)."""
+        news = self.news_plugin()
+        try:
+            from plugins.newsroom.crosspost import NETWORKS, ORDER
+            nets = news.xp_cfg()["nets"] if news else ORDER
+            return [(k, NETWORKS[k]) for k in ORDER if k in nets]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def nets_of(self, r):
+        try:
+            d = json.loads(r.get("nets") or "{}")
+        except ValueError:
+            d = {}
+        if (r.get("where_") or "") in SOCIAL:
+            for k, _v in self.our_nets():
+                d.setdefault(k, "new")
+            dr = self.draft_of(r) if r.get("news") else None
+            if dr and dr["status"] == "published" and "tg" in d:
+                d["tg"] = "done"  # опубліковано з Новинарні в Telegram-канал
+        return d
+
+    def draft_of(self, r):
+        news = self.news_plugin()
+        if not news or not r.get("news"):
+            return None
+        did = news.store.draft_for_item(int(r["news"]))
+        return news.store.draft(did) if did else None
+
+    def status_of(self, r):
+        """Стан з урахуванням новини з Новинарні (чернетка → у роботі, схвалено → на перевірці, опубліковано → готово)
+        і мереж (усі ✅ → готово)."""
+        if r.get("done"):
+            return "done"
+        d = self.draft_of(r)
+        st = r.get("status") or "new"
+        nets = self.nets_of(r)
+        if d:
+            ds = DRAFT_TO.get(d["status"], "work")
+            if nets and ds == "done":
+                ds = "work"  # у соцмережах готово лише тоді, коли вийшло в усіх мережах (Telegram позначається сам)
+            st = max(st, ds, key=list(STATUS).index)
+        if nets and all(v == "done" for v in nets.values()):
+            return "done"
+        if nets and any(v != "new" for v in nets.values()) and st == "new":
+            st = "work"
+        return st
+
+    def set_status(self, iid, st):
+        with closing(self.db()) as con, con:
+            con.execute("UPDATE items SET status=?, done=? WHERE id=?", (st, 1 if st == "done" else 0, int(iid)))
+
     def line(self, r):
         head = ""
         if r.get("day"):
@@ -380,7 +471,19 @@ class Plugin(Base):
         who = f" · 👤 <code>{esc(r['who'].upper())}</code>" if r.get("who") else " · ◽ ніхто"
         why = f" · до дня «{esc(r['reason'][:60])}»" if r.get("reason") and r.get("where_") else ""
         src = f' · <a href="{esc(r["url"])}">{"контент-план" if r["chat"] == 0 else "повідомлення"}</a>' if r.get("url") else ""
-        return ("✅ " if r.get("done") else "") + head + text + why + (who if r["kind"] == "task" else (f" · ✍️ <code>{esc(r['author'].upper())}</code>" if r.get("author") else "")) + src
+        mark = ""
+        if r["kind"] == "task":
+            st = self.status_of(r)
+            mark = STATUS[st].split(" ")[0] + " "
+            if r.get("day") and st != "done" and r["day"] < dt.date.today().isoformat():
+                mark += "⏰ "
+            nets = self.nets_of(r)
+            if nets:
+                icons = {k: v[0] for k, v in self.our_nets()}
+                text += " · " + " ".join(icons.get(k, k) + NET_MARK[v] for k, v in nets.items() if k in icons)
+        elif r.get("done"):
+            mark = "✅ "
+        return mark + head + text + why + (who if r["kind"] == "task" else (f" · ✍️ <code>{esc(r['author'].upper())}</code>" if r.get("author") else "")) + src
 
     def item_screen(self, chat, iid, note=""):
         with closing(self.db()) as con:
@@ -389,10 +492,37 @@ class Plugin(Base):
             return self.home(chat)
         r = dict(r)
         text = f"<b>{KINDS[r['kind']]}</b>" + (f" · {TALK}" if r["kind"] in ("decision", "talk") else "") + f"\n\n{self.line(r)}" + (f"\n\n{note}" if note else "")
+        if r["kind"] == "task":
+            return self.task_screen(chat, r, text)
         rows = [[("👤 Відповідальний", self.cb("who", iid)), (("↩️ Не виконано" if r["done"] else "✅ Виконано"), self.cb("done", iid))],
                 [("✏️ Текст", self.cb("ed", iid)), ("🔀 Тип", self.cb("kd", iid)), ("🗑 Прибрати", self.cb("hide", iid))],
                 [("« До списку", self.cb("l", "talk" if r["kind"] == "decision" else r["kind"]))]]
         return text, rows
+
+    def task_screen(self, chat, r, text):
+        iid = r["id"]
+        st = self.status_of(r)
+        d = self.draft_of(r)
+        nets = self.nets_of(r)
+        lines = [text, "", f"Стан: <b>{STATUS[st]}</b>" + (f" · дедлайн {r['day'][8:]}.{r['day'][5:7]}" if r.get("day") else " · без дедлайну")]
+        if d:
+            lines.append(f"📰 Новина #{d['id']} у Новинарні: {esc(d['status'])} · «{esc(d['headline'][:80])}»")
+        if nets:
+            names = dict(self.our_nets())
+            lines += ["", "<b>По мережах</b> (натискайте: ◽ → 🛠 → ✅):"] + [f"{names[k][0]} {names[k][1]}: {NET_MARK[v]}" for k, v in nets.items() if k in names]
+        rows = [[((("● " if st == k else "") + v), self.cb("st", iid, k)) for k, v in STATUS.items()][:2],
+                [((("● " if st == k else "") + v), self.cb("st", iid, k)) for k, v in STATUS.items()][2:]]
+        if nets:
+            names = dict(self.our_nets())
+            btns = [(names[k][0] + NET_MARK[v], self.cb("nt", iid, k)) for k, v in nets.items() if k in names]
+            rows += [btns[i:i + 4] for i in range(0, len(btns), 4)]
+        news = self.news_plugin()
+        if news:
+            rows.append([(f"📰 Новина #{d['id']}", news.cb("d", d["id"]))] if d else [("📰 Написати новину", self.cb("wn", iid))])
+        rows += [[("👤 Відповідальний", self.cb("who", iid)), ("📅 Дедлайн", self.cb("dl", iid))],
+                 [("✏️ Текст", self.cb("ed", iid)), ("🔀 Тип", self.cb("kd", iid)), ("🗑 Прибрати", self.cb("hide", iid))],
+                 [("« До списку", self.cb("l", "task"))]]
+        return "\n".join(lines), rows
 
     def who_screen(self, chat, iid):
         btns = [(n, self.cb("set", iid, k)) for k, n in enumerate(self.people())][:24]
@@ -678,9 +808,46 @@ class Plugin(Base):
         if a == "whoask":
             self.ask(chat, "who", int(x))
             return None, ("✏️ Напишіть ім'я відповідального.", [[("« Назад", self.cb("i", x))]])
+        if a == "st":
+            self.set_status(x, y)
+            if y == "review":  # 👀 на перевірку — повідомляємо адмінів редакції
+                with closing(self.db()) as con:
+                    r = con.execute("SELECT * FROM items WHERE id=?", (int(x),)).fetchone()
+                if r:
+                    await self.host.notify_admins(f"👀 <b>На перевірці</b>: {esc(self.task_line(dict(r)))}" + (f" · 👤 {esc(r['who'])}" if r["who"] else ""),
+                                                  [[("Відкрити", self.cb("i", x))]])
+            return STATUS.get(y, ""), self.item_screen(chat, x)
+        if a == "nt":
+            with closing(self.db()) as con, con:
+                r = con.execute("SELECT * FROM items WHERE id=?", (int(x),)).fetchone()
+                if r:
+                    nets = self.nets_of(dict(r))
+                    nets[y] = NET_STEP.get(nets.get(y, "new"), "work")
+                    con.execute("UPDATE items SET nets=? WHERE id=?", (json.dumps(nets), int(x)))
+                    if all(v == "done" for v in nets.values()):
+                        con.execute("UPDATE items SET status='done', done=1 WHERE id=?", (int(x),))
+                    elif r["done"]:
+                        con.execute("UPDATE items SET done=0, status='work' WHERE id=?", (int(x),))
+            return None, self.item_screen(chat, x)
+        if a == "dl":
+            self.ask(chat, "dl", int(x))
+            return None, ("📅 <b>Дедлайн</b>: напишіть дату — <code>30.11</code>, <code>завтра</code>, <code>+3</code> (днів). «-» — без дедлайну.",
+                          [[("« Назад", self.cb("i", x))]])
+        if a == "wn":
+            news = self.news_plugin()
+            with closing(self.db()) as con:
+                r = con.execute("SELECT * FROM items WHERE id=?", (int(x),)).fetchone()
+            if not news or not r:
+                return "Новинарня недоступна", self.item_screen(chat, x)
+            topic = r["text"] + (f"\n\nКонтекст: {r['reason']}" if r["reason"] and r["reason"] != r["text"] else "")
+            iid, state, _orig = news.store.add_item("editorial", topic, source_name="завдання редакції", requested_by=chat)
+            news.queue.put_nowait(iid)
+            with closing(self.db()) as con, con:
+                con.execute("UPDATE items SET news=?, status=CASE WHEN status IN ('', 'new') THEN 'work' ELSE status END WHERE id=?", (iid, int(x)))
+            return "📰 Пишу новину", self.item_screen(chat, x, "📰 Новинарня пише новину на цю тему — чернетка прийде окремим повідомленням.")
         if a == "done":
             with closing(self.db()) as con, con:
-                con.execute("UPDATE items SET done=1-done WHERE id=?", (int(x),))
+                con.execute("UPDATE items SET done=1-done, status=CASE WHEN done=0 THEN 'done' ELSE 'work' END WHERE id=?", (int(x),))
             return None, self.item_screen(chat, x)
         if a == "hide":
             with closing(self.db()) as con, con:
@@ -801,6 +968,13 @@ class Plugin(Base):
             if not msg.startswith("⚠️"):
                 await self.notify_assigned(data, t[:60], by=chat)
             return msg, self.item_screen(chat, data)
+        if key == "dl":
+            day = parse_day(t, dt.date.today())
+            if day is False:
+                return "Не зрозумів дату", self.item_screen(chat, data)
+            with closing(self.db()) as con, con:
+                con.execute("UPDATE items SET day=? WHERE id=?", (day or "", int(data)))
+            return "📅 Збережено", self.item_screen(chat, data)
         if key == "ed":
             with closing(self.db()) as con, con:
                 con.execute("UPDATE items SET text=? WHERE id=?", (t[:2000], int(data)))

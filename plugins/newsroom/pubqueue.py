@@ -100,7 +100,7 @@ class QueueUI:
             lines.append(f"{'✅' if k in sel else '▫️'} {icon} {name} — {note}")
             if ok:
                 nets.append(((("☑️ " if k in sel else "⬜ ") + icon), self.cb("pqs", did, k)))
-        rows.append(nets)
+        rows += [nets[i:i + 4] for i in range(0, len(nets), 4)]
         lines += ["", "2️⃣ Коли:"]
         now = self._now()
         quick = [("+30 хв", "+30"), ("+1 год", "+60"), ("+3 год", "+180")]
