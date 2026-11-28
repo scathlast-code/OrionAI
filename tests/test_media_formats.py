@@ -61,3 +61,15 @@ def test_audio_render_formats(tmp_path):
         outs = asyncio.run(M.render(src, M.Options(mode="audio", fmt=fmt, abr=128), w, False))
         assert outs[0].suffix == "." + fmt, fmt
     assert asyncio.run(M.render(src, M.Options(mode="audio", fmt="orig"), tmp_path, False)) == [src]
+
+
+def test_threads_raw_carousel_and_icons():
+    from plugins.media import media as M
+    t = ('<img src="https://static.cdninstagram.com/rsrc.php/v4/link.png"> '
+         '"url":"https:\\/\\/scontent-waw2-1.cdninstagram.com\\/v\\/t51.2885-15\\/111_n.jpg?stp=dst-jpg_e35_p640x640" '
+         '"url":"https:\\/\\/scontent-waw2-1.cdninstagram.com\\/v\\/t51.2885-15\\/111_n.jpg?stp=dst-jpg_e35_p1080x1350" '
+         '"url":"https:\\/\\/scontent-waw2-1.cdninstagram.com\\/v\\/t51.2885-15\\/222_n.jpg?stp=p1080x1350" '
+         '"https:\\/\\/scontent.cdninstagram.com\\/v\\/t51.2885-19\\/av_n.jpg"')
+    got = M._raw_post_images(t)
+    assert len(got) == 2 and all("p1080x1350" in u for u, _ in got)  # дві різні фото, найбільші, без аватарки
+    assert M._embed_media('<img src="https://static.cdninstagram.com/rsrc.php/v4/link.png">', "https://x") == []
