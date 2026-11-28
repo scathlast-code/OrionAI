@@ -496,6 +496,7 @@ class Plugin(StudioUI, Base):
             return None
         hits = []
         sh = None
+        checked = 0
         try:
             sh = Shazam()
             dur = await self._duration(path)
@@ -508,6 +509,7 @@ class Plugin(StudioUI, Base):
                         continue
                     try:
                         out = await asyncio.wait_for(sh.recognize(str(clip)) if hasattr(sh, "recognize") else sh.recognize_song(str(clip)), 40)
+                        checked += 1
                     except Exception:  # noqa: BLE001
                         continue
                     tr = (out or {}).get("track") or {}
@@ -525,6 +527,7 @@ class Plugin(StudioUI, Base):
                 await sh.close()
             except Exception:  # noqa: BLE001
                 pass
+        self._shz_checked = checked  # скільки шматків Shazam реально перевірив (0 — перевірити не вдалося)
         if all_hits:
             return hits
         return hits[0] if hits else None
@@ -602,7 +605,7 @@ class Plugin(StudioUI, Base):
             return False
         got = await self._shazam(media)
         if got is None:
-            return None
+            return False if getattr(self, "_shz_checked", 0) else None  # прослухав і нічого не знайшов — у файлі цієї пісні немає
         title = (song or "").lower()
         return any(w and w.lower() in title for w in (got[1], got[1].split("(")[0].strip()))
 
@@ -3142,6 +3145,8 @@ class Plugin(StudioUI, Base):
         await self._status(chat, status, f"🔎 Шукаю одночасно: SoundCloud, YouTube Music, YouTube, Audius — {esc(query[:60])}…",
                            [[("⏹ Зупинити", self.cb("stop"))]])
         found = await asyncio.gather(*(asyncio.wait_for(probe(e), 120) for e in engines), return_exceptions=True)
+        log.info("song: пошук «%s» — %s", query[:60], ", ".join(f"{e[:22]}: {'помилка' if isinstance(f, Exception) else len(f or [])}"
+                                                             for e, f in zip(engines, found)))
         for eng, items in zip(engines, found):  # за пріоритетом: SoundCloud → YouTube Music → YouTube
             if isinstance(items, Exception) or not items:
                 if isinstance(items, Exception):
@@ -3158,6 +3163,7 @@ class Plugin(StudioUI, Base):
                 if not keep:
                     self.jobs[chat] = song
                 await self.download(chat, song, [1], status=status)
+                log.info("song: %s → %s", song.__dict__["src"], "надіслано" if song.__dict__.get("sent_n") else "не вдалося")
                 if song.__dict__.get("sent_n"):
                     return
                 last = f"{song.__dict__['src']}: знайшов, але скачати не вдалося"
@@ -3165,6 +3171,7 @@ class Plugin(StudioUI, Base):
                                             [[("⏹ Зупинити", self.cb("stop"))]])
             except JobError as exc:
                 last = str(exc)
+        log.info("song: повної немає у SoundCloud/YouTube — пробую Audius і фрагмент")
         if await self.song_audius(chat, artist, track, status):  # 🎧 Audius — відкрита музична платформа, повні треки без ключа
             return
         if await self.song_preview(chat, artist, track, status):  # 🎵 хоча б фрагмент цієї пісні
