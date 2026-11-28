@@ -297,6 +297,15 @@ class Plugin(Base):
                 return ""
         return ""
 
+    def mh_act(self, *args):
+        """Посилання-дія для підпису альбому: t.me/<бот>?start=mx_<дія>_<параметр> → той самий екран, що й кнопка."""
+        try:
+            u = self.host.bot().username
+        except Exception:  # noqa: BLE001
+            u = ""
+        tail = "_".join(str(a) for a in args if str(a))
+        return f"https://t.me/{u}?start=mx_{tail}"[:80] if u else ""
+
     def mh_link(self, rid):
         try:
             u = self.host.bot().username
@@ -2425,7 +2434,7 @@ class Plugin(Base):
                     if msgs and album_hist is not None:
                         btns = album_hist.pop("_btns", [])
                         rid_ = self.hist.add(chat, msg=msgs[0].message_id, size=size_all, count=len(album), **album_hist)
-                        last_media = ("album", btns, rid_, msgs[0].message_id, len(album), size_all)
+                        last_media = ("album", btns, rid_, msgs[0].message_id, len(album), size_all, album[0]["cap"])
                 except Exception:  # noqa: BLE001 — альбом уже надіслано; збій запису історії не має ламати завантаження
                     log.exception("album: запис в історію не вдався")
                 for a in album:  # у Mini App — лише після надсилання й підрахунків (keep переносить файл)
@@ -2563,9 +2572,22 @@ class Plugin(Base):
             kb.append([InlineKeyboardButton("🏷 Категорії", callback_data=self.cb("ted", last[2]))])
         kb += [[InlineKeyboardButton(t, callback_data=d) for t, d in row] for row in rows]
         try:
-            if last[0] == "album":
-                await bot.send_message(chat, f"✅ Публікація: {last[4]} файл(ів) · {mb(last[5])}", reply_markup=InlineKeyboardMarkup(kb),
-                                       reply_to_message_id=last[3], disable_notification=True)
+            if last[0] == "album":  # альбому Telegram кнопок не дає — дії стають посиланнями в підписі (одне повідомлення)
+                links = [(t, u) for t, u in last[1]]
+                if last[2]:
+                    links.append(("🏷 Категорії", self.mh_act("ted", last[2])))
+                for row in rows:
+                    for t, d in row:
+                        parts = d.split(":")[3:] if d.startswith("m:pl:med") else []
+                        links.append((t, self.mh_act(*(parts or [""]))))
+                line = "\n" + " · ".join(f'<a href="{esc(u)}">{esc(t)}</a>' for t, u in links if u)
+                cap = last[6] or ""
+                vis = len(re.sub(r"<[^>]+>|&\w+;", "", cap)) + len(re.sub(r"<[^>]+>", "", line))
+                if vis > 1024 or not self.mh_act(""):
+                    await bot.send_message(chat, f"✅ Публікація: {last[4]} файл(ів) · {mb(last[5])}", reply_markup=InlineKeyboardMarkup(kb),
+                                           reply_to_message_id=last[3], disable_notification=True)
+                else:
+                    await bot.edit_message_caption(chat_id=chat, message_id=last[3], caption=cap + line, parse_mode="HTML")
             else:
                 await bot.edit_message_reply_markup(chat_id=chat, message_id=last[0], reply_markup=InlineKeyboardMarkup(kb))
             return True
