@@ -2668,7 +2668,21 @@ class Plugin(StudioUI, Base):
         if not job.items or "threads" not in str(job.url):
             return
         info0 = job.items[0].info or {}
-        img = info0.get("og_image")
+        img = ""
+        # Картку з рядком «▶ музика» Threads віддає ботам прев'ю (як Telegram): просимо сторінку так само, як Telegram
+        for ua in ("TelegramBot (like TwitterBot)", "facebookexternalhit/1.1"):
+            try:
+                async with M.open_url(str(job.url), agent=ua) as r:
+                    head = (await r.aread())[:400_000].decode("utf-8", "replace")
+                m = re.search(r'<meta[^>]+property="og:image"[^>]+content="([^"]+)"', head) or \
+                    re.search(r'<meta[^>]+content="([^"]+)"[^>]+property="og:image"', head)
+                if m:
+                    img = m.group(1).replace("&amp;", "&")
+                    break
+            except Exception:  # noqa: BLE001
+                log.info("card: сторінка для %s не відкрилась", ua, exc_info=True)
+        img = img or info0.get("og_image")
+        log.info("card: картка %s", (img or "немає")[:90])
         if not img:
             return
         try:
@@ -2682,6 +2696,7 @@ class Plugin(StudioUI, Base):
         except Exception:  # noqa: BLE001
             log.info("card: не прочитано", exc_info=True)
             return
+        log.info("card: прочитано %s", {k: v for k, v in c.items() if v and k != "text"})
         if not c:
             return
         upd = {}
@@ -2843,9 +2858,10 @@ class Plugin(StudioUI, Base):
             if per[n].get("fmt"):
                 sub.options.fmt = per[n]["fmt"]
             await self.download(chat, sub, [1])
+        on_post = any((it.info or {}).get("music_on_post") for it in job.items)
         if "mus" in x:
             await self.post_audio(chat, job)
-        if "full" in x and self.song_of(job):
+        if "full" in x and self.song_of(job) and not ("mus" in x and on_post):  # для Threads «музика окремо» вже і є повна пісня
             await self.full_song(chat, job, keep=True)
 
     async def post_audio(self, chat, job):
@@ -2854,6 +2870,10 @@ class Plugin(StudioUI, Base):
         song, si = self.song_of(job), job.__dict__.get("song_info") or {}
         name = self.song_name(song) if song else "Звук допису"
         stop = [[("⏹ Зупинити", self.cb("stop"))]]
+        if song and not aud and not si.get("url") and any((it.info or {}).get("music_on_post") for it in job.items):
+            # Threads: пісня прикріплена до допису, а не вшита у відео — звук відео тут не той; шукаємо саме цю пісню (YouTube/SoundCloud)
+            await self.full_song(chat, job, keep=True)
+            return
         if aud:
             sub = Job(secrets.token_hex(4), job.url, [M.Item(job.items[k - 1].engine, job.items[k - 1].url,
                                                              {**job.items[k - 1].info, "title": name}, job.items[k - 1].index) for k in aud])
