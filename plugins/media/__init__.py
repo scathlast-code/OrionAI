@@ -2389,6 +2389,7 @@ class Plugin(StudioUI, Base):
             await self.download(chat, job, list(range(1, len(job.items) + 1)), status=status)
             return
         await self.post_total(job)  # 💾 розмір усіх файлів допису разом
+        await self.card_music(job)  # 🎵 Threads: музика з картки-прев'ю, якщо в розмітці не знайшлась
         text, rows = self.options_screen(chat, job)  # ⚙️ усі налаштування — ДО завантаження, компактно
         self.live[chat] = (text, rows)
         await self._status(chat, status, text, rows)
@@ -2575,6 +2576,38 @@ class Plugin(StudioUI, Base):
             self.jobs_extra.pop(next(iter(self.jobs_extra)))
         self.jobs_extra[sub.token] = sub
         return sub
+
+    CARD_SYSTEM = ("На картинці — картка допису з Threads. Над фото чи відео може бути рядок музики зі значком ▶: «Назва · Виконавець». "
+                   'Відповідай лише JSON: {"title":"...","artist":"..."}; рядка музики немає — {"title":""}. Нічого не вигадуй.')
+
+    async def card_music(self, job):
+        """Threads: музика допису з картки-прев'ю (ту саму показує Telegram під посиланням) — ШІ з зором читає рядок «▶ Назва · Виконавець»."""
+        if self.song_of(job) or not job.items:
+            return
+        info = job.items[0].info or {}
+        img = info.get("og_image")
+        if not img or "threads" not in str(job.url):
+            return
+        try:
+            import base64
+            data = await self._fetch_small(img, 3_000_000)
+            if not data:
+                return
+            ans, _m = await asyncio.wait_for(self.host.ask_ai("Який рядок музики на картці?", system=self.CARD_SYSTEM, label="🎵 Музика з картки",
+                                                              image=base64.b64encode(data).decode()), 45)
+            m = re.search(r"\{.*\}", ans or "", re.S)
+            d = json.loads(m.group(0)) if m else {}
+        except Exception:  # noqa: BLE001
+            log.info("card music: не прочитано", exc_info=True)
+            return
+        title, artist = str(d.get("title") or "").strip()[:120], str(d.get("artist") or "").strip()[:80]
+        if not title:
+            return
+        for it in job.items:
+            it.info.update(track=title, artist=artist, music_on_post=True)
+        job.__dict__.pop("song", None)
+        self.song_of(job)
+        log.info("threads: музика з картки — %s · %s", title[:60], artist[:40])
 
     async def post_total(self, job):
         """💾 Розмір усіх файлів допису однією цифрою (до завантаження): з даних сайту, а для прямих файлів — з заголовків.
