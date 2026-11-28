@@ -163,7 +163,7 @@ class CrosspostUI:
             return (f"📲 <b>Під мережі · #{did}</b>\n\n<b>{esc(d['headline'])}</b>\n\nПідготую окрему версію новини для кожної мережі — "
                     f"з її межею символів, хештегами й манерою.\n\nМережі: {nets or 'жодної не вибрано'}\n"
                     f"Тон: {TONES.get(cfg['tone'])} · смайли: {EMOJI.get(cfg['emoji'])} · хештегів: {cfg['tags']}",
-                    [[("✨ Підготувати", self.cb("xpg", did))], [("⚙️ Налаштування", self.cb("xps", did))], [("« Новина", self.cb("d", did))]])
+                    [[("✨ Підготувати", self.cb("xpg", did))], [("⚙️ Налаштування версій", self.cb("xps", did))], [("« Новина", self.cb("d", did))]])
         net = net if net in have else have[0]
         icon, name, limit, rec, _ = NETWORKS[net]
         v = saved[net]
@@ -184,7 +184,7 @@ class CrosspostUI:
         if len(v["text"]) <= 256:
             rows.append([("📋 Копіювати", "copy:" + v["text"])])
         rows += [[(f"🔁 Заново {icon}", self.cb("xpg", did, net)), ("🔁 Усі заново", self.cb("xpg", did))],
-                 [("⚙️ Налаштування", self.cb("xps", did)), ("« Новина", self.cb("d", did))]]
+                 [("⚙️ Налаштування версій", self.cb("xps", did)), ("« Новина", self.cb("d", did))]]
         return "\n".join(lines)[:4000], rows
 
     def xp_settings(self, did=0):

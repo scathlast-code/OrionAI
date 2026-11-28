@@ -1120,7 +1120,7 @@ class Plugin(CrosspostUI, ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI
             [("📤 Підключити канал", self.cb("pubch"))] + ([("✖️ Відключити", self.cb("pubchx"))] if st.get("publish_chat") else []),
             [(("🚀 Одразу: так" if st.get("publish_on_approve") else "🚀 Одразу: ні"), self.cb("tg", "publish_on_approve")),
              (("🔗 Джерела: так" if st.get("show_sources") else "🔗 Джерела: ні"), self.cb("tg", "show_sources"))],
-            [("✒️ Підпис", self.cb("sig")), ("📲 Під мережі", self.cb("xps"))],
+            [("✒️ Підпис", self.cb("sig")), ("⚙️ Версії для мереж", self.cb("xps"))],
             [("« Налаштування новинарні", self.cb("H2"))],
         ]
         return text, rows
