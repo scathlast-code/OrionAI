@@ -3126,7 +3126,10 @@ class Plugin(StudioUI, Base):
                 with tempfile.TemporaryDirectory(prefix="orion-song-") as work:
                     items = await M.video_probe(f"{eng}:{query}", Path(work))
                 if items:
-                    song = Job(secrets.token_hex(4), f"{eng}:{query}", items[:1])
+                    real = str(items[0].url) if str(items[0].url).startswith("http") else str((items[0].info or {}).get("webpage_url") or "")
+                    if not real.startswith("http"):  # пошук повертає лише ідентифікатор — шукаємо далі
+                        raise JobError("пошук не дав посилання на пісню")
+                    song = Job(secrets.token_hex(4), real, items[:1])  # справжня адреса пісні, а не «scsearch1:…» (звідси була помилка)
                     song.options.mode = "audio"
                     song.options.post = False
                     song.__dict__["src"] = "SoundCloud" if eng.startswith("sc") else "YouTube"
@@ -3136,8 +3139,48 @@ class Plugin(StudioUI, Base):
                     return
             except JobError as exc:
                 last = str(exc)
-        await self._status(chat, status, "⚠️ Повну пісню не знайшов на SoundCloud/YouTube." + (f"\n\n{esc(last[:300])}" if last else ""),
-                           [[("« Медіа", self.cb())]])
+        if await self.song_preview(chat, artist, track, status):  # 🎵 хоча б фрагмент цієї пісні
+            return
+        await self._status(chat, status, "⚠️ Не знайшов ні повної пісні (SoundCloud/YouTube), ні її фрагмента (Apple Music, Deezer)."
+                           + (f"\n\n{esc(last[:300])}" if last else ""), [[("« Медіа", self.cb())]])
+
+    async def song_preview(self, chat, artist, track, status=None):
+        """🎵 Офіційний фрагмент пісні (30 с) з Apple Music (iTunes Search) або Deezer — без ключів; коли повної немає."""
+        import httpx
+        q = f"{artist} {track}".strip()
+        if not q:
+            return False
+        found = None
+        try:
+            async with httpx.AsyncClient(timeout=20) as c:
+                r = await c.get("https://itunes.apple.com/search", params={"term": q, "entity": "song", "limit": 5})
+                for it in (r.json().get("results") or []) if r.status_code == 200 else []:
+                    if it.get("previewUrl") and track.lower().split("(")[0].strip()[:15] in (it.get("trackName") or "").lower():
+                        found = (it["previewUrl"], it.get("artistName") or artist, it.get("trackName") or track, "Apple Music")
+                        break
+                if not found:
+                    r = await c.get("https://api.deezer.com/search", params={"q": q, "limit": 5})
+                    for it in (r.json().get("data") or []) if r.status_code == 200 else []:
+                        if it.get("preview") and track.lower().split("(")[0].strip()[:15] in (it.get("title") or "").lower():
+                            found = (it["preview"], (it.get("artist") or {}).get("name") or artist, it.get("title") or track, "Deezer")
+                            break
+                if not found:
+                    return False
+                url, a, t, src = found
+                data = (await c.get(url)).content
+        except Exception:  # noqa: BLE001
+            log.info("song preview не вдався", exc_info=True)
+            return False
+        if len(data) < 10_000:
+            return False
+        with tempfile.TemporaryDirectory(prefix="orion-prev-") as work:
+            ext = ".m4a" if src == "Apple Music" else ".mp3"
+            out = Path(work) / (safe_name(f"{a} — {t} (фрагмент)", "song")[:90] + ext)
+            out.write_bytes(data)
+            await self.send_media(chat, out, esc(f"🎵 {a} — {t}\nФрагмент пісні (≈30 с, офіційне прев'ю {src}). Повної версії у відкритому доступі не знайшов."))
+        if status:
+            await self._status(chat, status, f"🎵 Повної пісні немає у відкритому доступі — надіслав офіційний фрагмент ({src}).", [[("« Медіа", self.cb())]])
+        return True
 
     async def recognize(self, chat, job):
         """🔎 Розпізнати музику (Shazam): 25 секунд звуку з відео → назва й виконавець."""
