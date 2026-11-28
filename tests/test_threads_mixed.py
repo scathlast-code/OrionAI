@@ -51,14 +51,7 @@ def test_risks():
     assert "авторські" in R.risks_line({"music"}, "X — Y") and R.risks_line(set()) == ""
 
 
-def test_embed_music():
-    h = ('<html><div><div aria-label="Audio"><svg></svg><span>Twinkling Lights (Reimagined) · Auni</span></div></div>'
-         '<div><span>22 год · 9</span></div></html>')
-    assert M._embed_music(h) == ("Twinkling Lights (Reimagined)", "Auni")
-    assert M._embed_music('<p><span>Ранок · Вечір</span></p>') is None
-
-
-def test_embed_music_split_spans():
-    h = ('<html><div><a href="/audio/123"><svg></svg></a><div><span>Twinkling Lights (Reimagined)</span><span>·</span>'
-         '<span>Auni</span></div></div></html>')
-    assert M._embed_music(h) == ("Twinkling Lights (Reimagined)", "Auni")
+def test_embed_music_no_guessing():
+    h = '<html><div><span>погляньте хто до нас прилетів✨8:17 AM</span><span> · </span><span>Nov 27, 2026</span><svg></svg></div></html>'
+    assert M._embed_music(h) is None
+    assert M._embed_music('x "music_info":{"title":"Twinkling Lights","display_artist":"Auni"} y') == ("Twinkling Lights", "Auni")

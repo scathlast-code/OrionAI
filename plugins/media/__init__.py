@@ -1074,7 +1074,7 @@ class Plugin(StudioUI, Base):
                     cache[tool] = (v, time.time())
                 if v:
                     lines.append(f"{tool}: версія {v}")
-        rows = [[("🩺 Перевірити сайти", self.cb("chk"))]]
+        rows = [[("🩺 Перевірити сайти", self.cb("chk")), ("🧪 Перевірити розпізнавання", self.cb("selft"))]]
         rows += [[("🔄 Оновити yt-dlp і gallery-dl", self.cb("upd"))]] if self.host.is_admin(chat) else []
         rows.append([("« Медіа", self.cb())])
         import os as _os
@@ -1242,6 +1242,9 @@ class Plugin(StudioUI, Base):
         if a == "akeyd":
             (self.dir / "apify.key").unlink(missing_ok=True)
             return "🗑 Прибрано", await self.tools_screen(chat)
+        if a == "selft":  # 🧪 чи працюють розшифровка мови, зір ШІ й Shazam — те, від чого залежать аналіз, субтитри й попередження
+            self._bg(chat, self.self_test(chat))
+            return "🧪 Перевіряю…", (self.live_screen(chat) if self.in_app() else None)
         if a == "chk":
             if self.busy(chat):
                 return "⏳ Попереднє завдання ще триває", None
@@ -2580,7 +2583,8 @@ class Plugin(StudioUI, Base):
         return sub
 
     CARD_SYSTEM = ("На картинці — картка-прев'ю допису з Threads (така сама, як прев'ю посилання в Telegram). Прочитай з неї лише те, що "
-                   "справді написано: рядок музики зі значком ▶ («Назва · Виконавець»), геотег під дописом (часто «Місто • City • Город» — "
+                   "справді написано: рядок музики — дрібний текст зі значком ▶ між текстом допису й фото/відео («Назва · Виконавець», "
+                   "напр. «Twinkling Lights (Reimagined) · Auni»); великий текст допису, дата й час — НЕ музика; геотег під дописом (часто «Місто • City • Город» — "
                    "бери першу назву), ім'я автора, текст допису, лічильники під дописом (вподобання, коментарі, поширення), скільки фото/відео "
                    "видно (карусель), позначки на кшталт «AI info / Створено ШІ», «Paid partnership / Реклама». Відповідай лише JSON: "
                    '{"music":{"title":"","artist":""},"place":"","author":"","text":"","likes":0,"comments":0,"reposts":0,'
@@ -2602,6 +2606,60 @@ class Plugin(StudioUI, Base):
                 "text": str(d.get("text") or "").strip()[:1500], "likes": num(d.get("likes")), "comments": num(d.get("comments")),
                 "reposts": num(d.get("reposts")), "media": str(d.get("media") or ""), "count": num(d.get("count")),
                 "ai_label": d.get("ai_label") is True, "paid": d.get("paid") is True}
+
+    async def self_test(self, chat):
+        """🧪 Самоперевірка розпізнавання: озвучуємо фразу й розшифровуємо її; малюємо напис і просимо ШІ прочитати; перевіряємо Shazam."""
+        import base64
+        import io
+        import media as core
+        lines = ["🧪 <b>Перевірка розпізнавання</b>", ""]
+        status = await self._status(chat, None, "🧪 Перевіряю розшифровку мови, зір ШІ й Shazam… (до хвилини)", [[("⏹ Зупинити", self.cb("stop"))]])
+        # 1) мова: TTS → STT
+        keys = [("Groq", bool(getattr(core, "GROQ_KEY", ""))), ("Cloudflare", bool(getattr(core, "CF_TOKEN", "") and getattr(core, "CF_ACCOUNT", ""))),
+                ("Gemini", bool(getattr(core, "GEMINI_KEY", "")))]
+        lines.append("🗣 Сервіси розшифровки: " + ", ".join(f"{'✅' if ok else '—'} {n}" for n, ok in keys))
+        ogg = None
+        try:
+            ogg = await asyncio.wait_for(core.tts("Перевірка розпізнавання мови. Сорок два."), 40)
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"⚠️ Не вдалося створити тестовий голос (озвучення): {esc(str(exc)[:120])} — розшифровку не перевірено")
+        try:
+            if ogg is None:
+                raise LookupError
+            text, prov, errs = await asyncio.wait_for(core.transcribe(ogg, "t.ogg"), 90)
+            ok = bool(re.search(r"(?i)перевір|сорок", text or ""))
+            lines.append(f"{'✅' if ok else '⚠️'} Розшифровка мови ({esc(prov)}): «{esc((text or '')[:80])}»")
+        except LookupError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"❌ Розшифровка мови не працює: {esc(str(exc)[:200])}")
+            lines.append("   Від неї залежать «👂 що говорять у відео», 🔤 субтитри, ✂️ ролики. Найпростіше — додати GROQ_API_KEY (безкоштовно).")
+        # 2) зір ШІ: напис на картинці
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+            im = Image.new("RGB", (640, 240), (255, 255, 255))
+            dr = ImageDraw.Draw(im)
+            try:
+                font = ImageFont.truetype(str(Path(__file__).resolve().parents[1] / "newsroom" / "brand" / "Lora-Bold.ttf"), 90)
+            except OSError:
+                font = ImageFont.load_default()
+            dr.text((40, 60), "ТЕСТ 42", fill=(0, 0, 0), font=font)
+            buf = io.BytesIO()
+            im.save(buf, "JPEG")
+            ans, model = await asyncio.wait_for(self.host.ask_ai("Який напис на картинці? Відповідай лише написом.", label="🧪 Зір",
+                                                                 image=base64.b64encode(buf.getvalue()).decode()), 60)
+            ok = "42" in (ans or "")
+            lines.append(f"{'✅' if ok else '⚠️'} Зір ШІ ({esc(model)}): «{esc((ans or '')[:40])}»"
+                         + ("" if ok else " — модель, можливо, не бачить картинок: кадри, написи й водяні знаки не розпізнаються"))
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"❌ Зір ШІ не відповів: {esc(str(exc)[:150])}")
+        # 3) Shazam
+        try:
+            import shazamio  # noqa: F401
+            lines.append("✅ Shazam встановлено — музика у звуці розпізнається")
+        except ImportError:
+            lines.append("❌ Shazam не встановлено — музика у звуці не розпізнається")
+        await self._status(chat, status, "\n".join(lines)[:4000], [[("🔁 Ще раз", self.cb("selft")), ("« Медіа", self.cb())]])
 
     async def card_read(self, job):
         """Threads: картка-прев'ю допису (та сама, що в Telegram під посиланням) — ШІ з зором читає з неї музику, геотег, текст,
@@ -2626,6 +2684,10 @@ class Plugin(StudioUI, Base):
         if not c:
             return
         upd = {}
+        cap = (info0.get("description") or "").lower()
+        if c["title"] and (c["title"].lower()[:20] in cap or re.search(r"\d{1,2}:\d{2}|AM|PM|\b20\d\d\b", c["title"] + c["artist"])):
+            log.info("card: «%s · %s» схоже на текст допису чи дату — не музика", c["title"][:40], c["artist"][:30])
+            c["title"] = c["artist"] = ""
         if c["title"] and not self.song_of(job):
             upd.update(track=c["title"], artist=c["artist"], music_on_post=True)
         if c["place"] and not M.geotag(info0):
