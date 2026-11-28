@@ -212,6 +212,8 @@ class Plugin(Base):
            ("see", "👁 ШІ дивиться на фото й кадри відео всього допису"),
            ("hear", "👂 ШІ слухає, що говорять у відео (початок, для змісту)"),
            ("about", "🧠 Рядок «що це» в підписі (зміст, місце, мета допису)"),
+           ("risk", "⚠️ Попереджати: російська мова, матюки, музика (авторські права)"),
+           ("risk_up", "⚠️ Перевіряти так само й файли, які я надсилаю в бот"),
            ("geo_author", "🧭 Немає місця в дописі — брати з інших дописів автора чи його сторінки"))
 
     def rel_on(self, chat, k):
@@ -360,7 +362,74 @@ class Plugin(Base):
         if ctx.get("files"):
             notes.append(f"Файли допису: {ctx['files']}")
         img = await asyncio.to_thread(self._collage, blobs) if blobs else None
+        ctx["_said"] = next((n for n in notes if n.startswith("Що говорять")), "")
         return img, "\n".join(notes), len(blobs)
+
+    async def scan_path(self, chat, path, caption=""):
+        """⚠️ Перевірка файлу, який людина сама надіслала: російська мова, матюки, музика (авторські права).
+        Ті самі способи, що й для скачаного: кадри, мова у відео, текст підпису, написи на зображенні. -> множина небезпек."""
+        risks = set()
+        ctx = {"media": str(path)}
+        img, notes, nimg = None, "", 0
+        try:
+            img, notes, nimg = await self.understand(chat, ctx)
+        except Exception:  # noqa: BLE001
+            log.info("scan: аналіз файлу не вийшов", exc_info=True)
+        said = ctx.get("_said", "")
+        if R.swear_hits(f"{caption}\n{said}"):
+            risks.add("swear")
+        if "ru" in (R.guess_lang(caption), R.guess_lang(said)):
+            risks.add("ru")
+        if re.search(r"(?i)\[(?:music|музика|музыка)\]|♪", said):
+            risks.add("music")
+        if self.rel_on(chat, "ai") and (img or notes or len((caption or "").strip()) >= 2):
+            for pic in ((img, None) if img else (None,)):
+                try:
+                    ans, _m = await asyncio.wait_for(self.host.ask_ai(
+                        R.ai_prompt(caption or "", "", [], [], seen=bool(pic), notes=notes, nimg=nimg),
+                        system=R.AI_SYSTEM, label="⚠️ Перевірка файлу", image=pic), 70 if pic else 40)
+                    if re.search(r"\{.*\}", ans or "", re.S):
+                        risks |= R.parse_risks(ans)
+                        break
+                except Exception:  # noqa: BLE001
+                    log.info("scan: ШІ не перевірив файл", exc_info=True)
+        return risks
+
+    async def scan_upload(self, update, ctx):
+        """Будь-який файл, надісланий у бот людиною (фото, відео, аудіо, голосове, документ-медіа): перевірка у фоні,
+        попередження відповіддю на нього; основна обробка (ШІ, розшифровка, інструменти) іде як завжди."""
+        msg = update.message
+        if not msg or not self.rel_on(msg.chat_id, "risk") or not self.rel_on(msg.chat_id, "risk_up"):
+            return
+        file, default = message_attachment(msg)
+        if not file:
+            return
+        mime = getattr(file, "mime_type", "") or ""
+        if msg.document and not mime.startswith(("image/", "video/", "audio/")):
+            return
+        chat, mid, cap = msg.chat_id, msg.message_id, msg.caption or ""
+        size = getattr(file, "file_size", 0) or 0
+
+        async def job():
+            import tempfile
+            with tempfile.TemporaryDirectory() as tmp:
+                name = safe_name(getattr(file, "file_name", None) or default)
+                dest = Path(tmp) / name
+                try:
+                    if size > 20 * 1024 * 1024:
+                        if not self.big.ready():
+                            return
+                        await self.big.download(chat, mid, dest)
+                    else:
+                        await (await file.get_file()).download_to_drive(str(dest))
+                except Exception:  # noqa: BLE001
+                    log.info("scan: файл не отримано", exc_info=True)
+                    return
+                risks = await self.scan_path(chat, dest, cap)
+            if risks:
+                await self.host.bot().send_message(chat, esc(R.risks_line(risks)) + "\n<i>Перевірте перед публікацією.</i>",
+                                                   parse_mode="HTML", reply_to_message_id=mid, disable_notification=True)
+        asyncio.get_running_loop().create_task(job())
 
     async def detect(self, chat, text, geotag, who, alink, instr=None, media=None, ctx=None):
         """Тема, локація, мова: ШІ (без обмежень) + словник + збережені теги людини + її вказівки до посилання;
@@ -373,6 +442,7 @@ class Plugin(Base):
         body = (text or "").strip()
         self.__dict__.setdefault("_about", {}).pop(chat, None)
         img, notes, nimg = (None, "", 0)
+        risks = set()
         if self.rel_on(chat, "ai"):
             ctx = dict(ctx or {}, media=media or (ctx or {}).get("media"))
             try:
@@ -390,10 +460,20 @@ class Plugin(Base):
                     about = R.parse_about(ans)
                     if about:
                         self._about[chat] = about
+                    risks |= R.parse_risks(ans)
                     if a_t or a_g or about:
                         break
                 except Exception:  # noqa: BLE001 — ШІ недоступний: лишається словник
                     log.info("related: ШІ не визначив тему%s", " за кадрами" if pic else " — беру словник")
+        # ⚠️ небезпеки: російська, матюки, музика (авторські права) — ШІ + перевірка без ШІ
+        said = (ctx or {}).get("_said", "") if isinstance(ctx, dict) else ""
+        if R.swear_hits(f"{body}\n{said}"):
+            risks.add("swear")
+        if "ru" in (lang, R.guess_lang(body), R.guess_lang(said)):
+            risks.add("ru")
+        if (ctx or {}).get("song_overlay") or re.search(r"(?i)\[(?:music|музика|музыка)\]|♪", said):
+            risks.add("music")
+        self.__dict__.setdefault("_risk", {})[chat] = risks if self.rel_on(chat, "risk") else set()
         topics, geos = R.merge(a_t, d_t), R.merge(a_g, d_g)
         if geotag and not geos:  # геотег є, а ні ШІ, ні словник його не впізнали — беремо як є
             geos = [(geotag.strip()[:40], "· " + geotag.strip()[:40])]
@@ -2703,12 +2783,15 @@ class Plugin(Base):
                         s2 = self.song_of(job)
                         files = ", ".join(sorted({(Path(M.urlsplit(str(i.url)).path).suffix or "?").lstrip(".") for i in job.items}))[:80]
                         rel = await self.detect(chat, desc or "", geotag, who, link, self.instr.get(chat), media=media0,
-                                                ctx={"others": others[:3], "song": self.song_name(s2) if s2 else "", "files": files, "site": site})
+                                                ctx={"others": others[:3], "song": (self.song_name(s2) + ("" if s2[2] else " (оригінальний звук автора)")) if s2 else "",
+                                                     "song_overlay": bool(s2 and s2[2]), "files": files, "site": site})
                         guess = self.__dict__.get("_geo_guess", {}).pop(chat, None)
-                        rc[rkey] = (time.time(), rel, guess, self.__dict__.get("_about", {}).pop(chat, ""))
+                        rc[rkey] = (time.time(), rel, guess, self.__dict__.get("_about", {}).pop(chat, ""),
+                                    self.__dict__.get("_risk", {}).pop(chat, set()), self.song_name(s2) if s2 and s2[2] else "")
                         for k in [k for k, v in rc.items() if time.time() - v[0] > 900]:
                             rc.pop(k, None)
                     about = rc[rkey][3] if rkey in rc else ""
+                    risks, rsong = (rc[rkey][4], rc[rkey][5]) if rkey in rc else (set(), "")
                     if rel is None:  # людина попросила без тегів — без сортування й без запису
                         rel_t = rel_g = rel_l = rel_f = rel_btns = []
                         rel_line, rel_len = "", 0
@@ -2721,6 +2804,9 @@ class Plugin(Base):
                         gname = ", ".join(self.hist.name("g", k) for k in guess[0])[:60]
                         gl = f"\n📍 Імовірна локація: {esc(gname)} ({guess[1]})"
                         rel_line, rel_len = gl + rel_line, rel_len + len(gl)
+                    if risks:  # ⚠️ небезпека для публікації — першим рядком серед тегів
+                        rl = "\n" + esc(R.risks_line(risks, rsong[:60]))
+                        rel_line, rel_len = rl + rel_line, rel_len + len(rl)
                     if about and rel is not None and self.rel_on(chat, "about"):  # 🧠 що це за допис — коротко
                         al = f"\n🧠 {esc(about[:160])}"
                         rel_line, rel_len = al + rel_line, rel_len + len(about[:160]) + 3
@@ -2764,7 +2850,7 @@ class Plugin(Base):
                             if not recorded and album_hist is None:
                                 album_hist = dict(author=R.norm_author(who), who=who, alink=link, site=site, url=str(job.url),
                                                   src_url=self.cur_url.get(chat) or "", title=(desc or item.title or "")[:80],
-                                                  topics=rel_t, geos=rel_g, langs=rel_l, first=rel_f, geotag=geotag, about=about or "",
+                                                  topics=rel_t, geos=rel_g, langs=rel_l, first=rel_f, geotag=geotag, about=about or "", risks=sorted(risks),
                                                   **({"group": gx["id"], "gi": gx["i"]} if gx else {}),
                                                   **({"notag": True} if rel is None else {}), _btns=rel_btns)
                             recorded = True
@@ -2780,7 +2866,7 @@ class Plugin(Base):
                         if not recorded and getattr(msg_, "message_id", None):  # 🔗 запам'ятовуємо для «попереднє …»
                             recorded = True
                             rid_ = self.hist.add(chat, msg=msg_.message_id, author=R.norm_author(who), who=who, alink=link, site=site,
-                                          url=str(job.url), src_url=self.cur_url.get(chat) or "", size=size_, title=(desc or item.title or "")[:80], topics=rel_t, geos=rel_g, langs=rel_l, first=rel_f, geotag=geotag, about=about or "",
+                                          url=str(job.url), src_url=self.cur_url.get(chat) or "", size=size_, title=(desc or item.title or "")[:80], topics=rel_t, geos=rel_g, langs=rel_l, first=rel_f, geotag=geotag, about=about or "", risks=sorted(risks),
                                           **({"group": gx["id"], "gi": gx["i"]} if gx else {}), **({"notag": True} if rel is None else {}))
                             await self._cat_button(chat, msg_.message_id, rid_, rel_btns)
                             last_media = (msg_.message_id, rel_btns, rid_)
