@@ -49,3 +49,10 @@ def test_risks():
     assert R.swear_hits("сукня, ребус, хула, страхування, бляшанка") == 0
     assert R.parse_risks('{"risks":["ru","music","x"]}') == {"ru", "music"}
     assert "авторські" in R.risks_line({"music"}, "X — Y") and R.risks_line(set()) == ""
+
+
+def test_embed_music():
+    h = ('<html><div><div aria-label="Audio"><svg></svg><span>Twinkling Lights (Reimagined) · Auni</span></div></div>'
+         '<div><span>22 год · 9</span></div></html>')
+    assert M._embed_music(h) == ("Twinkling Lights (Reimagined)", "Auni")
+    assert M._embed_music('<p><span>Ранок · Вечір</span></p>') is None

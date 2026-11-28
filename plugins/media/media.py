@@ -700,6 +700,38 @@ def _embed_place(text):
     return ""
 
 
+MUSIC_JSON_RE = re.compile(r'"music_info"\s*:\s*\{.*?"title"\s*:\s*"([^"]{1,120})".*?"display_artist"\s*:\s*"([^"]{1,80})"', re.S)
+SKIP_LINE_RE = re.compile(r"(?i)\d+\s*(год|хв|дн|тиж|h|m|d|w)\b|^\d|@|http|відповід|repl|like|threads", re.I)
+
+
+def _embed_music(text):
+    """Музика під дописом Threads («▶ Twinkling Lights (Reimagined) · Auni») -> (назва, виконавець) або None."""
+    m = MUSIC_JSON_RE.search(text or "")
+    if m:
+        try:
+            return json.loads(f'"{m[1]}"'), json.loads(f'"{m[2]}"')
+        except ValueError:
+            return m[1], m[2]
+    try:
+        doc = read_html((text or "").encode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    for node in doc.xpath("//*[contains(text(), '·')]"):
+        if node.xpath("ancestor::*[self::script or self::style]"):
+            continue
+        t = re.sub(r"\s+", " ", node.text_content() or "").strip()
+        parts = [x.strip() for x in t.split("·")]
+        if len(parts) != 2 or not all(1 < len(x) <= 80 for x in parts) or SKIP_LINE_RE.search(t):
+            continue
+        box = node.getparent()
+        near = " ".join((box.get("class") or "", box.get("aria-label") or "", node.get("class") or "",
+                         " ".join(e.get("aria-label") or "" for e in (box.getparent() if box is not None and box.getparent() is not None else box).iter())
+                         if box is not None else "")).lower()
+        if box is not None and (re.search(r"music|audio|sound|музик|аудіо|play", near) or box.xpath(".//svg")):
+            return parts[0], parts[1]
+    return None
+
+
 def _img_key(url):
     """Назва файлу без розміру — та сама картинка в різних розмірах має однаковий ключ."""
     return urlsplit(url.replace("\\/", "/")).path.rsplit("/", 1)[-1].split(".")[0]
@@ -804,6 +836,10 @@ async def threads_probe(url, work):
             if not links:
                 links = _embed_media(etext, efinal)
             raw = _raw_post_images(etext)
+            mus = _embed_music(etext)
+            if mus and not info.get("track"):  # 🎵 накладена музика, як її показує сам Threads
+                info["track"], info["artist"] = mus[0], mus[1]
+                log.info("threads %s: музика «%s · %s»", code, mus[0][:60], mus[1][:40])
             place = _embed_place(etext)
             if place and not info.get("location"):  # 📍 геотег під дописом (Threads показує «Харків • Kharkiv • Харьков»)
                 info["location"] = place
