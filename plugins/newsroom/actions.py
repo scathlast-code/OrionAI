@@ -143,6 +143,8 @@ class ActionsUI:
         d = self.store.draft(did)
         rows = [[("📏 Довжина", self.cb("len", did)), ("🔎 Звірити", self.cb("chk", did)), ("✍️ Стиль", self.cb("sty", did))],
                 [("🗂 Ми вже про це писали?", self.cb("ow", did))],
+                [("🔍 SEO для сайту", self.cb("seo", did)), ("🇬🇧 Англійською", self.cb("en", did))],
+                [("📊 Опитування", self.cb("pll", did))] + ([("✏️ Оновити опубліковане", self.cb("cr", did))] if d["status"] == "published" else []),
                 [("📄 Оригінал", self.cb("src", did)), (f"🕘 Версії · {d['version']}", self.cb("ver", did))]]
         if d["status"] in ("draft", "length_mismatch"):
             rows.append([("❌ Відхилити", self.cb("no", did))])

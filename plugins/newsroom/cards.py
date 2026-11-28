@@ -530,7 +530,25 @@ class CardsUI:
                     self.store.set(f"cdcredurl:{did}", "")
             if photo:
                 p.write_bytes(photo)
+                self._cd_lib(did, photo)
         await self.cd_send(chat, did, bg, photo)
+
+    def _cd_lib(self, did, photo):
+        """🗃 Медіатека: фото картки з автором і ліцензією (для прав і щоб не повторюватися)."""
+        if not hasattr(self, "ml_add"):
+            return
+        try:
+            from .tools import ahash
+            from PIL import Image
+            h = ahash(Image.open(io.BytesIO(photo)))
+        except Exception:  # noqa: BLE001
+            h = ""
+        cred = self.store.get(f"cdcred:{did}") or ""
+        m = re.match(r"Фото: (.*?) · (.*?) · (.*)$", cred)
+        if m:
+            self.ml_add("stock", m[1], m[2], self.store.get(f"cdcredurl:{did}") or "", m[3], did, h)
+        else:
+            self.ml_add("source" if "джерела" in cred else "own", "", "", "", "", did, h, cred)
 
     async def cd_canva(self, chat, did):
         """Ті самі картки — у Canva на повне редагування (кожен розмір окремим дизайном)."""
@@ -704,6 +722,7 @@ class CardsUI:
             self.store.set(f"cdnoph:{did}", None)
             self.store.set(f"cdown:{did}", True)
             self.store.set(f"cdcred:{did}", "")
+            self._cd_lib(did, data)
             await self.cd_send(chat, did, None, data)
             return True
         (self.dir / "card_logo.png").write_bytes(data)

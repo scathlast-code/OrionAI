@@ -841,7 +841,7 @@ class Plugin(Base):
                 return "Новинарня недоступна", self.item_screen(chat, x)
             topic = r["text"] + (f"\n\nКонтекст: {r['reason']}" if r["reason"] and r["reason"] != r["text"] else "")
             iid, state, _orig = news.store.add_item("editorial", topic, source_name="завдання редакції", requested_by=chat)
-            news.queue.put_nowait(iid)
+            news._enqueue(iid)
             with closing(self.db()) as con, con:
                 con.execute("UPDATE items SET news=?, status=CASE WHEN status IN ('', 'new') THEN 'work' ELSE status END WHERE id=?", (iid, int(x)))
             return "📰 Пишу новину", self.item_screen(chat, x, "📰 Новинарня пише новину на цю тему — чернетка прийде окремим повідомленням.")
