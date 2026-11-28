@@ -70,3 +70,12 @@ def test_music_post_line():
     line = R.risks_line({"music_post"}, "Auni — Twinkling Lights")
     assert "прикріплено музику (Auni — Twinkling Lights)" in line and "у скачаному файлі її немає" in line
     assert "прикріплено" not in R.risks_line({"music", "music_post"}, "X")
+
+
+def test_card_parse():
+    c = Plugin.card_parse('{"music":{"title":"Twinkling Lights","artist":"Auni"},"place":"Яремче","likes":"9","media":"video","count":1,'
+                          '"ai_label":false,"paid":true}')
+    assert c["title"] == "Twinkling Lights" and c["place"] == "Яремче" and c["likes"] == 9 and c["paid"] is True
+    assert Plugin.card_parse("x") == {}
+    from plugins.media import related as R
+    assert "реклама" in R.risks_line({"paid"})

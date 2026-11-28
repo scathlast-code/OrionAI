@@ -655,6 +655,8 @@ class Plugin(StudioUI, Base):
         med_ = (ctx or {}).get("media") or media
         if (med_ and R.ai_marks_in_file(med_)) or R.ai_marks_in_info((ctx or {}).get("info") or {}):
             risks.add("ai")  # позначка ШІ у файлі (C2PA) чи в даних сайту — надійніше за здогад
+        if ((ctx or {}).get("info") or {}).get("paid_partnership"):
+            risks.add("paid")  # 💼 сам сайт позначив допис як рекламу
         rm = R.rights_marks_in_file(med_) if med_ else ""
         if rm:  # ©️ фотобанк, агенція чи поле авторських прав у метаданих
             risks |= {"rights", "why:" + rm}
@@ -2389,7 +2391,7 @@ class Plugin(StudioUI, Base):
             await self.download(chat, job, list(range(1, len(job.items) + 1)), status=status)
             return
         await self.post_total(job)  # 💾 розмір усіх файлів допису разом
-        await self.card_music(job)  # 🎵 Threads: музика з картки-прев'ю, якщо в розмітці не знайшлась
+        await self.card_read(job)  # 🧾 Threads: музика, геотег, текст, позначки — з картки-прев'ю, чого нема в розмітці
         text, rows = self.options_screen(chat, job)  # ⚙️ усі налаштування — ДО завантаження, компактно
         self.live[chat] = (text, rows)
         await self._status(chat, status, text, rows)
@@ -2577,37 +2579,76 @@ class Plugin(StudioUI, Base):
         self.jobs_extra[sub.token] = sub
         return sub
 
-    CARD_SYSTEM = ("На картинці — картка допису з Threads. Над фото чи відео може бути рядок музики зі значком ▶: «Назва · Виконавець». "
-                   'Відповідай лише JSON: {"title":"...","artist":"..."}; рядка музики немає — {"title":""}. Нічого не вигадуй.')
+    CARD_SYSTEM = ("На картинці — картка-прев'ю допису з Threads (така сама, як прев'ю посилання в Telegram). Прочитай з неї лише те, що "
+                   "справді написано: рядок музики зі значком ▶ («Назва · Виконавець»), геотег під дописом (часто «Місто • City • Город» — "
+                   "бери першу назву), ім'я автора, текст допису, лічильники під дописом (вподобання, коментарі, поширення), скільки фото/відео "
+                   "видно (карусель), позначки на кшталт «AI info / Створено ШІ», «Paid partnership / Реклама». Відповідай лише JSON: "
+                   '{"music":{"title":"","artist":""},"place":"","author":"","text":"","likes":0,"comments":0,"reposts":0,'
+                   '"media":"photo|video|carousel|none","count":1,"ai_label":false,"paid":false}. Немає — порожньо чи 0. Нічого не вигадуй.')
 
-    async def card_music(self, job):
-        """Threads: музика допису з картки-прев'ю (ту саму показує Telegram під посиланням) — ШІ з зором читає рядок «▶ Назва · Виконавець»."""
-        if self.song_of(job) or not job.items:
+    @staticmethod
+    def card_parse(answer):
+        m = re.search(r"\{.*\}", answer or "", re.S)
+        if not m:
+            return {}
+        try:
+            d = json.loads(m.group(0))
+        except ValueError:
+            return {}
+        mus = d.get("music") if isinstance(d.get("music"), dict) else {}
+        num = lambda v: int(v) if str(v).isdigit() else 0  # noqa: E731
+        return {"title": str(mus.get("title") or "").strip()[:120], "artist": str(mus.get("artist") or "").strip()[:80],
+                "place": str(d.get("place") or "").strip()[:80], "author": str(d.get("author") or "").strip()[:60],
+                "text": str(d.get("text") or "").strip()[:1500], "likes": num(d.get("likes")), "comments": num(d.get("comments")),
+                "reposts": num(d.get("reposts")), "media": str(d.get("media") or ""), "count": num(d.get("count")),
+                "ai_label": d.get("ai_label") is True, "paid": d.get("paid") is True}
+
+    async def card_read(self, job):
+        """Threads: картка-прев'ю допису (та сама, що в Telegram під посиланням) — ШІ з зором читає з неї музику, геотег, текст,
+        лічильники, позначки «створено ШІ» й «реклама»; бере лише те, чого бот ще не знає з розмітки сторінки."""
+        if not job.items or "threads" not in str(job.url):
             return
-        info = job.items[0].info or {}
-        img = info.get("og_image")
-        if not img or "threads" not in str(job.url):
+        info0 = job.items[0].info or {}
+        img = info0.get("og_image")
+        if not img:
             return
         try:
             import base64
             data = await self._fetch_small(img, 3_000_000)
             if not data:
                 return
-            ans, _m = await asyncio.wait_for(self.host.ask_ai("Який рядок музики на картці?", system=self.CARD_SYSTEM, label="🎵 Музика з картки",
+            ans, _m = await asyncio.wait_for(self.host.ask_ai("Що написано на картці допису?", system=self.CARD_SYSTEM, label="🧾 Картка допису",
                                                               image=base64.b64encode(data).decode()), 45)
-            m = re.search(r"\{.*\}", ans or "", re.S)
-            d = json.loads(m.group(0)) if m else {}
+            c = self.card_parse(ans)
         except Exception:  # noqa: BLE001
-            log.info("card music: не прочитано", exc_info=True)
+            log.info("card: не прочитано", exc_info=True)
             return
-        title, artist = str(d.get("title") or "").strip()[:120], str(d.get("artist") or "").strip()[:80]
-        if not title:
+        if not c:
+            return
+        upd = {}
+        if c["title"] and not self.song_of(job):
+            upd.update(track=c["title"], artist=c["artist"], music_on_post=True)
+        if c["place"] and not M.geotag(info0):
+            upd["location"] = c["place"]
+        if c["text"] and not (info0.get("description") or "").strip():
+            upd["description"] = c["text"]
+        for k, v in (("like_count", c["likes"]), ("comment_count", c["comments"]), ("repost_count", c["reposts"])):
+            if v and not info0.get(k):
+                upd[k] = v
+        if c["ai_label"]:
+            upd["ai_label"] = True  # ⚠️ «створено ШІ» — позначка самого Threads
+        if c["paid"]:
+            upd["paid_partnership"] = True
+        if c["count"] > len([i for i in job.items if i.engine != "text"]) > 0:
+            log.info("threads: на картці %s файл(ів), а знайдено %s — можливо, не всі", c["count"], len(job.items))
+        if not upd:
             return
         for it in job.items:
-            it.info.update(track=title, artist=artist, music_on_post=True)
-        job.__dict__.pop("song", None)
-        self.song_of(job)
-        log.info("threads: музика з картки — %s · %s", title[:60], artist[:40])
+            it.info.update(upd)
+        if "track" in upd:
+            job.__dict__.pop("song", None)
+            self.song_of(job)
+        log.info("threads: з картки — %s", ", ".join(f"{k}={str(v)[:40]}" for k, v in upd.items()))
 
     async def post_total(self, job):
         """💾 Розмір усіх файлів допису однією цифрою (до завантаження): з даних сайту, а для прямих файлів — з заголовків.
@@ -3229,28 +3270,34 @@ class Plugin(StudioUI, Base):
                     risks, rsong = (rc[rkey][4], rc[rkey][5]) if rkey in rc else (set(), "")
                     ocr_t, said_t = (rc[rkey][6], rc[rkey][7]) if rkey in rc else ("", "")
                     post_said = rc[rkey][9] if rkey in rc else []  # 🎙 розшифровки інших відео/аудіо цього ж допису
-                    if rkey in rc and self.rel_on(chat, "risk") and self.rel_on(chat, "qual"):
+                    if rkey in rc:  # 📉 якість і 🎙 мова кожного файлу — паралельно, щоб не затримувати надсилання
+                        do_q = self.rel_on(chat, "risk") and self.rel_on(chat, "qual")
+                        do_h = self.rel_on(chat, "ai") and self.rel_on(chat, "hear")
+                        av = self.VIDEO_EXT + self.AUD_EXT
+
+                        async def _none():
+                            return None
+                        q_tasks = [self.quality(o) if do_q else _none() for o in outs]
+                        h_tasks = [self._hear(o) if do_h and str(o) != rc[rkey][8] and Path(o).suffix.lower() in av else _none()
+                                   for o in outs]
+                        got = await asyncio.gather(*q_tasks, *h_tasks, return_exceptions=True)
+                        qs, hs = got[:len(outs)], got[len(outs):]
                         many = len(nums) > 1 or len(outs) > 1
-                        for o in outs:  # 📉 якість кожного фото й відео допису
-                            q = await self.quality(o)
-                            if q:
-                                tag = f"№{n} — " if many else ""
-                                risks = set(risks) | {"q:" + tag + ", ".join(q)}
-                                rc[rkey] = rc[rkey][:4] + (risks,) + rc[rkey][5:]
-                    if rkey in rc and self.rel_on(chat, "ai") and self.rel_on(chat, "hear"):
-                        for o in outs:  # кожне відео й аудіо допису — не лише перше: текст для пошуку й перевірки небезпек
-                            if str(o) != rc[rkey][8] and Path(o).suffix.lower() in self.VIDEO_EXT + self.AUD_EXT:
-                                heard = await self._hear(o)
-                                if heard:
-                                    post_said.append(heard)
-                                    more = set()
+                        more = set()
+                        for q in qs:
+                            if q and not isinstance(q, Exception):
+                                more.add("q:" + (f"№{n} — " if many else "") + ", ".join(q))
+                        for heard in hs:
+                            if heard and not isinstance(heard, Exception):
+                                post_said.append(heard)
+                                if self.rel_on(chat, "risk"):
                                     if R.swear_hits(heard):
                                         more.add("swear")
                                     if R.guess_lang(heard) == "ru":
                                         more.add("ru")
-                                    if more - risks and self.rel_on(chat, "risk"):
-                                        risks = set(risks) | more
-                                        rc[rkey] = rc[rkey][:4] + (risks,) + rc[rkey][5:]
+                        if more - set(risks):
+                            risks = set(risks) | more
+                            rc[rkey] = rc[rkey][:4] + (risks,) + rc[rkey][5:]
                     if rel is None:  # людина попросила без тегів — без сортування й без запису
                         rel_t = rel_g = rel_l = rel_f = rel_btns = []
                         rel_line, rel_len = "", 0

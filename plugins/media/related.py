@@ -244,7 +244,7 @@ SWEAR_RE = re.compile(r"(?i)(?<![а-яіїєґa-z])(?:х[уy][йяюеєїі]\w*
                       r"підар\w*|пидор\w*|педик\w*|залуп\w*|г[ао]ндон\w*|сук[аио](?![а-яіїєґ])|сучк\w*|"
                       r"fuck\w*|shit\w*|bitch\w*|motherf\w*|cunt\w*)")
 RISK_LABEL = {"ru": "російська мова", "swear": "нецензурна лексика", "music": "музика — можливі авторські права",
-              "ai": "ймовірно створено ШІ", "rights": "чужі авторські права",
+              "ai": "ймовірно створено ШІ", "rights": "чужі авторські права", "paid": "позначено як реклама (Paid partnership)",
               "music_post": "до допису прикріплено музику — у скачаному файлі її немає, без прав не додавайте її при публікації"}
 RIGHTS_TAIL = "потрібен дозвіл; без нього Meta знижує охоплення, а скарга правовласника — видалення й обмеження сторінки"
 RIGHTS_MARK_RE = re.compile(rb"Getty ?Images|Shutterstock|Adobe ?Stock|iStock|Alamy|Depositphotos|Dreamstime|123RF|Reuters|"
@@ -342,7 +342,7 @@ def _risks_only(risks, song=""):
     why = next((k[4:] for k in sorted(risks) if k.startswith("why:")), "")
     parts = [RISK_LABEL[k] + (f" ({song})" if k == "music" and song else "") + (f" ({', '.join(kinds)})" if k == "ai" and kinds else "")
              + (f" ({why}) — {RIGHTS_TAIL}" if k == "rights" else "")
-             for k in ("ru", "swear", "music", "ai", "rights") if k in risks]
+             for k in ("ru", "swear", "music", "ai", "rights", "paid") if k in risks]
     if "music_post" in risks and "music" not in risks:
         parts.append(RISK_LABEL["music_post"].replace("музику", f"музику ({song})" if song else "музику", 1))
     return "⚠️ Увага: " + " · ".join(parts)
