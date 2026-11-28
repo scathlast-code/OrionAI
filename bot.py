@@ -8530,7 +8530,7 @@ async def scr_hub(chat_id, key):
                 else:
                     rows.append([(f"{head} ›", data)])
                 rows._open_tail = len(rows[-1]) == 1
-                secs.append({"head": head, "body": esc(what), "rows": [[("Відкрити повністю ›", data)]]})
+                secs.append({"head": head, "body": esc(what), "rows": [], "open": data})  # натискання на назву — відкриває
                 continue
             try:
                 r = await asyncio.wait_for(miniapp.run(sys.modules[__name__], chat_id, "screen", data), 12)
@@ -8553,7 +8553,7 @@ async def scr_hub(chat_id, key):
                 else:
                     rows.append([(f"{head} ›", data)])
                 rows._open_tail = len(rows[-1]) == 1
-                secs.append({"head": head, "body": short, "rows": [[("Відкрити повністю ›", data)]]})
+                secs.append({"head": head, "body": short, "rows": [], "open": data})  # натискання на назву чи опис — відкриває
                 continue
             part = []
             for row in r.get("rows") or []:
