@@ -493,7 +493,8 @@ class Plugin(StudioUI, Base):
             return None
         hits = []
         try:
-            sh = Shazam()
+            sh = self.__dict__.get("_shz") or Shazam()  # один клієнт на весь час роботи — без «Unclosed client session» у журналі
+            self.__dict__["_shz"] = sh
             dur = await self._duration(path)
             with tempfile.TemporaryDirectory(prefix="orion-shz-") as work:
                 for i, start in enumerate(self.shazam_windows(dur)):
