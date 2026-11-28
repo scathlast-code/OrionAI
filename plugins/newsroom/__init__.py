@@ -1192,7 +1192,7 @@ class Plugin(CardsUI, QueueUI, CrosspostUI, ReportUI, ObservancesUI, DigestMode,
             return await self.actions_route(chat, a, x, y)
         if a in ("rp", "rpsel", "rpt", "rpin", "rpshow", "rpau", "rpun", "rpa", "rgo"):
             return await self.report_route(chat, a, x, y)
-        if a in ("cd", "cdp", "cdr", "cdu", "cdl", "cdlx", "cdn", "cdf", "cds", "cdc", "cdz", "cdb"):
+        if a in ("cd", "cdx", "cdp", "cdr", "cdu", "cdl", "cdlx", "cdn", "cdf", "cds", "cdc", "cdz", "cdb"):
             return await self.cd_route(chat, a, x, y)
         if a in ("pq", "pql", "pqs", "pqt", "pqi", "pqp", "pqx", "pqn", "pqr", "pqdone", "pqh", "pqhi", "pqhr"):
             return await self.pq_route(chat, a, x, y)
