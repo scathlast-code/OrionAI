@@ -349,6 +349,16 @@ async def open_url(url, referer=None, agent=None):
     raise JobError("Забагато перенаправлень.")
 
 
+async def head_size(url, referer=None):
+    """Розмір файлу за адресою (Content-Length) без завантаження тіла; None — сервер не сказав."""
+    try:
+        async with open_url(url, referer=referer, agent=BROWSER) as response:
+            n = response.headers.get("content-length")
+            return int(n) if n and n.isdigit() else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def media_extension(response):
     mime = response.headers.get("content-type", "").split(";")[0].lower()
     url_suffix = Path(urlsplit(str(response.url)).path).suffix.lower()
