@@ -112,6 +112,12 @@ def bar(done, total, speed=0, eta=0):
             + (f" · {mb(speed)}/с" if speed else "") + (f" · ще {eta // 60}:{eta % 60:02d}" if eta else ""))
 
 
+def pbar(frac):
+    """Бігунок без розміру: ▓▓▓▓░░░░░░ 42%"""
+    pct = max(0, min(100, int(frac * 100)))
+    return f"{'▓' * (pct // 10)}{'░' * (10 - pct // 10)} {pct}%"
+
+
 class Plugin(Base):
     id = "med"
     icon = "⬇️"
@@ -137,6 +143,7 @@ class Plugin(Base):
         self.gctx: dict[int, dict] = {}       # 📦 поточне групове завантаження чату
         self.gpend: dict[str, dict] = {}      # 📦 групи, що чекають вибору
         self.user_stop: set = set()
+        self.gmsg: dict = {}  # чат -> повідомлення-статус групи (одне на всю групу)
         self.just_done: set = set()
         self.force_now: dict[int, bool] = {}
         self.last_result: dict[int, tuple] = {}
@@ -1112,6 +1119,7 @@ class Plugin(Base):
                     raise
                 self.user_stop.discard(chat)
                 g = self.gctx.pop(chat, None)
+                self.gmsg.pop(chat, None)
                 if chat not in self.just_done and self.cur_url.get(chat):  # зупинили до кінця — посилання збережемо
                     self.pend_keep(chat, self.cur_url[chat], "завантаження зупинено")
                 for i in (g or {}).get("left", [])[1:]:  # решта групи — теж у збережені
@@ -1369,9 +1377,10 @@ class Plugin(Base):
             g["i"] = i
             it = g["items"][i]
             done_n = n - len(g["left"])
-            gst = await self._status(chat, gst, f"📦 <b>Група №{g['id']}</b> · {done_n} з {n} готово · зараз №{i + 1}",
-                                     [[("⏹ Зупинити групу", self.cb("stop"))]])
+            gst = await self._status(chat, gst, f"📦 <b>Група №{g['id']}</b> · {done_n} з {n} готово · зараз №{i + 1}\n"
+                                     f"📦 Усього: {pbar(done_n / n)}", [[("⏹ Зупинити групу", self.cb("stop"))]])
             g["mid"] = getattr(gst, "message_id", 0)
+            self.gmsg[chat] = gst  # одне повідомлення на всю групу: статус кожного допису — в ньому ж
             self.instr[chat] = it.get("instr") or {}
             self.last_result.pop(chat, None)
             why = ""
@@ -1421,13 +1430,14 @@ class Plugin(Base):
             rows.append([("🧯 Биті посилання", self.cb("bad"))])
         await self._status(chat, gst, text[:4000], rows + [[("« Медіа", self.cb())]])
         self.gctx.pop(chat, None)
+        self.gmsg.pop(chat, None)
         self.instr.pop(chat, None)
 
     async def group_one(self, chat, url, mode):
         """Одне посилання групи без жодних питань: знайти й одразу завантажити в обраному вигляді."""
         src = M.describe_source(url)
         self.cur_url[chat] = url
-        status = await self._status(chat, None, f"🔎 Шукаю: <b>{esc(src)}</b>…")
+        status = await self._status(chat, self.gmsg.get(chat), f"🔎 Шукаю: <b>{esc(src)}</b>…")
         url = await M.resolve_share(url)
         with tempfile.TemporaryDirectory(prefix="orion-media-") as work:
             items = await M.inspect_link(url, Path(work))
@@ -2205,6 +2215,19 @@ class Plugin(Base):
         site = M.site_name(job.url) if str(job.url).startswith("http") else "файл"
         usual = self.usual_time(site)
 
+        def overall():
+            """Окремі бігунки: «Усього в дописі» (кілька файлів) і «Уся група» (групове завантаження)."""
+            lines = []
+            item_frac = cur.get("frac", 0.0)
+            frac_post = ((cur.get("k", 1) - 1) + item_frac) / max(1, len(nums))
+            if len(nums) > 1:
+                lines.append(f"🗂 Усього в дописі ({cur.get('k', 1)}/{len(nums)}): {pbar(frac_post)}")
+            g = self.gctx.get(chat)
+            if g and g.get("n"):
+                done_g = g["n"] - len(g.get("left", [])) 
+                lines.append(f"📦 Уся група №{g['id']} ({done_g + 1}/{g['n']}): {pbar((done_g + frac_post) / g['n'])}")
+            return ("\n" + "\n".join(lines)) if lines else ""
+
         def clock():
             el = int(time.time() - cur["t"])
             line = f"⏱ минуло {el // 60}:{el % 60:02d}"
@@ -2217,7 +2240,7 @@ class Plugin(Base):
             """Живий стан: застосунок бачить кожне оновлення, повідомлення в чаті — не частіше ніж раз на 3 с."""
             nonlocal status
             cur["text"], cur["bar"] = text, has_bar
-            full = text + "\n" + clock()
+            full = text + overall() + "\n" + clock()
             self.live[chat] = (full, [])
             now = asyncio.get_running_loop().time()
             if force or now - last[0] >= 3:
@@ -2254,7 +2277,9 @@ class Plugin(Base):
                         + f"\n📍 {esc(src)}{left}")
 
                 async def on_dl(done, total, speed, eta, head=head):
-                    await stage(f"{head}\n{bar(done, total, speed, eta)}", has_bar=bool(total))
+                    cur["frac"] = (done / total * 0.9) if total else cur.get("frac", 0.0)  # завантаження — 90% частки файлу
+                    await stage(f"{head}\n⬇️ Цей файл: {bar(done, total, speed, eta)}", has_bar=bool(total))
+                cur["k"], cur["frac"] = k, 0.0
                 try:
                     cur["t"] = time.time()
                     await stage(head + "\n⏳ чекаю відповідь сайту…", force=True)
@@ -2335,7 +2360,8 @@ class Plugin(Base):
                         await stage(up + "…", force=True)
 
                         async def on_up(done, total, up=up):
-                            await stage(f"{up}\n{bar(done, total)}", has_bar=bool(total))
+                            cur["frac"] = 0.9 + (done / total * 0.1 if total else 0)
+                            await stage(f"{up}\n⬆️ Цей файл: {bar(done, total)}", has_bar=bool(total))
                         msg_ = await self.send_media(chat, out, cap, on_progress=on_up,
                                                      markup=None if recorded else self._url_markup([[b] for b in rel_btns]))
                         if not recorded and getattr(msg_, "message_id", None):  # 🔗 запам'ятовуємо для «попереднє …»
@@ -2378,6 +2404,7 @@ class Plugin(Base):
                     failed.append(f"{n} · " + (f"сайт не віддав файл (HTTP {code}) — спробуйте ще раз або інший формат"
                                                if code else esc(type(exc).__name__)))
             if album:
+                cur["k"], cur["frac"] = len(nums), 0.95
                 await stage(f"⬆️ Надсилаю однією публікацією: {len(album)} файл(ів)…", force=True)
                 msgs = None
                 size_all = sum(a["out"].stat().st_size for a in album)  # розмір — ДО keep(): він переносить файли
