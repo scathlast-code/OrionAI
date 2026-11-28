@@ -87,6 +87,18 @@ def shift_segs(segs, start, end):
     return [(max(0.0, a - start), min(end, b) - start, t) for a, b, t in segs if b > start and a < end]
 
 
+LOGO = Path(__file__).resolve().parents[1] / "newsroom" / "brand" / "logo_white.png"
+
+
+def logo_filter(width):
+    """Лого GreenPost у правому нижньому куті: ~22 % ширини кадру, відступ 4 %, легка тінь — читається на будь-якому тлі."""
+    lw = max(120, int(width * 0.22))
+    pad = max(16, int(width * 0.04))
+    return (f"[1:v]scale={lw}:-1,format=rgba,colorchannelmixer=aa=0.92[lg];"
+            f"[lg]split[l1][l2];[l2]colorchannelmixer=rr=0:gg=0:bb=0:aa=0.45,boxblur=3[sh];"
+            f"[0:v][sh]overlay=W-w-{pad - 2}:H-h-{pad - 2}[v1];[v1][l1]overlay=W-w-{pad}:H-h-{pad}")
+
+
 class StudioUI:
     """Міксин для плагіна «Медіа»: кнопки й завдання студії."""
 
@@ -96,9 +108,13 @@ class StudioUI:
             return []
         tok = job.token
         row = [("🔤 Субтитри", self.cb("stu", tok, "subs")), ("✂️ Короткі ролики", self.cb("stu", tok, "clips"))]
+        brand = [("🏷 Лого GreenPost", self.cb("stu", tok, "logo"))]
         if set(risks) & {"music", "music_post", "rights"} or any(str(r).startswith("why:") for r in risks):
-            return [[("🛡 Безпечна версія", self.cb("stu", tok, "safe"))], row]
-        return [row, [("🛡 Без музики й водяних знаків", self.cb("stu", tok, "safe"))]]
+            return [[("🛡 Безпечна версія", self.cb("stu", tok, "safe"))] + brand, row]
+        return [row, [("🛡 Без музики й водяних знаків", self.cb("stu", tok, "safe"))] + brand]
+
+    def brand_on(self, chat):
+        return bool(self.pref(chat, "studio_logo", False))
 
     async def _studio_src(self, job, work):
         from dataclasses import replace
@@ -119,6 +135,25 @@ class StudioUI:
         segs, _prov = await core.transcribe_timed(aud.read_bytes(), "a.mp3")
         return [s for s in (segs or []) if s[1] > s[0]]
 
+    async def _brand(self, src, out):
+        from .common import run
+        from . import media as M
+        w, _h = await self._probe_wh(src)
+        await run(*M.FF, "-i", src, "-i", str(LOGO), "-filter_complex", logo_filter(w or 1080), "-c:v", "libx264", "-preset", "veryfast",
+                  "-crf", "22", "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", out, timeout=1800)
+        return out
+
+    async def _maybe_brand(self, chat, path):
+        """«🏷 Лого на всіх результатах студії» — накладає лого на готовий файл перед надсиланням."""
+        if not self.brand_on(chat):
+            return path
+        out = path.with_name(path.stem + " · GreenPost" + path.suffix)
+        try:
+            return await self._brand(path, out)
+        except Exception:  # noqa: BLE001
+            log.info("studio: лого не накладено", exc_info=True)
+            return path
+
     async def _probe_wh(self, path):
         import asyncio
         proc = await asyncio.create_subprocess_exec("ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
@@ -137,7 +172,7 @@ class StudioUI:
         from plugins.newsroom.tools import VERT_BLUR, sub_filter, to_srt
         esc = self._esc
         stop = [[("⏹ Зупинити", self.cb("stop"))]]
-        title = {"safe": "🛡 Безпечна версія", "subs": "🔤 Субтитри", "clips": "✂️ Короткі ролики"}[what]
+        title = {"safe": "🛡 Безпечна версія", "subs": "🔤 Субтитри", "clips": "✂️ Короткі ролики", "logo": "🏷 Лого GreenPost"}[what]
         status = await self._status(chat, None, f"{title}: завантажую відео…", stop)
 
         async def say(t):
@@ -147,7 +182,12 @@ class StudioUI:
                 work = Path(work)
                 src, item = await self._studio_src(job, work)
                 stem = Path(item.title[:50] or "video").stem.replace("/", "_")
-                if what == "safe":
+                if what == "logo":
+                    await say("накладаю лого…")
+                    out = work / f"{stem} · GreenPost.mp4"
+                    await self._brand(src, out)
+                    await self.send_media(chat, out, esc("🏷 Відео з лого GreenPost"))
+                elif what == "safe":
                     done = []
                     cur = src
                     if await self._has_audio(src):
@@ -183,6 +223,7 @@ class StudioUI:
                     out = work / f"{stem} · безпечна версія.mp4"
                     cur.rename(out)
                     await say("надсилаю…")
+                    out = await self._maybe_brand(chat, out)
                     await self.send_media(chat, out, esc("🛡 Безпечна версія: " + ", ".join(done)
                                                           + ". Права на саме відео це не дає — потрібен дозвіл автора."))
                 elif what == "subs":
@@ -196,6 +237,7 @@ class StudioUI:
                     await say("вшиваю субтитри…")
                     await run(*M.FF, "-i", src, "-vf", sub_filter(srt), "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
                               "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", out, timeout=1800)
+                    out = await self._maybe_brand(chat, out)
                     await self.send_media(chat, out, esc("🔤 Відео із субтитрами (шрифт Lora)"))
                     await self.send_doc(chat, srt, "📄 Субтитри окремо (.srt)")
                 else:  # clips
@@ -221,9 +263,12 @@ class StudioUI:
                         await run(*M.FF, "-ss", str(a), "-to", str(b), "-i", src, "-filter_complex", vf, "-c:v", "libx264", "-preset", "veryfast",
                                   "-crf", "23", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-r", "30", "-movflags", "+faststart",
                                   out, timeout=1800)
+                        out = await self._maybe_brand(chat, out)
                         await self.send_media(chat, out, esc(f"✂️ {i}/{len(clips)} · {int(a // 60)}:{int(a % 60):02d}–{int(b // 60)}:{int(b % 60):02d}"
                                                              + (f" · {t}" if t else "") + " · 1080×1920"))
-            await self._status(chat, status, f"{title}: ✅ готово", [[("« Медіа", self.cb())]])
+            await self._status(chat, status, f"{title}: ✅ готово",
+                               [[(("🏷 Лого на всіх результатах: так" if self.brand_on(chat) else "🏷 Лого на всіх результатах: ні"),
+                                  self.cb("stulogo"))], [("« Медіа", self.cb())]])
         except JobError as exc:
             await self._status(chat, status, f"{title}: ⚠️ {esc(str(exc)[:300])}", [[("« Медіа", self.cb())]])
         except Exception as exc:  # noqa: BLE001

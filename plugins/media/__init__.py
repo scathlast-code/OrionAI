@@ -1315,7 +1315,10 @@ class Plugin(StudioUI, Base):
             else:
                 self._bg(chat, self.sep_go(chat, job, a[-1] if a != "osv" else "v"))
             return "⬇️ Починаю", (self.live_screen(chat) if self.in_app() else None)
-        if a == "stu" and y in ("safe", "subs", "clips"):  # 🎬 студія для скачаного відео
+        if a == "stulogo":  # 🏷 лого GreenPost на всіх результатах студії
+            self.set_pref(chat, "studio_logo", not self.pref(chat, "studio_logo", False))
+            return ("🏷 Лого на результатах: " + ("так" if self.pref(chat, "studio_logo", False) else "ні")), None
+        if a == "stu" and y in ("safe", "subs", "clips", "logo"):  # 🎬 студія для скачаного відео
             job = self.job_by(chat, x)
             if not job:
                 return self.revive(chat, x)
