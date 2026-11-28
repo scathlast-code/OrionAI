@@ -40,3 +40,12 @@ def test_about_and_collage():
     assert Plugin._collage(blobs) and Plugin._collage([b"x"]) is None
     p = R.ai_prompt("Саржин яр", "", [], [], seen=True, nimg=3, notes="Музика в дописі: X", site="Threads")
     assert "сітку з 3" in p and "Музика" in p
+
+
+def test_risks():
+    from plugins.media import related as R
+    assert R.swear_hits("ну це пиздець, бля") == 2
+    assert R.swear_hits("сукня, ребус, хула, страхування, бляшанка, наїбати") <= 1
+    assert R.swear_hits("сукня, ребус, хула, страхування, бляшанка") == 0
+    assert R.parse_risks('{"risks":["ru","music","x"]}') == {"ru", "music"}
+    assert "авторські" in R.risks_line({"music"}, "X — Y") and R.risks_line(set()) == ""

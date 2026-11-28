@@ -5,6 +5,7 @@ Mini App шле POST /app/api з initData (підпис Telegram). Бот зап
 """
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import logging
 import re
@@ -459,6 +460,7 @@ async def run(bot_module, uid, op, data=None, text=None, user=None, file=None):
                     log.exception("miniapp: plugin file")
                 if not taken:
                     await (B.on_message if is_img else B.on_file_document)(upd, ctx)
+                await _scan_upload(B, uid, name, raw, mime, text or "", sink)
             else:
                 await B.on_message(upd, ctx)
         elif op == "text":
@@ -494,6 +496,27 @@ async def run(bot_module, uid, op, data=None, text=None, user=None, file=None):
             "awaiting": uid in B.AWAIT and (op != "screen" or B.AWAIT.get(uid) is not prev_wait),
             "view": bool(op == "screen" and data and B.is_view(data)),
             "replies": [re.sub(r"<[^>]+>", "", t)[:6000] for t in replies[-5:]]}
+
+
+async def _scan_upload(B, uid, name, raw, mime, caption, sink):
+    """⚠️ Файл із застосунку — та сама перевірка, що й у чаті: російська мова, матюки, музика."""
+    med = B.PLUGINS.get("med")
+    if not med or not hasattr(med, "scan_path") or not mime.startswith(("image/", "video/", "audio/")):
+        return
+    if not (med.rel_on(uid, "risk") and med.rel_on(uid, "risk_up")):
+        return
+    import tempfile
+    from pathlib import Path as _P
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = _P(tmp) / (re.sub(r"[^\w.-]", "_", name) or "file")
+            dest.write_bytes(raw)
+            risks = await asyncio.wait_for(med.scan_path(uid, dest, caption), 75)
+        if risks:
+            from plugins.media import related as R
+            sink.notes.append(R.risks_line(risks) + " — перевірте перед публікацією.")
+    except Exception:  # noqa: BLE001
+        log.exception("miniapp: upload scan")
 
 
 def page():

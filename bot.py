@@ -12135,6 +12135,19 @@ if TELEGRAM_TOKEN:
     tg_app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.FORWARDED & (filters.VOICE | filters.VIDEO | filters.VIDEO_NOTE | filters.AUDIO),
                                       on_bug_media), group=-5)
 
+    async def on_upload_scan(update, ctx):  # ⚠️ перевірка файлів людини у фоні; обробку не зупиняє
+        if not allowed(update):
+            return
+        med = PLUGINS.get("med")
+        if med and hasattr(med, "scan_upload"):
+            try:
+                await med.scan_upload(update, ctx)
+            except Exception:  # noqa: BLE001
+                log.exception("upload scan")
+
+    tg_app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.PHOTO | filters.VIDEO | filters.VIDEO_NOTE | filters.AUDIO
+                                                                  | filters.VOICE | filters.ANIMATION | filters.Document.ALL),
+                                      on_upload_scan), group=-7)
     tg_app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE, on_plugin_private), group=-4)
     tg_app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST | (filters.ChatType.GROUPS & filters.UpdateType.MESSAGE),
                                       on_plugin_channel), group=-3)
