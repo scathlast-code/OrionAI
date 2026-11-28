@@ -10727,6 +10727,20 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception:  # noqa: BLE001
             pass
         return await PLUGINS.get("med").jump(update.effective_chat.id, int(m_mh.group(1)))
+    m_mx = re.fullmatch(r"mx_?([\w-]*)", ctx.args[0]) if ctx.args else None
+    if m_mx and PLUGINS.get("med"):  # 🔗 дії з підпису альбому (кнопок альбом мати не може): «🏷 Категорії», «⚙️ Доналаштувати»…
+        try:
+            await update.message.delete()
+        except Exception:  # noqa: BLE001
+            pass
+        med = PLUGINS.get("med")
+        args = [x for x in m_mx.group(1).split("_") if x] or [""]
+        toast, screen = await med.route(update, ctx, update.effective_chat.id, args)
+        if screen:
+            return await med.host.notify(update.effective_chat.id, screen[0], screen[1])
+        if toast:
+            return await med.host.notify(update.effective_chat.id, toast)
+        return
     m_obb = re.fullmatch(r"obb_([a-z]+)_(\d{8})", ctx.args[0]) if ctx.args else None
     if m_obb and PLUGINS.get("news") and hasattr(PLUGINS.get("news"), "jump"):  # ↗️ «відкрити X» → кнопка X, що блимає
         try:
