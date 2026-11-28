@@ -821,7 +821,8 @@ async def threads_probe(url, work):
             for t in read_html(text.encode("utf-8")).xpath("//meta[@content]")}
     info = {"title": (meta.get("og:title") or f"Threads {code or ''}")[:80],
             "description": meta.get("og:description") or "",
-            "author": user, "author_url": f"https://www.threads.com/@{user}" if user else ""}
+            "author": user, "author_url": f"https://www.threads.com/@{user}" if user else "",
+            "og_image": meta.get("og:image") or ""}  # картка-прев'ю допису: на ній Threads пише й музику («▶ Назва · Виконавець»)
     post = _threads_post(text, code)
     log.info("threads %s: сторінка %d КБ, допис у JSON: %s, карусель: %s з %s, фото в тексті: %d", code, len(text) // 1024,
              bool(post), len((post or {}).get("carousel_media") or []), (post or {}).get("carousel_media_count"),
