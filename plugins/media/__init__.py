@@ -640,8 +640,8 @@ class Plugin(Base):
         on_post = (ctx or {}).get("music_on_post")  # лише Threads: музика на дописі, а не обов'язково у відео
         if (ctx or {}).get("song_overlay") and on_post:
             inside = await self.post_music_in_file((ctx or {}).get("media") or media, (ctx or {}).get("song", ""))
-            if inside:  # лише коли Shazam почув цю пісню в самому файлі; немає чи не вдалося перевірити — без попередження
-                risks.add("music")
+            # Threads вказав музику допису: почута у файлі — повне попередження; інакше — що вона прикріплена, але у файлі її немає
+            risks.add("music" if inside else "music_post")
             log.info("related: музика допису у файлі: %s", inside)
         elif (ctx or {}).get("song_overlay") or re.search(r"(?i)\[(?:music|музика|музыка)\]|♪", said):
             risks.add("music")
