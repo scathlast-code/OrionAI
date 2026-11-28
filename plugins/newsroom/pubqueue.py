@@ -285,6 +285,10 @@ class QueueUI:
             try:
                 if self.on():
                     await self.pq_tick()
+                    if self.store.get("al_held") and hasattr(self, "al_morning"):  # ⚡ притримане вночі — після тихих годин
+                        from .alerts import in_quiet
+                        if not in_quiet(self.al_cfg()["quiet"], self._now()):
+                            await self.al_morning()
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001

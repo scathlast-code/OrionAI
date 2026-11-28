@@ -40,6 +40,7 @@ from .pubqueue import QueueUI
 from .cards import CardsUI
 from .styleguide import StyleUI
 from .ourswrote import OursWroteUI
+from .alerts import AlertsUI
 from .echo import KINDS as ECHO_KINDS, Echo
 from .collectors import MTProto, WebCollector
 
@@ -119,7 +120,7 @@ def src_links(sources, sep=" · "):
     return sep.join(f'<a href="{esc(s)}">{esc(_dom(s))}</a>' if str(s).startswith("http") else esc(s) for s in sources)
 
 
-class Plugin(OursWroteUI, StyleUI, CardsUI, QueueUI, CrosspostUI, ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Base):
+class Plugin(AlertsUI, OursWroteUI, StyleUI, CardsUI, QueueUI, CrosspostUI, ReportUI, ObservancesUI, DigestMode, ActionsUI, DeskUI, ListsUI, Base):
     id = "news"
     icon = "✍️"
     title = "Публікації"
@@ -129,7 +130,7 @@ class Plugin(OursWroteUI, StyleUI, CardsUI, QueueUI, CrosspostUI, ReportUI, Obse
                "переписує за правилами редакції на моделях Оріона, тримає точну довжину, готує зведення за добу й "
                "публікує в канал лише після вашого схвалення.\n\n"
                "Автоматичний рерайт — не фактчек: перед публікацією звіряйте цифри й імена (кнопка «🔎 Звірити» допомагає, але не замінює редактора).")
-    VIEWS = {"ow", "ows", "sty", "styd", "cd", "cds", "pql", "pq", "pqh", "xp", "xps", "ls", "d", "src", "dg", "so", "set", "q", "help", "ver", "len", "rules",
+    VIEWS = {"al", "ow", "ows", "sty", "styd", "cd", "cds", "pql", "pq", "pqh", "xp", "xps", "ls", "d", "src", "dg", "so", "set", "q", "help", "ver", "len", "rules",
              "L", "Lo", "Ls", "Lsort", "Lbulk", "Le", "Lacc", "Lhelp", "Elst", "Lmerge",
              "H1", "H2", "H3", "H4", "H5", "D", "Dm", "Fl", "Fo", "Ff", "Fi", "Fmv", "Fbl", "Tg", "Tgi", "Tp", "Bk", "Bkl",
              "Sp", "Ou", "Ours", "Sl", "St", "Wt", "more", "acs", "ace", "sch", "fld", "flds", "echo", "eci", "cls", "ctp", "cte", "cmk", "csl", "obh", "obt", "obc", "obd", "ob", "obi", "obl", "obs", "obup", "obws", "obdy", "obcp", "obcm"}
@@ -255,6 +256,12 @@ class Plugin(OursWroteUI, StyleUI, CardsUI, QueueUI, CrosspostUI, ReportUI, Obse
             data["notes"] = (f"🔗 Схоже на матеріал #{item['related_to']} — можливо, оновлення події. " + data["notes"]).strip()
         did = self.store.add_draft(iid, data, model=model, target=target, status="draft" if ok else "length_mismatch")
         self._autocheck(did)  # 🔎 кожна чернетка перевіряється одразу: факти й мова
+        if not item["requested_by"]:  # ⚡ з джерел (не надіслане вами) — термінове одразу
+            try:
+                await self.al_maybe(data["headline"], data["body"], {"urgency": data.get("urgency"), "importance": 8 if data.get("urgency") == "urgent" else 0},
+                                    item.get("source_name") or "", url or "", ("draft", did))
+            except Exception:  # noqa: BLE001
+                log.exception("alert")
         self.store.set_item(iid, status="done", photo="", error="")
         it2 = self.store.item(iid)
         if it2.get("story_id"):
@@ -848,6 +855,7 @@ class Plugin(OursWroteUI, StyleUI, CardsUI, QueueUI, CrosspostUI, ReportUI, Obse
             [("🔎 Знайти й написати", self.cb("D"))],
             [(f"🗓 Черга публікацій · {sum(1 for r in self.pq() if r['st'] in ('wait', 'pause'))}", self.cb("pql")),
              ("🔎 Пошук у наших", self.cb("ows"))],
+            [("⚡ Термінові сповіщення" + (" ✅" if self.al_cfg()["on"] else ""), self.cb("al"))],
             [("📡 Джерела", self.cb("H1")), ("⚙️ Налаштування новинарні", self.cb("H2"))],
             [("🗂 Архів", self.cb("H5")), ("ℹ️ Довідка", self.cb("help"))],
         ]
@@ -1198,6 +1206,8 @@ class Plugin(OursWroteUI, StyleUI, CardsUI, QueueUI, CrosspostUI, ReportUI, Obse
             return await self.actions_route(chat, a, x, y)
         if a in ("rp", "rpsel", "rpt", "rpin", "rpshow", "rpau", "rpun", "rpa", "rgo"):
             return await self.report_route(chat, a, x, y)
+        if a in ("al", "alc", "ali", "alh", "alm"):
+            return await self.al_route(chat, a, x, y)
         if a in ("ow", "owa", "ows", "owq"):
             return await self.ow_route(chat, a, x, y)
         if a in ("sty", "styfix", "styd", "stydi", "stydx"):
@@ -1431,6 +1441,8 @@ class Plugin(OursWroteUI, StyleUI, CardsUI, QueueUI, CrosspostUI, ReportUI, Obse
             return await self.xp_text(chat, key, data, text)
         if key == "cdb":
             return await self.cd_text(chat, key, data, text)
+        if key in ("alwords", "almute", "alquiet"):
+            return await self.al_text_in(chat, key, data, text)
         if key == "owq":
             return await self.ow_text(chat, key, data, text)
         if key == "styd":
