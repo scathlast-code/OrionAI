@@ -29,9 +29,12 @@ def test_ai_risks(tmp_path):
 def test_shazam_windows():
     w = Plugin.shazam_windows
     assert w(10) == [0.0]
-    assert w(60)[0] == 0.0 and w(60)[-1] == 40.0 and len(w(60)) == 3
-    long = w(600)
-    assert len(long) == 6 and long[-1] == 580.0
+    assert w(60) == [0.0, 20.0, 40.0]
+    assert w(70) == [0.0, 20.0, 40.0, 50.0]
+    mid = w(600)
+    assert len(mid) == 30 and all(b - a <= 20 for a, b in zip(mid, mid[1:])) and mid[-1] == 580.0
+    huge = w(3600)
+    assert len(huge) == 45 and huge[-1] == 3580.0
 
 
 def test_rights(tmp_path):

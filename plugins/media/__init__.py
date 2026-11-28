@@ -470,14 +470,16 @@ class Plugin(Base):
             return 0.0
 
     @staticmethod
-    def shazam_windows(dur, clip=20, most=6):
-        """Звідки брати шматки звуку: музика буває на початку, посередині чи наприкінці.
-        Коротке відео — один шматок; довше — рівномірно по всій довжині, включно з кінцем (до 6 шматків по 20 с)."""
+    def shazam_windows(dur, clip=20, most=45):
+        """Звідки брати шматки звуку: усе відео суцільно, шматками по 20 с без проміжків (останній — впритул до кінця).
+        Дуже довге (понад 15 хв) — 45 шматків рівномірно по всій довжині, щоб перевірка не тривала безкінечно."""
         if dur <= clip + 2:
             return [0.0]
-        n = max(2, min(most, int(dur // clip)))
         last = max(0.0, dur - clip)
-        return sorted({round(last * i / (n - 1), 1) for i in range(n)})
+        n = int(-(-dur // clip))  # скільки шматків покриють усе
+        if n <= most:
+            return sorted({*(float(i * clip) for i in range(n - 1)), round(last, 1)})
+        return sorted({round(last * i / (most - 1), 1) for i in range(most)})
 
     async def _shazam(self, path, all_hits=False):
         """Shazam по кількох шматках усього відео (початок, середина, кінець) -> (виконавець, назва) першої знайденої пісні,
@@ -3126,6 +3128,7 @@ class Plugin(Base):
                         detected = None
                         if not s2 and media0 and Path(media0).suffix.lower() in self.VIDEO_EXT + self.AUD_EXT \
                                 and self.rel_on(chat, "shz") and await self._has_audio(media0):
+                            await stage(f"🎧 Сайт не вказав музику — слухаю все відео: {esc(item.title[:60])}…", force=True)
                             detected = await self._shazam(media0)  # 🎧 сайт не вказав — шукаємо музику в самому звуці (і змішану з голосом)
                             if detected:
                                 job.__dict__.update(song=(detected[0], detected[1], True),
