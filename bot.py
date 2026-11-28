@@ -12179,7 +12179,7 @@ if TELEGRAM_TOKEN:
             except Exception:  # noqa: BLE001
                 log.exception("upload scan")
 
-    tg_app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.PHOTO | filters.VIDEO | filters.VIDEO_NOTE | filters.AUDIO
+    tg_app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.FORWARDED & (filters.PHOTO | filters.VIDEO | filters.VIDEO_NOTE | filters.AUDIO
                                                                   | filters.VOICE | filters.ANIMATION | filters.Document.ALL),
                                       on_upload_scan), group=-7)
     tg_app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE, on_plugin_private), group=-4)
