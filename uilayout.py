@@ -437,6 +437,7 @@ class Layout:
             else:
                 sub.append(data)
                 del sub[:-10]
+            self._save_hist(chat)  # підекрани й поточний екран теж переживають перезапуск бота
 
     def _h(self, chat):
         scope = SCOPE.get()
@@ -444,18 +445,34 @@ class Layout:
             key = (chat, scope)
             if key not in self.hist:
                 # нове повідомлення з кнопками: продовжуємо історію того повідомлення, з якого прийшли (а не застарілу загальну)
+                self._h_general_loaded(chat)  # після перезапуску — спершу збережена загальна історія
                 base = self.hist.get(chat) or [[], -1]
                 base = [list(base[0]), base[1]]
                 self.hist[key] = [base[0][:base[1] + 1], base[1]] if base[1] >= 0 else [[], -1]
+                gkey = (chat, "")
+                self._sub.setdefault(key, list(self._sub.get(gkey) or []))
+                if gkey in self._shown:
+                    self._shown.setdefault(key, self._shown[gkey])
                 scoped = [k for k in self.hist if isinstance(k, tuple)]
                 for old in scoped[:-SCOPED_MAX]:
                     self.hist.pop(old, None)
             return self.hist[key]
-        if chat not in self.hist:
-            saved = (self.get_prefs(chat) or {}).get("nav_hist")
-            ok = isinstance(saved, list) and len(saved) == 2 and isinstance(saved[0], list)
-            self.hist[chat] = [list(saved[0]), int(saved[1])] if ok else [[], -1]
+        self._h_general_loaded(chat)
         return self.hist[chat]
+
+    def _h_general_loaded(self, chat):
+        """Загальна історія з налаштувань (після перезапуску) — разом із підекранами й поточним екраном."""
+        if chat in self.hist:
+            return
+        prefs = self.get_prefs(chat) or {}
+        saved = prefs.get("nav_hist")
+        ok = isinstance(saved, list) and len(saved) == 2 and isinstance(saved[0], list)
+        self.hist[chat] = [list(saved[0]), int(saved[1])] if ok else [[], -1]
+        gkey = (chat, "")
+        if isinstance(prefs.get("nav_sub"), list):
+            self._sub.setdefault(gkey, [str(x) for x in prefs["nav_sub"]][-10:])
+        if isinstance(prefs.get("nav_shown"), str) and prefs["nav_shown"]:
+            self._shown.setdefault(gkey, prefs["nav_shown"])
 
     def _save_hist(self, chat):
         scope = SCOPE.get()
@@ -465,6 +482,9 @@ class Layout:
             h = self.hist.get((chat, scope))
             if h:
                 self.hist[chat] = [list(h[0]), h[1]]
+            self._sub[(chat, "")] = list(self._sub.get((chat, scope)) or [])
+            if (chat, scope) in self._shown:
+                self._shown[(chat, "")] = self._shown[(chat, scope)]
             tok = SCOPE.set("")
             try:
                 self._save_hist(chat)
@@ -474,6 +494,8 @@ class Layout:
         try:
             stack, pos = self._h(chat)
             self.set_pref(chat, "nav_hist", [stack[-HISTORY_MAX:], min(pos, len(stack[-HISTORY_MAX:]) - 1)])
+            self.set_pref(chat, "nav_sub", list(self._sub.get((chat, "")) or [])[-10:])
+            self.set_pref(chat, "nav_shown", self._shown.get((chat, "")) or "")
         except Exception:  # noqa: BLE001
             pass
 
