@@ -1965,6 +1965,7 @@ class Plugin(Base):
         if all(it.engine == "text" for it in job.items):  # лише текст допису — нічого налаштовувати
             await self.download(chat, job, list(range(1, len(job.items) + 1)), status=status)
             return
+        await self.post_total(job)  # 💾 розмір усіх файлів допису разом
         text, rows = self.options_screen(chat, job)  # ⚙️ усі налаштування — ДО завантаження, компактно
         self.live[chat] = (text, rows)
         await self._status(chat, status, text, rows)
@@ -2056,6 +2057,46 @@ class Plugin(Base):
         imgs = [k for k in vis if M.is_image_item(job.items[k - 1])]
         return vis, aud, imgs
 
+    async def post_total(self, job):
+        """💾 Розмір усіх файлів допису однією цифрою (до завантаження): з даних сайту, а для прямих файлів — з заголовків.
+        -> (байтів, скільки файлів з відомим розміром, усього файлів); кешується в job."""
+        if "total" in job.__dict__:
+            return job.__dict__["total"]
+        vis, aud, _ = self.parts(job)
+        nums = vis + aud
+        h = job.options.height or 0
+
+        async def one(k):
+            it = job.items[k - 1]
+            info = it.info or {}
+            if info.get("formats"):
+                out, a_size = self.sizes(info)
+                if M.is_audio_item(it):
+                    return a_size
+                fit = [s for hh, s in out if s and (not h or hh <= h)] or [s for _, s in out if s]
+                return fit[-1] if fit else None
+            if info.get("filesize") or info.get("filesize_approx"):
+                return info.get("filesize") or info.get("filesize_approx")
+            if it.engine == "direct" and str(it.url).startswith("http"):
+                return await M.head_size(str(it.url))
+            return None
+
+        try:
+            got = await asyncio.wait_for(asyncio.gather(*(one(k) for k in nums[:40])), 15)
+        except Exception:  # noqa: BLE001 — розмір не завадить завантаженню
+            got = []
+        known = [g for g in got if g]
+        job.__dict__["total"] = (sum(known), len(known), len(nums))
+        return job.__dict__["total"]
+
+    def total_line(self, job):
+        tot, known, n = job.__dict__.get("total") or (0, 0, 0)
+        if not tot:
+            return ""
+        many = f" · {n} файл(ів)" if n > 1 else ""
+        part = f" (відомо для {known} з {n})" if known < n else ""
+        return f"💾 Разом: <b>{'~' if known < n else ''}{mb(tot)}</b>{many}{part}"
+
     def options_screen(self, chat, job):
         """⚙️ Що буде завантажено й як — ДО завантаження; лише потрібні перемикачі."""
         vis, aud, imgs = self.parts(job)
@@ -2065,20 +2106,27 @@ class Plugin(Base):
         first = job.items[(vis or [1])[0] - 1]
         what = " · ".join(t for t in [f"🖼 {len(imgs)} фото" if imgs else "", f"🎬 {vids} відео" if vids else "",
                                       "🎵 звукова доріжка" if aud or (job.__dict__.get("song_info") or {}).get("url") else ""] if t)
-        lines = [f"📦 <b>{esc(first.title[:150])}</b>", f"📍 {esc(job.__dict__.get('src') or M.site_name(job.url))}" + (f" · {what}" if what else ""), ""]
+        lines = [f"📦 <b>{esc(first.title[:150])}</b>", f"📍 {esc(job.__dict__.get('src') or M.site_name(job.url))}" + (f" · {what}" if what else "")]
+        if self.total_line(job):
+            lines.append(self.total_line(job))
+        lines.append("")
+        sound_url_pre = (job.__dict__.get("song_info") or {}).get("url") or aud
         if song and song[2]:
             lines.append(f"🎵 Накладена музика: <b>{esc(self.song_name(song)[:120])}</b>")
         elif song:
             lines.append(f"🎙 Звук: оригінальний звук автора ({esc(song[1][:80])})")
         elif vids:
             lines.append("🎵 Яку музику накладено, сайт не вказав — «🔎 Розпізнати» дізнається за звуком.")
+        elif imgs and sound_url_pre:
+            lines.append("🎵 До фото прикріплено звук — «🎵 Звук до фото окремо» скачає його окремим файлом.")
         elif imgs:
             lines.append("🎵 Музики до цих фото сайт не віддав.")
         on = lambda k: "☑️" if k in x else "▫️"  # noqa: E731
         rows = [[(f"⬇️ Завантажити{' усе' if len(vis) > 1 else ''}" + (" без звуку" if "mute" in x else ""), self.cb("og", tok))]]
         tog = []
-        if vids or aud or (song and song[2]):
-            tog.append((f"{on('mus')} 🎵 Музика окремо", self.cb("ox", tok, "mus")))
+        sound_url = (job.__dict__.get("song_info") or {}).get("url")
+        if vids or aud or (song and song[2]) or sound_url:  # і звук, прикріплений до фото
+            tog.append((f"{on('mus')} 🎵 {'Звук до фото' if imgs and not vids else 'Музика'} окремо", self.cb("ox", tok, "mus")))
         if song and song[2]:
             tog.append((f"{on('full')} 🎶 Повна пісня", self.cb("ox", tok, "full")))
         if tog:
