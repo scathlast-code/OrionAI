@@ -556,9 +556,8 @@ class Plugin(Base):
         pl = self.pend_list(chat)
         if pl:
             rows.insert(0, [(f"📌 Збережені посилання · {len(pl)}", self.cb("pend"))])
-        view = self.pref(chat, "view", "mosaic")
         rows += [[(f"⭐ Якість за замовчуванням: {self.dq_label(chat)}", self.cb("dq"))],
-                 [("🖼 Кілька файлів: " + ("мозаїка" if view != "carousel" else "гортання ◀️▶️"), self.cb("view"))],
+
                  [("🗂 Архів скачаного: автори · теми · місця", self.cb("arc"))],
                  [("🍪 Входи на сайти (cookies)", self.cb("ck")), ("🛠 Інструменти", self.cb("tools"))],
                  [("🩺 Перевірити, які сайти працюють", self.cb("chk"))]]
@@ -666,11 +665,6 @@ class Plugin(Base):
         if a == "unarm":
             self.armed.pop(chat, None)
             return "Скасовано", self.home(chat)
-        if a == "view":  # 🖼 мозаїка (альбом, усе видно одразу) ⇄ 🎠 гортання (одне повідомлення з кнопками)
-            new = "carousel" if self.pref(chat, "view", "mosaic") != "carousel" else "mosaic"
-            self.set_pref(chat, "view", new)
-            return ("🖼 Мозаїка: усі файли одним дописом, дії — посиланнями в підписі" if new == "mosaic" else
-                    "🎠 Гортання: одне повідомлення з кнопками, файли ◀️ 1/N ▶️"), self.home(chat)
         if a == "dq":
             return None, self.dq_screen(chat)
         if a == "dqs" and x in dict(self.DQ):
@@ -2582,15 +2576,9 @@ class Plugin(Base):
                 msgs = None
                 size_all = sum(a["out"].stat().st_size for a in album)  # розмір — ДО keep(): він переносить файли
                 car = None
-                try:
-                    if self.pref(chat, "view", "mosaic") == "carousel":  # 🎠 гортання ◀️ 1/N ▶️ — одне повідомлення з кнопками
-                        car = await self.send_carousel(chat, album, stage)
-                        msgs = [car] if car else None
-                    else:  # 🖼 мозаїка: усі файли одним дописом (альбом до 10); дії — посиланнями в підписі
-                        raise LookupError("mosaic")
-                except Exception as exc:  # noqa: BLE001
-                    if not isinstance(exc, LookupError):
-                        log.exception("carousel failed — надсилаю альбомом")
+                try:  # 🖼 мозаїка: усі файли допису одним дописом (альбом до 10); дії — посиланнями в підписі
+                    raise LookupError("mosaic")
+                except LookupError:
                     try:
                         msgs = await self.send_album(chat, album)
                     except Exception:  # noqa: BLE001 — альбом не пройшов: ті самі файли окремо, щоб нічого не загубити
@@ -2775,14 +2763,16 @@ class Plugin(Base):
                 line = "\n" + " · ".join(f'<a href="{esc(u)}">{esc(t)}</a>' for t, u in links if u)
                 cap = last[6] or ""
                 vis = len(re.sub(r"<[^>]+>|&\w+;", "", cap)) + len(re.sub(r"<[^>]+>", "", line))
-                if vis <= 1024 and self.mh_act(""):  # і посилання в підписі альбому…
+                placed = False
+                if vis <= 1024 and self.mh_act(""):  # дії — посиланнями в підписі самого допису: одне повідомлення, без окремих кнопок
                     try:
                         await bot.edit_message_caption(chat_id=chat, message_id=last[3], caption=cap + line, parse_mode="HTML")
+                        placed = True
                     except Exception:  # noqa: BLE001
                         log.info("підпис альбому не змінено", exc_info=True)
-                # …і справжні кнопки одразу під альбомом (власник: «і те, і інше»)
-                await bot.send_message(chat, f"⬆️ Публікація: {last[4]} файл(ів) · {mb(last[5])}", reply_markup=InlineKeyboardMarkup(kb),
-                                       disable_notification=True)
+                if not placed:  # підпис задовгий чи не змінився — лише тоді кнопки окремим повідомленням, щоб дії не загубились
+                    await bot.send_message(chat, f"⬆️ Публікація: {last[4]} файл(ів) · {mb(last[5])}", reply_markup=InlineKeyboardMarkup(kb),
+                                           disable_notification=True)
             else:
                 await bot.edit_message_reply_markup(chat_id=chat, message_id=last[0], reply_markup=InlineKeyboardMarkup(kb))
             return True
