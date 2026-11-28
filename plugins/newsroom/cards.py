@@ -12,6 +12,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 from plugins import esc
+from . import stock
 
 log = logging.getLogger("orion.newsroom.cards")
 
@@ -29,7 +30,7 @@ THEMES = {"dark": ("🌑 Темна", "фото з темно-синім зат�
 POS = {"bottom": "унизу", "top": "угорі", "center": "по центру"}
 SHADE = {"light": ("легке", 140), "mid": ("середнє", 195), "strong": ("сильне", 235)}
 DEFAULTS = {"bg": "mist", "upper": False, "sizes": ["sq", "ig"], "brand": "", "label": False, "logo": True,
-            "theme": "dark", "pos": "bottom", "shade": "mid", "plabel": True, "pbrand": "greenpost.ua", "pstyle": "tpl"}
+            "theme": "dark", "pos": "bottom", "shade": "mid", "plabel": True, "pbrand": "greenpost.ua", "pstyle": "tpl", "tone": "brand", "stock": True}
 BRAND = Path(__file__).with_name("brand")
 FONT_DIRS = ["/usr/share/fonts/truetype/dejavu", "/usr/share/fonts/dejavu"]
 
@@ -48,6 +49,35 @@ def font(size, bold=True):
 def brand_logo(theme):
     p = BRAND / ("logo_color.png" if theme == "light" else "logo_white.png")
     return p.read_bytes() if p.exists() else None
+
+
+TONES = {"brand": "фірмові кольори (темно-синій · зелений · світлий)", "soft": "м'які фірмові (оригінал + зелений відтінок)",
+         "orig": "оригінальні кольори", "bw": "чорно-біле"}
+
+
+def tone(img, mode):
+    if mode in (True, "brand"):
+        return brand_tone(img)
+    if mode == "soft":
+        return Image.blend(img.convert("RGB"), brand_tone(img), 0.55)
+    if mode == "bw":
+        return ImageOps.autocontrast(img.convert("L"), cutoff=1).convert("RGB")
+    return img
+
+
+def brand_tone(img):
+    """Фото → лише фірмові кольори: тіні — темно-синій, середні — темно-зелений, світлі — світло-сіро-зелений."""
+    g = ImageOps.autocontrast(img.convert("L"), cutoff=1)
+    stops = [(0, NAVY), (150, GREEN), (255, MIST)]
+    lut = []
+    for ch in range(3):
+        for v in range(256):
+            for (a, ca), (b, cb) in zip(stops, stops[1:]):
+                if a <= v <= b:
+                    t = (v - a) / max(1, b - a)
+                    lut.append(int(ca[ch] + (cb[ch] - ca[ch]) * t))
+                    break
+    return Image.merge("RGB", (g, g, g)).point(lut)
 
 
 def wrap(draw, text, fnt, width):
@@ -117,6 +147,7 @@ def render_template(headline, cfg, key="sq", label="", logo=None, photo=None):
         try:
             ph = ImageOps.exif_transpose(Image.open(io.BytesIO(photo))).convert("RGB")
             ph = ImageOps.fit(ph, (W - 2 * m, ph_h), Image.LANCZOS, centering=(0.5, 0.4))
+            ph = tone(ph, cfg.get("tone", "brand"))
             mask = Image.new("L", ph.size, 0)
             ImageDraw.Draw(mask).rounded_rectangle((0, 0, ph.width, ph.height), int(W * 0.025), fill=255)
             img.paste(ph, (m, m), mask)
@@ -148,9 +179,15 @@ def render_template(headline, cfg, key="sq", label="", logo=None, photo=None):
         draw.rounded_rectangle((x0, y, x0 + tw, y + int(W * 0.05)), int(W * 0.025), fill=(LEAF if bg != "leaf" else WHITE))
         draw.text((x0 + 22, y + int(W * 0.005)), t, font=lf, fill=NAVY)
         y += lab_h
+    rec = cfg.get("_out")
+    if rec is not None:
+        rec.update(size=size, ink=ink, lines=[])
     for ln in lines:
         w = draw.textlength(ln, font=fnt)
-        draw.text(((W - w) / 2, y), ln, font=fnt, fill=ink)
+        if rec is not None:
+            rec["lines"].append(((W - w) / 2, y, ln))
+        if not cfg.get("_notext"):
+            draw.text(((W - w) / 2, y), ln, font=fnt, fill=ink)
         y += lh
     out = io.BytesIO()
     img.save(out, "JPEG", quality=93, optimize=True)
@@ -169,6 +206,7 @@ def render_photo(photo, headline, cfg, key="sq", label="", logo=None):
     if photo:
         img = ImageOps.exif_transpose(Image.open(io.BytesIO(photo))).convert("RGB")
         img = ImageOps.fit(img, (W, H), Image.LANCZOS, centering=(0.5, 0.4))
+        img = tone(img, cfg.get("tone", "brand"))
     else:
         img = Image.new("RGB", (W, H), bg)
     text = headline.upper() if cfg.get("upper") else headline
@@ -220,8 +258,12 @@ def render_photo(photo, headline, cfg, key="sq", label="", logo=None):
         ly = y0 - lab_h
         draw.rounded_rectangle((pad, ly, pad + lw, ly + 54), 27, fill=LEAF)
         draw.text((pad + 22, ly + 6), t, font=lf, fill=NAVY)
+    rec = cfg.get("_out")
+    if rec is not None:
+        rec.update(size=size, ink=ink, lines=[(pad, y0 + i * lh, ln) for i, ln in enumerate(lines)])
     for i, ln in enumerate(lines):
-        draw.text((pad, y0 + i * lh), ln, font=fnt, fill=ink)
+        if not cfg.get("_notext"):
+            draw.text((pad, y0 + i * lh), ln, font=fnt, fill=ink)
     brand = (cfg.get("brand") or "").strip()
     if brand:
         bf = font(36, bold=False)
@@ -242,6 +284,55 @@ def render_photo(photo, headline, cfg, key="sq", label="", logo=None):
     out = io.BytesIO()
     img.save(out, "JPEG", quality=92, optimize=True)
     return out.getvalue()
+
+
+def card_pdf(photo, headline, cfg, key="sq", label="", logo=None):
+    """PDF для Canva: тло з фото й лого — зображенням, заголовок — справжнім текстом (шрифт Lora), тож у Canva його
+    можна редагувати, а фото, кольори й розташування — міняти як завгодно."""
+    import fitz  # PyMuPDF
+    W, H = SIZES.get(key, SIZES["sq"])[1]
+    rec = {}
+    render(photo, headline, {**cfg, "_out": rec}, key, label, logo)  # де й яким кеглем стоїть заголовок
+    base = render(photo, headline, {**cfg, "_notext": True}, key, label, logo)  # те саме без заголовка
+    doc = fitz.open()
+    page = doc.new_page(width=W, height=H)
+    page.insert_image(fitz.Rect(0, 0, W, H), stream=base)
+    fpath = BRAND / "Lora-Bold.ttf"
+    page.insert_font(fontname="lora", fontfile=str(fpath))
+    asc = font(rec.get("size", 60)).getmetrics()[0]
+    color = tuple(c / 255 for c in rec.get("ink", NAVY))
+    for x, y, ln in rec.get("lines", []):
+        page.insert_text((x, y + asc), ln, fontname="lora", fontsize=rec["size"], color=color)
+    out = doc.tobytes(garbage=3, deflate=True)
+    doc.close()
+    return out
+
+
+async def canva_import(pdf, title):
+    """Імпорт PDF у Canva вашого акаунта -> посилання на редагування (живе 30 днів, відкривається лише вам)."""
+    import asyncio
+    import base64
+    import json as _json
+    import canva  # модуль бота: вхід у Canva (OAuth)
+    import httpx
+    tok = await canva.access_token()
+    meta = {"title_base64": base64.b64encode(title[:50].encode()).decode(), "mime_type": "application/pdf"}
+    async with httpx.AsyncClient(timeout=60) as cl:
+        r = await cl.post("https://api.canva.com/rest/v1/imports", content=pdf,
+                          headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/octet-stream",
+                                   "Import-Metadata": _json.dumps(meta)})
+        if r.status_code >= 400:
+            raise RuntimeError(f"Canva: {r.status_code} {r.text[:200]}")
+        job = r.json()["job"]
+        for _ in range(40):
+            if job.get("status") == "success":
+                d = (job.get("result") or {}).get("designs") or [{}]
+                return d[0].get("urls", {}).get("edit_url") or d[0].get("url")
+            if job.get("status") == "failed":
+                raise RuntimeError("Canva: " + ((job.get("error") or {}).get("message") or "імпорт не вдався"))
+            await asyncio.sleep(2)
+            job = (await cl.get(f"https://api.canva.com/rest/v1/imports/{job['id']}", headers={"Authorization": f"Bearer {tok}"})).json()["job"]
+    raise RuntimeError("Canva довго не відповідає — спробуйте ще раз")
 
 
 OG_RE = re.compile(r"<meta[^>]+(?:property|name)=[\"'](?:og:image|twitter:image)(?::src)?[\"'][^>]*>", re.I)
@@ -278,20 +369,22 @@ class CardsUI:
         if not d:
             return "Новину не знайдено.", [[("« Новинарня", self.cb())]]
         c = self.cd_cfg()
-        has = self.cd_photo_path(did).exists()
+        own = self.store.get(f"cdown:{did}") and self.cd_photo_path(did).exists()
         nophoto = self.store.get(f"cdnoph:{did}")
-        ph = ("вибране ✅" if has else "без фото (лише текст)" if nophoto else
-              "візьму з джерела новини" if d.get("sources") else "немає — надішліть своє, інакше буде лише текст")
+        ph = ("ваше (закріплене) ✅" if own else "без фото (лише текст)" if nophoto else
+              "щоразу нова під тему новини" if c["stock"] else "з джерела новини")
         text = (f"🖼 <b>Картки до новини #{did}</b>\n<b>{esc(d['headline'])}</b>\n\n"
-                "Шаблон GreenPost: фото вгорі, заголовок шрифтом Lora, логотип унизу, фірмове тло.\n\n"
-                f"📷 Фото: {ph}\n🎨 Тло: {BG[c['bg']][0]} {BG[c['bg']][1]}\n"
+                f"📷 Картинка: {ph}\n🎨 Стиль картинки: {TONES.get(c['tone'] if c['tone'] in TONES else 'brand')}\n"
                 + "\n".join(f"{'✅' if k in c['sizes'] else '▫️'} {SIZES[k][0]} — {SIZES[k][2]}" for k in SIZES)
-                + "\n\nНатисніть колір тла — картки прийдуть одразу.")
+                + "\n\n<b>Шаблон GreenPost</b> (фото в рамці, заголовок під ним) — виберіть колір тла:\n"
+                + "<b>На все фото</b> (заголовок поверх) — виберіть тему:\nКартки прийдуть одразу; «🔀 Інша картинка» — нова під ту саму тему.")
         colors = [((("● " if k == c["bg"] else "") + v[0]), self.cb("cdn", did, k)) for k, v in BG.items()]
-        rows = [colors, [("🖼 Зробити картки", self.cb("cdn", did))],
+        overs = [(v[0], self.cb("cdn", did, "o" + k)) for k, v in THEMES.items()]
+        rows = [colors, overs,
                 [("📷 Своє фото", self.cb("cdp", did)), ("🌐 Фото з джерела", self.cb("cdu", did))],
-                [("🚫 Без фото", self.cb("cdx", did))],
-                [("⚙️ Вигляд карток", self.cb("cds", did)), ("« Новина", self.cb("d", did))]]
+                [("🔀 Під тему (знову щоразу нова)", self.cb("cda", did)), ("🚫 Без фото", self.cb("cdx", did))],
+                [("🎨 Стиль картинки", self.cb("cdtone", did)), ("⚙️ Вигляд карток", self.cb("cds", did))],
+                [("« Новина", self.cb("d", did))]]
         return text, rows
 
     def cd_photo_path(self, did):
@@ -305,7 +398,9 @@ class CardsUI:
                 f"🔠 Великі літери: {'так' if c['upper'] else 'ні'}\n🏷 Плашка рубрики над заголовком: {'так' if c['label'] else 'ні'}\n"
                 f"✒️ Рядок над логотипом: {esc(c['brand'].strip()) or 'немає'}\n"
                 f"🖼 Логотип: {'свій' if self.cd_logo() else 'GreenPost' if c['logo'] else 'без логотипа'}\n"
-                "🔤 Шрифт: Lora (жирний)\n\n"
+                "🔤 Шрифт: Lora (жирний)\n"
+                f"🎨 Стиль картинки: {TONES.get(c['tone'] if c['tone'] in TONES else 'brand')}\n"
+                f"🔎 Картинка під тему (щоразу інша, з вільних бібліотек Openverse і Wikimedia Commons): {'так' if c['stock'] else 'ні'}\n\n"
                 f"<b>Фото на все тло</b> (якщо вибрано замість рамки): тема {THEMES[c['theme']][0]} — {THEMES[c['theme']][1]}; заголовок {POS[c['pos']]}; "
                 f"затемнення {SHADE[c['shade']][0]}\n\n"
                 + "\n".join(f"{'✅' if k in c['sizes'] else '▫️'} {SIZES[k][0]} — {SIZES[k][2]}" for k in SIZES))
@@ -314,6 +409,8 @@ class CardsUI:
                 [((("✅ " if k in c["sizes"] else "▫️ ") + SIZES[k][0]), self.cb("cdz", k, did)) for k in SIZES],
                 [("✒️ Рядок над логотипом", self.cb("cdb", did)), ("🌿 Лого GreenPost: " + ("так" if c["logo"] else "ні"), self.cb("cdc", "logo", did))],
                 [("📷 Фото: " + ("у рамці вгорі" if c["pstyle"] != "over" else "на все тло"), self.cb("cdc", "pstyle", did))],
+                [("🎨 Стиль картинки: " + TONES.get(c["tone"] if c["tone"] in TONES else "brand").split(" (")[0], self.cb("cdc", "tone", did))],
+                [("🔎 Картинка під тему: " + ("так" if c["stock"] else "ні"), self.cb("cdc", "stock", did))],
                 [("📷 Тема на фото", self.cb("cdc", "theme", did)), ("📐 Де заголовок", self.cb("cdc", "pos", did)),
                  ("🌑 Затемнення", self.cb("cdc", "shade", did))],
                 [("🖼 Своє лого", self.cb("cdl", did))] + ([("🗑 Прибрати своє лого", self.cb("cdlx", did))] if self.cd_logo() else []),
@@ -324,6 +421,9 @@ class CardsUI:
         c = self.cd_cfg()
         if bg in BG:
             c["bg"] = bg
+            c["pstyle"] = "tpl"
+        elif bg and bg[:1] == "o" and bg[1:] in THEMES:  # «на все фото» з вибраною темою
+            c["pstyle"], c["theme"] = "over", bg[1:]
         return [(k, render(photo, d["headline"], c, k, self._cd_label(d), self.cd_logo())) for k in SIZES if k in c["sizes"]]
 
     @staticmethod
@@ -336,19 +436,122 @@ class CardsUI:
             return
         from telegram import InputFile, InputMediaPhoto
         imgs = self._cd_images(d, bg, photo)
-        self.store.set(f"cdbg:{did}", bg or self.cd_cfg()["bg"])
+        self.store.set(f"cdbg:{did}", bg or self.store.get(f"cdbg:{did}") or self.cd_cfg()["bg"])
         self.store.set(f"cdph:{did}", bool(photo))
-        cap = f"🖼 Картки до #{did}: " + ", ".join(f"{SIZES[k][0]} ({SIZES[k][2]})" for k, _ in imgs)
+        cred = (self.store.get(f"cdcred:{did}") or "") if photo else ""
+        cap = (f"🖼 Картки до #{did}: " + ", ".join(f"{SIZES[k][0]} ({SIZES[k][2]})" for k, _ in imgs) + (f"\n📸 {cred}" if cred else ""))[:1000]
         media = [InputMediaPhoto(InputFile(io.BytesIO(b), filename=self._cd_name(did, k)), caption=cap if i == 0 else None)
                  for i, (k, b) in enumerate(imgs)]
         if len(media) == 1:
             await bot.send_photo(chat, media[0].media, caption=cap)
         else:
             await bot.send_media_group(chat, media)
-        await self.host.notify(chat, "🖼 Готово. Telegram трохи стискає фото — для публікації візьміть файли без стиснення.",
-                               [[("📎 Файлами без стиснення", self.cb("cdf", did))],
+        cred_page = (self.store.get(f"cdcredurl:{did}") or "") if photo else ""
+        await self.host.notify(chat, "🖼 Готово. Telegram трохи стискає фото — для публікації візьміть файли без стиснення."
+                               + (f"\n📸 {esc(cred)}" + (f" — <a href=\"{esc(cred_page)}\">сторінка фото</a>" if cred_page else "")
+                                  + "\nПри публікації вкажіть автора й ліцензію (вимога вільних ліцензій)." if cred and cred_page else ""),
+                               [[("🔀 Інша картинка", self.cb("cdn", did)), ("📎 Файлами без стиснення", self.cb("cdf", did))],
+                                [("🖌 Відкрити в Canva", self.cb("cdv", did))],
                                 [("🎨 Інше тло", self.cb("cd", did)), ("⚙️ Вигляд карток", self.cb("cds", did))],
                                 [("« Новина", self.cb("d", did))]])
+
+    async def cd_stock_photo(self, did):
+        """Нова картинка під тему новини (щоразу інша) -> (байти, опис) або (None, None)."""
+        d = self.store.draft(did)
+        qs = self.store.get(f"cdq:{did}")
+        if not qs:
+            try:
+                data, _m = await self.engine._json(stock.QUERY_PROMPT + d["headline"] + "\n\n" + d["body"][:600],
+                                                   "Ти — фоторедактор новинного видання.", "🖼 Картка: пошук фото")
+            except Exception:  # noqa: BLE001
+                data = {}
+            qs = stock.parse_queries(data, d["headline"])
+            self.store.set(f"cdq:{did}", qs)
+        used = set(self.store.get(f"cdused:{did}") or [])
+        recent = set(self.store.get("cdrecent") or [])
+        cands = self.store.get(f"cdcand:{did}") or []
+        if not [c for c in cands if c["id"] not in used]:
+            cands = []
+            for q in qs:
+                cands += await stock.search(q)
+                if len([c for c in cands if c["id"] not in used and c["id"] not in recent]) >= 6:
+                    break
+            self.store.set(f"cdcand:{did}", cands[:60])
+        fresh = [c for c in cands if c["id"] not in used and c["id"] not in recent] or [c for c in cands if c["id"] not in used]
+        for it in fresh[:5]:
+            used.add(it["id"])
+            try:
+                b = await stock.fetch(it["url"])
+            except Exception:  # noqa: BLE001
+                b = None
+            if b:
+                self.store.set(f"cdused:{did}", list(used)[-200:])
+                self.store.set("cdrecent", (list(recent) + [it["id"]])[-300:])
+                return b, it
+        self.store.set(f"cdused:{did}", list(used)[-200:])
+        return None, None
+
+    async def cd_make(self, chat, did, bg=None):
+        c, p = self.cd_cfg(), self.cd_photo_path(did)
+        photo = None
+        if self.store.get(f"cdnoph:{did}"):
+            photo = None
+        elif self.store.get(f"cdown:{did}") and p.exists():
+            photo = p.read_bytes()
+        else:
+            if c.get("stock", True):
+                photo, it = await self.cd_stock_photo(did)
+                if photo:
+                    self.store.set(f"cdcred:{did}", stock.credit(it))
+                    self.store.set(f"cdcredurl:{did}", it.get("page") or "")
+            if photo is None:
+                photo = await self.cd_source_photo(did)
+                if photo:
+                    self.store.set(f"cdcred:{did}", "Фото: з джерела новини")
+                    self.store.set(f"cdcredurl:{did}", "")
+            if photo:
+                p.write_bytes(photo)
+        await self.cd_send(chat, did, bg, photo)
+
+    async def cd_canva(self, chat, did):
+        """Ті самі картки — у Canva на повне редагування (кожен розмір окремим дизайном)."""
+        try:
+            import canva
+            ok = canva.connected()
+        except Exception:  # noqa: BLE001
+            ok = False
+        if not ok:
+            return await self.host.notify(chat, "🖌 <b>Canva в боті ще не підключена.</b>\n\nУвійдіть один раз: Меню → 🎨 Створити → 🖌 Canva → "
+                                          "«🔑 Увійти в Canva». Після цього кнопка «🖌 Відкрити в Canva» одразу створюватиме дизайни.",
+                                          [[("🖌 Canva", "m:canva")], [("« Картки", self.cb("cd", did))]])
+        d = self.store.draft(did)
+        c = self.cd_cfg()
+        bg = self.store.get(f"cdbg:{did}")
+        if bg in BG:
+            c["bg"], c["pstyle"] = bg, "tpl"
+        elif bg and bg[:1] == "o" and bg[1:] in THEMES:
+            c["pstyle"], c["theme"] = "over", bg[1:]
+        p = self.cd_photo_path(did)
+        photo = p.read_bytes() if self.store.get(f"cdph:{did}") and p.exists() else None
+        links = []
+        for k in [k for k in SIZES if k in c["sizes"]]:
+            try:
+                pdf = card_pdf(photo, d["headline"], c, k, self._cd_label(d), self.cd_logo())
+                url = await canva_import(pdf, f"GreenPost #{did} {SIZES[k][0]}")
+                links.append((k, url))
+            except Exception as exc:  # noqa: BLE001
+                log.info("canva import failed", exc_info=True)
+                links.append((k, None, str(exc)[:150]))
+        lines = ["🖌 <b>Картки в Canva</b> — заголовок там справжнім текстом, усе можна міняти.", ""]
+        rows = []
+        for it in links:
+            if it[1]:
+                lines.append(f"✅ {SIZES[it[0]][0]} — {SIZES[it[0]][2]}")
+                rows.append([(f"🖌 {SIZES[it[0]][0]} у Canva", "url:" + it[1])])
+            else:
+                lines.append(f"⚠️ {SIZES[it[0]][0]}: {esc(it[2])}")
+        lines.append("\nПосилання відкриваються лише у вашому акаунті Canva і діють 30 днів (дизайн лишається у ваших дизайнах).")
+        await self.host.notify(chat, "\n".join(lines), rows + [[("« Картки", self.cb("cd", did))]])
 
     async def cd_files(self, chat, did):
         bot, d = self.host.bot(), self.store.draft(did)
@@ -363,22 +566,27 @@ class CardsUI:
     async def cd_route(self, chat, a, x, y, z=None):
         if a == "cd":
             return None, self.cd_screen(int(x))
-        if a == "cdn":  # фото: вибране → з джерела (якщо не вимкнено) → лише текст
+        if a == "cdn":  # фото: своє/закріплене → нова картинка під тему → з джерела → лише текст
             did = int(x)
-
-            async def go():
-                p = self.cd_photo_path(did)
-                photo = p.read_bytes() if p.exists() else None
-                if photo is None and not self.store.get(f"cdnoph:{did}"):
-                    photo = await self.cd_source_photo(did)
-                    if photo:
-                        p.write_bytes(photo)
-                await self.cd_send(chat, did, y if y in BG else None, photo)
-            self._bg(go())
-            return "🖼 Малюю…", None
+            ok = y in BG or (y or "")[:1] == "o" and (y or "")[1:] in THEMES
+            self._bg(self.cd_make(chat, did, y if ok else self.store.get(f"cdbg:{did}")))
+            return "🖼 Підбираю картинку й малюю…", None
+        if a == "cdv":
+            self._bg(self.cd_canva(chat, int(x)))
+            return "🖌 Надсилаю в Canva…", None
+        if a == "cda":  # повернутися до автопідбору картинок під тему
+            self.store.set(f"cdown:{x}", None)
+            self.store.set(f"cdnoph:{x}", None)
+            return "🔀 Картинки знову під тему", self.cd_screen(int(x))
+        if a == "cdtone":
+            ks = list(TONES)
+            cur = self.cd_cfg()["tone"]
+            self.cd_save(tone=ks[(ks.index(cur) + 1) % len(ks)] if cur in ks else "soft")
+            return "🎨 " + TONES[self.cd_cfg()["tone"]], self.cd_screen(int(x))
         if a == "cdx":
             self.cd_photo_path(int(x)).unlink(missing_ok=True)
             self.store.set(f"cdnoph:{x}", True)
+            self.store.set(f"cdown:{x}", None)
             self._bg(self.cd_send(chat, int(x), None, None))
             return "🖼 Без фото", None
         if a == "cdp":
@@ -394,6 +602,8 @@ class CardsUI:
                 if photo:
                     self.cd_photo_path(did).write_bytes(photo)
                     self.store.set(f"cdnoph:{did}", None)
+                    self.store.set(f"cdown:{did}", True)
+                    self.store.set(f"cdcred:{did}", "Фото: з джерела новини")
             if not photo:
                 return "Фото не знайдено", self.cd_screen(did)
             self._bg(self.cd_send(chat, did, None, photo))
@@ -421,7 +631,11 @@ class CardsUI:
             elif x in ("theme", "pos", "shade"):
                 cyc = {"theme": list(THEMES), "pos": list(POS), "shade": list(SHADE)}[x]
                 self.cd_save(**{x: cyc[(cyc.index(c[x]) + 1) % len(cyc)] if c[x] in cyc else cyc[0]})
-            elif x in ("upper", "label", "logo"):
+            elif x == "tone":
+                ks = list(TONES)
+                cur = c["tone"] if c["tone"] in ks else "brand"
+                self.cd_save(tone=ks[(ks.index(cur) + 1) % len(ks)])
+            elif x in ("upper", "label", "logo", "stock"):
                 self.cd_save(**{x: not c[x]})
             return None, self.cd_settings(int(did or 0))
         if a == "cdz":
@@ -455,6 +669,8 @@ class CardsUI:
         if kind == "photo":
             self.cd_photo_path(did).write_bytes(data)
             self.store.set(f"cdnoph:{did}", None)
+            self.store.set(f"cdown:{did}", True)
+            self.store.set(f"cdcred:{did}", "")
             await self.cd_send(chat, did, None, data)
             return True
         (self.dir / "card_logo.png").write_bytes(data)
