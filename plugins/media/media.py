@@ -841,10 +841,28 @@ async def story_probe(url, work):
                                                "author_url": f"https://www.instagram.com/{user}/", "_exact": exact,
                                                "_fallback": row.get("videoUrl") or row.get("imageUrl"),
                                                "description": " ".join(row.get("links") or []),
-                                               "location": row.get("locationName") or row.get("location") or ""}))
+                                               "location": row.get("locationName") or row.get("location") or "",
+                                               "_ts": story_epoch(row)}))
     if not items:
         raise JobError(f"У @{user} зараз немає доступних сторіс (минули 24 години або акаунт приватний).")
+    if all(it.info.get("_ts") for it in items):  # 🕓 у тому ж порядку, у якому їх публікували (від ранішої до пізнішої)
+        items.sort(key=lambda it: it.info["_ts"])
     return items
+
+
+def story_epoch(row):
+    """Час публікації сторіс у секундах (для порядку), 0 — якщо сервіс не віддав."""
+    for key in ("takenAt", "taken_at", "timestamp", "created_time", "createdAt", "publish_time", "date"):
+        v = row.get(key)
+        if not v:
+            continue
+        try:
+            if str(v).replace(".", "").isdigit():
+                return float(v)
+            return dt.datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp()
+        except (ValueError, OverflowError, OSError):
+            continue
+    return 0
 
 
 def story_time(row):
