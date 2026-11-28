@@ -176,11 +176,18 @@ class ObservancesUI:
                 for rid, txt in con.execute("SELECT id, text FROM daybook WHERE cat='history'").fetchall():
                     if DB.is_discovery(txt):
                         con.execute("UPDATE OR IGNORE daybook SET cat='discover', key='discover'||substr(key, 8) WHERE id=?", (rid,))
+            fix = not self.store.get("discover_fix_v2")
+            if fix:  # «відкриття конференції в Тегерані» тощо — не наукові відкриття: назад в «Історію»
+                for rid, txt in con.execute("SELECT id, text FROM daybook WHERE cat='discover'").fetchall():
+                    if not DB.is_discovery(txt):
+                        con.execute("UPDATE OR IGNORE daybook SET cat='history', key='history'||substr(key, 9) WHERE id=?", (rid,))
             for t, k, a, b, y, src in SEED:
                 con.execute("INSERT OR IGNORE INTO observances(title,kind,start,finish,yearly,source,url,added,key) VALUES(?,?,?,?,?,?,?,?,?)",
                             (t, k, a, b, y, src, SEED_URLS.get(t, ""), time.time(), normalize(t)[:80] + "|" + a))
                 if SEED_URLS.get(t):
                     con.execute("UPDATE observances SET url=? WHERE title=? AND owner=0 AND (url IS NULL OR url='')", (SEED_URLS[t], t))
+        if fix:
+            self.store.set("discover_fix_v2", 1)
         if split:  # позначку пишемо ПІСЛЯ транзакції: інакше друге з'єднання до тієї ж бази чекає на неї — «database is locked»
             self.store.set("discover_split_v1", 1)
         self._obs_ready = True
